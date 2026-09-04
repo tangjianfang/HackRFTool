@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <vector>
 
+#include "dsp/analyzer.hpp"
 #include "dsp/fft.hpp"
 
 static int failures = 0;
@@ -56,10 +57,52 @@ static void test_fft_parseval() {
           "fft Parseval 定理");
 }
 
+static void test_analyzer_tone_location_and_level() {
+    hackrftool::dsp::SpectrumAnalyzer an(512, 4, 256);
+    check(an.bins() == 256, "分析器输出 256 bin");
+    check(an.snapshot().db.empty(), "无数据时快照为空");
+
+    // 输入 bin 64 复单频，幅度 100（满幅 127）
+    const std::size_t N = 512, k = 64;
+    std::vector<std::int8_t> iq(N * 2);
+    for (std::size_t n = 0; n < N; ++n) {
+        const double ph = 2.0 * hackrftool::dsp::kPi * double(k) * double(n) / double(N);
+        iq[n * 2]     = static_cast<std::int8_t>(100 * std::cos(ph));
+        iq[n * 2 + 1] = static_cast<std::int8_t>(100 * std::sin(ph));
+    }
+    for (int i = 0; i < 4; ++i) an.feed(iq.data(), iq.size());
+    const auto f = an.snapshot();
+    check(!f.db.empty(), "4 块后出帧");
+    std::size_t argmax = 0;
+    for (std::size_t i = 1; i < f.db.size(); ++i)
+        if (f.db[i] > f.db[argmax]) argmax = i;
+    // 期望位置：skip=32，usable=448 → out ≈ (64-32)*256/448 ≈ 18
+    check(argmax > 15 && argmax < 22, "分析器峰位 ≈ 18");
+    // 期望电平：20log10(100/127) ≈ -2.1 dBFS（int8 量化略降）
+    check(f.db[argmax] > -4.0 && f.db[argmax] < -1.0, "分析器峰电平 ≈ -2 dBFS");
+}
+
+static void test_analyzer_peak_hold_and_reset() {
+    hackrftool::dsp::SpectrumAnalyzer an(512, 2, 256);
+    std::vector<std::int8_t> quiet(512 * 2, 0);   // 全零输入：低底噪
+    an.feed(quiet.data(), quiet.size());
+    an.feed(quiet.data(), quiet.size());
+    const auto f1 = an.snapshot();
+    check(!f1.db.empty(), "静默输入也出帧");
+    an.reset_peaks();
+    an.feed(quiet.data(), quiet.size());
+    an.feed(quiet.data(), quiet.size());
+    const auto f2 = an.snapshot();
+    for (std::size_t i = 0; i < f2.db.size(); ++i)
+        check(f2.peak[i] >= f2.db[i] - 0.001, "峰值保持 ≥ 当前值");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
     test_fft_parseval();
+    test_analyzer_tone_location_and_level();
+    test_analyzer_peak_hold_and_reset();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }
