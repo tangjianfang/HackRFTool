@@ -12,6 +12,7 @@
 #include "dsp/fft.hpp"
 #include "dsp/gfsk.hpp"
 #include "dsp/waterfall.hpp"
+#include "radio/iq_recorder.hpp"
 
 static int failures = 0;
 
@@ -310,6 +311,29 @@ static void test_burst_detector() {
     }
 }
 
+static void test_iq_recorder_file() {
+    hackrftool::radio::IqRecorder rec;
+    const std::wstring path = L"test-iq-recorder.cs8";
+    check(rec.start(path), "录制启动");
+    const std::vector<std::int8_t> a(1000, std::int8_t(-86));   // 0xAA
+    const std::vector<std::int8_t> b(1000, std::int8_t(-69));   // 0xBB
+    const std::vector<std::int8_t> c(1000, std::int8_t(-52));   // 0xCC
+    rec.write(a.data(), a.size());
+    rec.write(b.data(), b.size());
+    rec.write(c.data(), c.size());
+    check(rec.stop(), "录制停止");
+    check(rec.bytes_written() == 3000, "落盘字节 3000");
+    if (std::FILE* fp = _wfopen(path.c_str(), L"rb")) {
+        std::vector<unsigned char> buf(3000);
+        check(std::fread(buf.data(), 1, 3000, fp) == 3000, "文件长度");
+        check(buf[0] == 0xAA && buf[1000] == 0xBB && buf[2000] == 0xCC, "块顺序正确");
+        std::fclose(fp);
+    } else {
+        check(false, "文件可读回");
+    }
+    _wremove(path.c_str());
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -325,6 +349,7 @@ int main() {
     test_gfsk_roundtrip();
     test_gfsk_short_input();
     test_burst_detector();
+    test_iq_recorder_file();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }

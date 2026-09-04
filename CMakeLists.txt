@@ -47,10 +47,27 @@ foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)
                 "${MSYS2_UCRT64_BIN}/${dll}" $<TARGET_FILE_DIR:HackRFSmoke>)
 endforeach()
 
+# M3：IQ 采集与离线分析控制台
+add_executable(HackRFCapture tools/iq_capture.cpp src/radio/hackrf.cpp
+                                     src/radio/iq_recorder.cpp)
+target_include_directories(HackRFCapture PRIVATE src ${MSYS2_UCRT64_INCLUDE})
+flux_apply_compiler_options(HackRFCapture)
+foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)
+    add_custom_command(TARGET HackRFCapture POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${MSYS2_UCRT64_BIN}/${dll}" $<TARGET_FILE_DIR:HackRFCapture>)
+endforeach()
+
+add_executable(HackRFAnalyze tools/gfsk_analyze.cpp src/dsp/burst_detector.cpp
+                                       src/dsp/gfsk.cpp)
+target_include_directories(HackRFAnalyze PRIVATE src)
+flux_apply_compiler_options(HackRFAnalyze)
+
 enable_testing()
 add_executable(HackRFToolTest tests/dsp_test.cpp src/dsp/analyzer.cpp
                               src/dsp/burst_detector.cpp src/dsp/channel_monitor.cpp
-                              src/dsp/fft.cpp src/dsp/gfsk.cpp src/dsp/waterfall.cpp)
+                              src/dsp/fft.cpp src/dsp/gfsk.cpp src/dsp/waterfall.cpp
+                              src/radio/iq_recorder.cpp)
 target_include_directories(HackRFToolTest PRIVATE src)
 flux_apply_compiler_options(HackRFToolTest)
 add_test(NAME HackRFToolTest COMMAND HackRFToolTest)
