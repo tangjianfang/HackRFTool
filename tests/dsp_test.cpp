@@ -7,6 +7,7 @@
 
 #include "dsp/analyzer.hpp"
 #include "dsp/fft.hpp"
+#include "dsp/waterfall.hpp"
 
 static int failures = 0;
 
@@ -97,12 +98,37 @@ static void test_analyzer_peak_hold_and_reset() {
         check(f2.peak[i] >= f2.db[i] - 0.001, "峰值保持 ≥ 当前值");
 }
 
+static void test_waterfall_ring() {
+    hackrftool::dsp::WaterfallModel wf(4, 2);
+    const std::vector<float> a = {-10, -20, -30, -40};
+    const std::vector<float> b = {-50, -60, -70, -80};
+    const std::vector<float> c = {-90, -100, -110, -120};
+    check(wf.push(a), "push a 成功");
+    check(wf.push(b), "push b 成功");
+    check(wf.push(c), "push c 成功（环回）");
+    const auto snap = wf.snapshot();
+    check(snap.size() == 8, "瀑布快照 rows*cols");
+    check(snap[0] == -90 && snap[1] == -100, "瀑布行 0 = 最新帧");
+    check(snap[4] == -50 && snap[5] == -60, "瀑布行 1 = 上一帧（a 被挤出）");
+    check(!wf.push({-1.0f, -2.0f}), "长度不符 push 返回 false");
+}
+
+static void test_waterfall_prefill() {
+    hackrftool::dsp::WaterfallModel wf(2, 3);
+    wf.push({-5, -6});
+    const auto snap = wf.snapshot();
+    check(snap[0] == -5 && snap[1] == -6, "瀑布首帧在行 0");
+    check(snap[2] == -130 && snap[4] == -130, "未填充行 = -130");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
     test_fft_parseval();
     test_analyzer_tone_location_and_level();
     test_analyzer_peak_hold_and_reset();
+    test_waterfall_ring();
+    test_waterfall_prefill();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }
