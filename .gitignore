@@ -26,3 +26,6 @@ x86/
 Thumbs.db
 Desktop.ini
 hackrftool-debug.log
+
+# IQ 采集数据（大文件）
+*.cs8
