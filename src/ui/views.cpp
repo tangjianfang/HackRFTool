@@ -48,12 +48,13 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal,
             const float gy = db_to_y(db, y, h);
             r.draw_line(x + 8.0f, gy, x + w - 8.0f, gy, pal.divider, 1.0f, 0.5f);
         }
-        // 频率轴：中心 ±10 MHz
+        // 频率轴：中心 ±10 MHz（标签钳制在绘图区内，防首尾裁切）
         const auto axis = [&](double mhz, const wchar_t* text) {
             const float fx = x + 8.0f + float((mhz - (center_mhz - 10.0)) / 20.0) *
                                            (w - 16.0f);
             r.draw_line(fx, y + 4.0f, fx, y + h - 20.0f, pal.divider, 1.0f, 0.4f);
-            r.draw_text(flux::Rect{fx - 28.0f, y + h - 18.0f, 56.0f, 14.0f}, text,
+            const float lx = std::clamp(fx - 28.0f, x, x + w - 56.0f);
+            r.draw_text(flux::Rect{lx, y + h - 18.0f, 56.0f, 14.0f}, text,
                         10.0f, pal.text_secondary, false, flux::Align::center);
         };
         axis(center_mhz - 10.0, L"-10M");

@@ -37,6 +37,7 @@ struct App {
     flux::State<double> vga;   // 2..62，步进 2
     flux::State<int> rate_index;
     hackrftool::dsp::SpectrumFrame frame;   // 本帧快照（build 前拉取）
+    unsigned build_count = 0;               // 已弃用：诊断期遗留，M2 清理
 };
 
 constexpr double kRatesMsps[4] = {8.0, 10.0, 16.0, 20.0};
@@ -93,6 +94,7 @@ flux::ElementPtr build(App& app) {
         if (f.seq != app.frame.seq) app.waterfall.push(f.db);
         app.frame = f;
     }
+    ++app.build_count;
 
     const flux::Palette& pal = app.host.palette();
     const bool running = app.running.get();
@@ -114,23 +116,34 @@ flux::ElementPtr build(App& app) {
         running ? L"接收中" : L"已停止"));
     header->children.push_back(flux::ui::badge(pal, flux::ui::BadgeKind::info, L"仅接收"));
 
-    // 控制行
+    // 控制行（WinFlux 的 button() 不带默认底色，须显式配色）
     flux::Props controls_p;
     controls_p.direction = flux::Direction::row;
     controls_p.align = flux::Align::center;
     controls_p.gap = 12.0f;
     auto controls = flux::view(std::move(controls_p));
-    controls->children.push_back(
-        flux::button(running ? L"停止" : L"开始", [&app] { toggle_rx(app); }));
+    flux::Props btn_primary;
+    btn_primary.background = pal.accent;
+    btn_primary.hover_background = pal.accent_hover;
+    btn_primary.text_color = pal.on_accent;
+    controls->children.push_back(flux::button(running ? L"停止" : L"开始",
+                                              [&app] { toggle_rx(app); },
+                                              std::move(btn_primary)));
     controls->children.push_back(flux::ui::field(
         pal, L"中心频率 MHz",
         flux::text_input(app.freq_text.get(),
                          [&app](std::wstring v) { app.freq_text.set(v); })));
+    flux::Props btn_secondary;
+    btn_secondary.background = pal.surface;
+    btn_secondary.hover_background = pal.surface_hover;
+    btn_secondary.text_color = pal.text;
+    btn_secondary.border_color = pal.border;
+    btn_secondary.border_width = 1.0f;
     controls->children.push_back(flux::button(L"应用频率", [&app] {
         app.center_mhz.set(
             clamp_center(std::wcstod(app.freq_text.get().c_str(), nullptr)));
         if (app.running.get()) apply_radio(app);
-    }));
+    }, std::move(btn_secondary)));
     controls->children.push_back(flux::ui::field(
         pal, L"LNA " + std::to_wstring(unsigned(app.lna.get())) + L" dB",
         flux::slider(float(app.lna.get()), 8.0f, 40.0f, [&app](float v) {
@@ -151,16 +164,21 @@ flux::ElementPtr build(App& app) {
                                 if (app.running.get()) apply_radio(app);
                             })));
 
-    // 状态栏
+    // 状态栏（追加实时帧号，便于肉眼确认数据在流动）
     flux::Props cap_p;
     cap_p.text_align = flux::Align::start;
-    auto status = flux::ui::caption(pal, app.status.get(), std::move(cap_p));
+    const std::wstring status_text =
+        app.status.get() +
+        (app.frame.db.empty() ? L"" : L"  ·  帧 " + std::to_wstring(app.frame.seq));
+    auto status = flux::ui::caption(pal, status_text, std::move(cap_p));
 
     flux::Props root_p;
     root_p.direction = flux::Direction::column;
     root_p.align = flux::Align::stretch;   // 子元素横向撑满（否则纯 paint 卡片宽度塌 0）
     root_p.gap = 8.0f;
     root_p.flex_grow = 1.0f;
+    root_p.background = pal.background;
+    root_p.padding = flux::EdgeInsets{16.0f, 16.0f, 16.0f, 16.0f};
     auto root = flux::view(std::move(root_p));
     root->children.push_back(std::move(header));
     root->children.push_back(std::move(controls));
