@@ -33,47 +33,49 @@ flux::Color wf_color(int level) noexcept {
 }
 } // namespace
 
-flux::ElementPtr spectrum_view(const flux::Palette& pal,
-                               const hackrftool::dsp::SpectrumFrame& frame,
-                               double center_mhz) {
+flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float>& db,
+                               const std::vector<float>& peak, double f_lo_mhz,
+                               double f_hi_mhz, const std::vector<SpectrumTick>& ticks,
+                               unsigned seq) {
     flux::Props p;
     p.flex_grow = 1.0f;
     p.background = pal.surface;
     p.radius = 10.0f;
-    p.paint_id = frame.seq;   // 帧不变则保持局部重绘
-    p.paint = [pal, frame, center_mhz](flux::D2DRenderer& r, float x, float y,
-                                       float w, float h, bool, float, float) {
+    p.paint_id = seq;   // 数据不变则保持局部重绘
+    p.paint = [pal, db, peak, f_lo_mhz, f_hi_mhz, ticks](flux::D2DRenderer& r, float x,
+                                                         float y, float w, float h,
+                                                         bool, float, float) {
         // 网格：每 20 dB 一条
-        for (float db = -20.0f; db > kDbFloor; db -= 20.0f) {
-            const float gy = db_to_y(db, y, h);
+        for (float grid_db = -20.0f; grid_db > kDbFloor; grid_db -= 20.0f) {
+            const float gy = db_to_y(grid_db, y, h);
             r.draw_line(x + 8.0f, gy, x + w - 8.0f, gy, pal.divider, 1.0f, 0.5f);
         }
-        // 频率轴：中心 ±10 MHz（标签钳制在绘图区内，防首尾裁切）
-        const auto axis = [&](double mhz, const wchar_t* text) {
-            const float fx = x + 8.0f + float((mhz - (center_mhz - 10.0)) / 20.0) *
-                                           (w - 16.0f);
+        // 频率刻度（标签钳制在绘图区内，防首尾裁切）
+        const double span = std::max(f_hi_mhz - f_lo_mhz, 1e-6);
+        for (const auto& tick : ticks) {
+            const float fx = x + 8.0f + float((tick.mhz - f_lo_mhz) / span) * (w - 16.0f);
             r.draw_line(fx, y + 4.0f, fx, y + h - 20.0f, pal.divider, 1.0f, 0.4f);
             const float lx = std::clamp(fx - 28.0f, x, x + w - 56.0f);
-            r.draw_text(flux::Rect{lx, y + h - 18.0f, 56.0f, 14.0f}, text,
-                        10.0f, pal.text_secondary, false, flux::Align::center);
-        };
-        axis(center_mhz - 10.0, L"-10M");
-        axis(center_mhz, L"中心");
-        axis(center_mhz + 10.0, L"+10M");
+            r.draw_text(flux::Rect{lx, y + h - 18.0f, 56.0f, 14.0f}, tick.label, 10.0f,
+                        pal.text_secondary, false, flux::Align::center);
+        }
 
-        if (frame.db.empty()) {
+        if (db.empty()) {
             r.draw_text(flux::Rect{x, y, w, h}, L"等待数据…", 14.0f, pal.text_secondary,
                         false, flux::Align::center);
             return;
         }
-        const std::size_t n = frame.db.size();
-        std::vector<std::pair<float, float>> cur(n), peak(n);
-        for (std::size_t i = 0; i < n; ++i) {
-            const float fx = x + 8.0f + float(i) / float(n - 1) * (w - 16.0f);
-            cur[i] = {fx, db_to_y(frame.db[i], y, h)};
-            peak[i] = {fx, db_to_y(frame.peak[i], y, h)};
+        const std::size_t n = db.size();
+        std::vector<std::pair<float, float>> cur(n);
+        for (std::size_t i = 0; i < n; ++i)
+            cur[i] = {x + 8.0f + float(i) / float(n - 1) * (w - 16.0f),
+                      db_to_y(db[i], y, h)};
+        if (peak.size() == n) {
+            std::vector<std::pair<float, float>> pk(n);
+            for (std::size_t i = 0; i < n; ++i)
+                pk[i] = {cur[i].first, db_to_y(peak[i], y, h)};
+            r.draw_polyline(pk, pal.text_secondary, 1.0f, 0.55f);
         }
-        r.draw_polyline(peak, pal.text_secondary, 1.0f, 0.55f);
         r.draw_polyline(cur, pal.accent, 2.0f, 1.0f);
     };
     return flux::view(std::move(p));

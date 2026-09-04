@@ -12,6 +12,7 @@
 
 #include "dsp/analyzer.hpp"
 #include "dsp/channel_monitor.hpp"
+#include "dsp/panorama.hpp"
 #include "dsp/waterfall.hpp"
 #include "radio/hackrf.hpp"
 #include "ui/monitor_view.hpp"
@@ -37,7 +38,9 @@ std::wstring wd1(double v) {
 struct App {
     flux::Host host;
     hackrftool::dsp::SpectrumAnalyzer analyzer{512, 64, 256};
-    hackrftool::dsp::WaterfallModel waterfall{256, 64};
+    hackrftool::dsp::WaterfallModel waterfall{256, 64};        // 单窗瀑布
+    hackrftool::dsp::WaterfallModel waterfall_sweep{320, 64};  // 全频段瀑布
+    hackrftool::dsp::PanoramaModel pano{5, 256};               // 全频段拼接
     hackrftool::dsp::ChannelMonitor monitor{3600};
     hackrftool::radio::HackRadio radio;
 
@@ -48,6 +51,10 @@ struct App {
     flux::State<double> lna;   // 8..40，步进 8
     flux::State<double> vga;   // 2..62，步进 2
     flux::State<int> rate_index;
+    // M4：全频段扫描
+    flux::State<int> sweep_on;             // 0=单窗 1=全频段
+    ULONGLONG hop_ms = 0;                  // 上次跳频时刻
+    std::size_t seg_idx = 4;               // 从 4 起步，首次跳频即到段 0
     // M2：监测页
     flux::State<int> page;                 // 0=频谱 1=信道监测
     flux::State<bool> auto_track;          // 自动跟踪最强峰
@@ -55,6 +62,17 @@ struct App {
     flux::State<double> threshold;         // 活动阈值 dB
     hackrftool::dsp::SpectrumFrame frame;   // 本帧快照（build 前拉取）
 };
+
+constexpr double kSweepLoMhz = 2400.0;
+constexpr double kSweepHiMhz = 2483.5;
+constexpr ULONGLONG kDwellMs = 200;    // 每段驻留
+constexpr ULONGLONG kSettleMs = 30;    // 跳频后静默（丢弃旧频数据）
+
+// 段中心：usable 17.5 MHz（20 MHz 窗每侧裁 1/16），5 段均匀覆盖 83.5 MHz
+double seg_center_mhz(std::size_t i) {
+    constexpr double usable = 17.5;
+    return kSweepLoMhz + usable / 2.0 + double(i) * (kSweepHiMhz - kSweepLoMhz - usable) / 4.0;
+}
 
 constexpr double kRatesMsps[4] = {8.0, 10.0, 16.0, 20.0};
 
@@ -140,6 +158,9 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
         pal, running ? flux::ui::BadgeKind::success : flux::ui::BadgeKind::neutral,
         running ? L"接收中" : L"已停止"));
     header->children.push_back(flux::ui::badge(pal, flux::ui::BadgeKind::info, L"仅接收"));
+    if (app.sweep_on.get() == 1)
+        header->children.push_back(
+            flux::ui::badge(pal, flux::ui::BadgeKind::warning, L"全频段"));
 
     // 控制行（WinFlux 的 button() 不带默认底色，须显式配色）
     flux::Props controls_p;
@@ -155,20 +176,31 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
                                               [&app] { toggle_rx(app); },
                                               std::move(btn_primary)));
     controls->children.push_back(flux::ui::field(
-        pal, L"中心频率 MHz",
-        flux::text_input(app.freq_text.get(),
-                         [&app](std::wstring v) { app.freq_text.set(v); })));
+        pal, L"模式",
+        flux::ui::segmented(pal, {L"单窗", L"全频段"}, app.sweep_on.get(), [&app](int i) {
+            app.sweep_on.set(i);
+            app.pano.clear_fresh();
+            app.hop_ms = 0;   // 立即重跳到段 0
+        })));
+    if (app.sweep_on.get() == 0) {
+        controls->children.push_back(flux::ui::field(
+            pal, L"中心频率 MHz",
+            flux::text_input(app.freq_text.get(),
+                             [&app](std::wstring v) { app.freq_text.set(v); })));
+    }
     flux::Props btn_secondary;
     btn_secondary.background = pal.surface;
     btn_secondary.hover_background = pal.surface_hover;
     btn_secondary.text_color = pal.text;
     btn_secondary.border_color = pal.border;
     btn_secondary.border_width = 1.0f;
-    controls->children.push_back(flux::button(L"应用频率", [&app] {
-        app.center_mhz.set(
-            clamp_center(std::wcstod(app.freq_text.get().c_str(), nullptr)));
-        if (app.running.get()) apply_radio(app);
-    }, std::move(btn_secondary)));
+    if (app.sweep_on.get() == 0) {
+        controls->children.push_back(flux::button(L"应用频率", [&app] {
+            app.center_mhz.set(
+                clamp_center(std::wcstod(app.freq_text.get().c_str(), nullptr)));
+            if (app.running.get()) apply_radio(app);
+        }, std::move(btn_secondary)));
+    }
     controls->children.push_back(flux::ui::field(
         pal, L"LNA " + std::to_wstring(unsigned(app.lna.get())) + L" dB",
         flux::slider(float(app.lna.get()), 8.0f, 40.0f, [&app](float v) {
@@ -197,10 +229,28 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
     auto page_el = flux::view(std::move(page_p));
     page_el->children.push_back(std::move(header));
     page_el->children.push_back(std::move(controls));
-    page_el->children.push_back(
-        hackrftool::ui::spectrum_view(pal, app.frame, app.center_mhz.get()));
-    page_el->children.push_back(
-        hackrftool::ui::waterfall_view(pal, app.waterfall, app.waterfall.seq()));
+    if (app.sweep_on.get() == 0) {
+        const std::vector<hackrftool::ui::SpectrumTick> ticks = {
+            {app.center_mhz.get() - 10.0, L"-10M"},
+            {app.center_mhz.get(), L"中心"},
+            {app.center_mhz.get() + 10.0, L"+10M"},
+        };
+        page_el->children.push_back(hackrftool::ui::spectrum_view(
+            pal, app.frame.db, app.frame.peak, app.center_mhz.get() - 10.0,
+            app.center_mhz.get() + 10.0, ticks, app.frame.seq));
+        page_el->children.push_back(
+            hackrftool::ui::waterfall_view(pal, app.waterfall, app.waterfall.seq()));
+    } else {
+        const std::vector<hackrftool::ui::SpectrumTick> ticks = {
+            {2400.0, L"2400"}, {2420.0, L"2420"}, {2440.0, L"2440"},
+            {2460.0, L"2460"}, {2480.0, L"2480"},
+        };
+        page_el->children.push_back(hackrftool::ui::spectrum_view(
+            pal, app.pano.panorama(), {}, kSweepLoMhz, kSweepHiMhz, ticks,
+            app.pano.seq()));
+        page_el->children.push_back(hackrftool::ui::waterfall_view(
+            pal, app.waterfall_sweep, app.waterfall_sweep.seq()));
+    }
     return page_el;
 }
 
@@ -302,12 +352,37 @@ flux::ElementPtr monitor_page(App& app, const flux::Palette& pal) {
 flux::ElementPtr build(App& app) {
     app.host.animate_for(100);   // 10 fps 心跳：驱动持续重绘
 
-    // 帧拉取：新帧 → 瀑布 + 信道监测推进
+    // 全频段扫描：驻留到点 → 跳下一段（UI 心跳驱动，±1 tick 抖动可接受）
+    const ULONGLONG now = GetTickCount64();
+    const bool running = app.running.get();
+    if (running && app.sweep_on.get() == 1 && now - app.hop_ms >= kDwellMs) {
+        app.seg_idx = (app.seg_idx + 1) % app.pano.segments();
+        app.hop_ms = now;
+        hackrftool::radio::RadioConfig cfg;
+        cfg.center_hz = seg_center_mhz(app.seg_idx) * 1e6;
+        cfg.sample_rate_hz = kRatesMsps[size_t(app.rate_index.get())] * 1e6;
+        cfg.lna_gain_db = unsigned(app.lna.get());
+        cfg.vga_gain_db = unsigned(app.vga.get());
+        (void)app.radio.apply(cfg);   // 跳频失败静默（下个心跳重试）
+    }
+
+    // 帧拉取：新帧 → 瀑布/全景 + 信道监测推进
     const auto f = app.analyzer.snapshot();
     if (!f.db.empty()) {
-        if (f.seq != app.frame.seq) {
-            app.waterfall.push(f.db);
+        const bool fresh = f.seq != app.frame.seq;
+        if (app.sweep_on.get() == 0) {
+            if (fresh) {
+                app.waterfall.push(f.db);
+                app.monitor.push(f);
+            }
+        } else if (fresh && now - app.hop_ms > kSettleMs) {
+            // 跳频后静默期外的帧才属于当前段
+            app.pano.set(app.seg_idx, f.db);
             app.monitor.push(f);
+            if (app.pano.complete()) {
+                app.waterfall_sweep.push(app.pano.downscaled(320));
+                app.pano.clear_fresh();
+            }
         }
         app.frame = f;
     }
@@ -328,11 +403,15 @@ flux::ElementPtr build(App& app) {
     root->children.push_back(app.page.get() == 0 ? spectrum_page(app, pal)
                                                  : monitor_page(app, pal));
 
-    // 状态栏（追加实时帧号，便于肉眼确认数据在流动）
+    // 状态栏（追加扫描进度与帧号，便于肉眼确认数据在流动）
     flux::Props cap_p;
     cap_p.text_align = flux::Align::start;
-    const std::wstring status_text =
-        app.status.get() +
+    std::wstring status_text = app.status.get();
+    if (app.running.get() && app.sweep_on.get() == 1) {
+        status_text += L"  ·  扫描 段 " + std::to_wstring(app.seg_idx + 1) + L"/5 @ " +
+                       wd1(seg_center_mhz(app.seg_idx)) + L" MHz";
+    }
+    status_text +=
         (app.frame.db.empty() ? L"" : L"  ·  帧 " + std::to_wstring(app.frame.seq));
     root->children.push_back(flux::ui::caption(pal, status_text, std::move(cap_p)));
     return root;
@@ -351,18 +430,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     app.lna = app.host.make_state<double>(32.0);
     app.vga = app.host.make_state<double>(30.0);
     app.rate_index = app.host.make_state<int>(3);
+    app.sweep_on = app.host.make_state<int>(0);
     app.page = app.host.make_state<int>(0);
     app.auto_track = app.host.make_state<bool>(true);
     app.mon_text = app.host.make_state<std::wstring>(L"2450");
     app.threshold = app.host.make_state<double>(-70.0);
 
-    // 命令行：auto = 启动即接收（频谱页）；autom = 启动即接收并开监测页
+    // 命令行：auto = 启动即接收（频谱页）；autom = 接收+监测页；autos = 接收+全频段扫描
     bool auto_start = false;
     if (cmd_line != nullptr) {
         if (wcscmp(cmd_line, L"auto") == 0) auto_start = true;
         if (wcscmp(cmd_line, L"autom") == 0) {
             auto_start = true;
             app.page.set(1);
+        }
+        if (wcscmp(cmd_line, L"autos") == 0) {
+            auto_start = true;
+            app.sweep_on.set(1);
         }
     }
     if (auto_start) {

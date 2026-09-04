@@ -23,6 +23,7 @@ add_executable(HackRFTool WIN32
     src/dsp/analyzer.cpp
     src/dsp/channel_monitor.cpp
     src/dsp/fft.cpp
+    src/dsp/panorama.cpp
     src/dsp/waterfall.cpp
     src/radio/hackrf.cpp
     src/ui/monitor_view.cpp
