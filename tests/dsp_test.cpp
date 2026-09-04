@@ -11,6 +11,7 @@
 #include "dsp/channel_monitor.hpp"
 #include "dsp/fft.hpp"
 #include "dsp/gfsk.hpp"
+#include "dsp/panorama.hpp"
 #include "dsp/waterfall.hpp"
 #include "radio/iq_recorder.hpp"
 
@@ -334,6 +335,29 @@ static void test_iq_recorder_file() {
     _wremove(path.c_str());
 }
 
+static void test_panorama_stitch() {
+    hackrftool::dsp::PanoramaModel pano(5, 256);
+    check(!pano.complete(), "初始不完整");
+    std::vector<float> seg(256);
+    for (std::size_t s = 0; s < 5; ++s) {
+        std::fill(seg.begin(), seg.end(), float(-50 - int(s)));
+        pano.set(s, seg);
+    }
+    check(pano.complete(), "5 段齐后完整");
+    const auto p = pano.panorama();
+    check(p.size() == 1280, "全景 1280 bin");
+    check(p[0] == -50.0f && p[256] == -51.0f && p[1279] == -54.0f, "拼接顺序正确");
+    const auto d = pano.downscaled(320);
+    check(d.size() == 320, "降采样 320 列");
+    check(std::abs(d[0] - (-50.0f)) < 0.01f, "每 4 bin 均值（常数段）");
+    pano.set(0, std::vector<float>(100, -60.0f));   // 长度不符 → 忽略
+    check(pano.panorama().size() == 1280 && pano.panorama()[0] == -50.0f, "坏段被拒");
+    check(pano.seq() > 0, "seq 递增");
+    pano.clear_fresh();
+    check(!pano.complete(), "clear_fresh 后等待新一轮");
+    check(pano.panorama()[0] == -50.0f, "clear_fresh 保序（数据仍在）");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -350,6 +374,7 @@ int main() {
     test_gfsk_short_input();
     test_burst_detector();
     test_iq_recorder_file();
+    test_panorama_stitch();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }

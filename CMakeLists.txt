@@ -66,8 +66,8 @@ flux_apply_compiler_options(HackRFAnalyze)
 enable_testing()
 add_executable(HackRFToolTest tests/dsp_test.cpp src/dsp/analyzer.cpp
                               src/dsp/burst_detector.cpp src/dsp/channel_monitor.cpp
-                              src/dsp/fft.cpp src/dsp/gfsk.cpp src/dsp/waterfall.cpp
-                              src/radio/iq_recorder.cpp)
+                              src/dsp/fft.cpp src/dsp/gfsk.cpp src/dsp/panorama.cpp
+                              src/dsp/waterfall.cpp src/radio/iq_recorder.cpp)
 target_include_directories(HackRFToolTest PRIVATE src)
 flux_apply_compiler_options(HackRFToolTest)
 add_test(NAME HackRFToolTest COMMAND HackRFToolTest)
