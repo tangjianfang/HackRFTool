@@ -1,4 +1,5 @@
 // 纯 C++ DSP 单元测试 —— 沿用 WinFlux 的裸 main + check 模式，无测试框架
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstddef>
@@ -462,6 +463,88 @@ static void test_esb_noise() {
     check(hackrftool::dsp::esb_scan(bits).empty(), "ESB 噪声无帧");
 }
 
+// 合成射频波 → int8 交错字节（幅度缩放 + 前后垫静默）
+static std::vector<std::int8_t> wave_to_iq_bytes(const std::vector<std::complex<float>>& w,
+                                                 float amp, std::size_t pad_samples) {
+    std::vector<std::int8_t> out((w.size() + pad_samples * 2) * 2, 0);
+    for (std::size_t i = 0; i < w.size(); ++i) {
+        const double re = std::clamp(double(w[i].real()) * amp, -127.0, 127.0);
+        const double im = std::clamp(double(w[i].imag()) * amp, -127.0, 127.0);
+        out[(pad_samples + i) * 2] = static_cast<std::int8_t>(re);
+        out[(pad_samples + i) * 2 + 1] = static_cast<std::int8_t>(im);
+    }
+    return out;
+}
+
+static void test_end_to_end_pipeline() {
+    // 1) ESB 包 → GFSK 波形（sps=20，1 Mbps）→ 载波搬到 +2.5 MHz。
+    //    注意：512 点复 FFT 中 DC 在 bin 0、负频在 257-511——合成信号若放
+    //    DC 会正好落进分析器的边缘裁剪带（那本是为硬件基带跌落留的）。
+    const std::vector<unsigned char> addr = {0xC2, 0xC2, 0xC2, 0xC2, 0xC1};
+    const std::vector<unsigned char> payload = {0x11, 0x22, 0x33, 0x44};
+    const auto bits = esb_pack(addr, payload);
+    const std::vector<unsigned> bits_u(bits.begin(), bits.end());
+    auto wave = gfsk_modulate(bits_u, 20, 160e3, 20e6);
+    constexpr double kFs = 20e6, kCarrierOff = 2.5e6;
+    const std::size_t pad = 4000;   // 前后静默
+    // 用缓冲绝对样本号旋转，保证解调时可精确搬回
+    std::vector<std::complex<float>> shifted(wave.size());
+    for (std::size_t i = 0; i < wave.size(); ++i) {
+        const double ph = 2.0 * 3.14159265358979323846 * kCarrierOff *
+                          double(pad + i) / kFs;
+        shifted[i] = wave[i] * std::complex<float>(float(std::cos(ph)),
+                                                   float(std::sin(ph)));
+    }
+    const auto iq = wave_to_iq_bytes(shifted, 100.0f, pad);
+
+    // 期望输出 bin：输入 bin ≈ 2.5e6/20e6×512 = 64 → out ≈ (64-32)*256/448 ≈ 18
+    hackrftool::dsp::SpectrumAnalyzer an(512, 4, 256);
+    for (int i = 0; i < 8; ++i) an.feed(iq.data(), iq.size());
+    const auto fr = an.snapshot();
+    check(!fr.db.empty(), "e2e 频谱出帧");
+    std::size_t argmax = 0;
+    for (std::size_t i = 1; i < fr.db.size(); ++i)
+        if (fr.db[i] > fr.db[argmax]) argmax = i;
+    check(argmax > 13 && argmax < 24, "e2e 峰位 ≈ 18");
+    check(fr.db[argmax] > -20.0f, "e2e 峰电平 > -20 dB");
+    check(fr.db[argmax] - fr.db[100] > 15.0f, "e2e 峰凸起 > 15 dB");
+
+    // 2) 实时突发检测：检出突发且样本可取回
+    hackrftool::dsp::LiveBursts live(200000);
+    live.write(iq.data(), iq.size());
+    live.write(iq.data(), iq.size());   // 再写一段推进水位（静默垫尾）
+    (void)live.refresh(-30.0f, 200);
+    check(live.bursts().size() >= 1, "e2e 检出突发");
+    const auto& b0 = live.bursts().back();
+    std::vector<std::int8_t> slice;
+    check(live.read_slice(b0.start_sample, b0.samples, slice), "e2e 切片取回");
+    check(slice.size() >= 128, "e2e 切片长度");
+
+    // 3) 切片搬回基带（按绝对样本号去旋转）→ GFSK 解调（4 相位偏移搜索，
+    //    补偿突发起点 ±半窗偏差）→ ESB 解帧
+    std::vector<std::complex<float>> cmplx(b0.samples);
+    for (unsigned long long i = 0; i < b0.samples; ++i) {
+        const double ph = -2.0 * 3.14159265358979323846 * kCarrierOff *
+                          double(b0.start_sample + i) / kFs;
+        cmplx[static_cast<std::size_t>(i)] =
+            std::complex<float>(float(slice[static_cast<std::size_t>(i) * 2]),
+                                float(slice[static_cast<std::size_t>(i) * 2 + 1])) *
+            std::complex<float>(float(std::cos(ph)), float(std::sin(ph)));
+    }
+    const hackrftool::dsp::GfskDemod demod(20e6, 1e6, 160e3);
+    std::vector<hackrftool::dsp::EsbFrame> frames;
+    for (const std::size_t off : {std::size_t(0), std::size_t(5), std::size_t(10),
+                                  std::size_t(15)}) {
+        frames = hackrftool::dsp::esb_scan(demod.demod(cmplx, off).bits);
+        if (!frames.empty()) break;
+    }
+    check(frames.size() == 1, "e2e ESB 还原 1 帧");
+    if (!frames.empty()) {
+        check(frames[0].address == addr, "e2e 地址还原");
+        check(frames[0].payload == payload, "e2e 载荷还原");
+    }
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -483,6 +566,7 @@ int main() {
     test_esb_roundtrip();
     test_esb_corruption_rejected();
     test_esb_noise();
+    test_end_to_end_pipeline();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }
