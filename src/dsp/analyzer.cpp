@@ -26,18 +26,25 @@ SpectrumAnalyzer::SpectrumAnalyzer(std::size_t fft_size, std::size_t average_blo
 
 void SpectrumAnalyzer::feed(const std::int8_t* iq, std::size_t byte_count) {
     const std::size_t complex_samples = byte_count / 2;
-    std::vector<std::complex<double>> buf(fft_size_);
+    scratch_.resize(fft_size_);
 
+    // 每 kChunkStride 块算 1 块：功率谱统计抽样，显示无损，CPU 减负
     std::size_t used = 0;
+    std::size_t chunk_seq = 0;
     while (used + fft_size_ <= complex_samples) {
-        for (std::size_t i = 0; i < fft_size_; ++i)
-            buf[i] = {double(iq[(used + i) * 2]), double(iq[(used + i) * 2 + 1])};
-        fft(buf);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (std::size_t k = 0; k < fft_size_; ++k) accum_[k] += std::norm(buf[k]);
-            if (++accum_count_ >= average_blocks_) finish_frame_locked();
+        if (chunk_seq % kChunkStride == 0) {
+            for (std::size_t i = 0; i < fft_size_; ++i)
+                scratch_[i] = {double(iq[(used + i) * 2]),
+                               double(iq[(used + i) * 2 + 1])};
+            fft(scratch_);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (std::size_t k = 0; k < fft_size_; ++k)
+                    accum_[k] += std::norm(scratch_[k]);
+                if (++accum_count_ >= average_blocks_) finish_frame_locked();
+            }
         }
+        ++chunk_seq;
         used += fft_size_;
     }
 }

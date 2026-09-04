@@ -4,8 +4,11 @@
 #include <commdlg.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cwchar>
+#include <functional>
 #include <string>
+#include <thread>
 
 #include <flux/flux.hpp>
 #include <flux/Components.hpp>
@@ -51,10 +54,11 @@ struct App {
     flux::State<double> lna;   // 8..40，步进 8
     flux::State<double> vga;   // 2..62，步进 2
     flux::State<int> rate_index;
-    // M4：全频段扫描
+    // M4：全频段扫描（跳频在专职后台线程，UI 只读以下原子量）
     flux::State<int> sweep_on;             // 0=单窗 1=全频段
-    ULONGLONG hop_ms = 0;                  // 上次跳频时刻
-    std::size_t seg_idx = 4;               // 从 4 起步，首次跳频即到段 0
+    std::atomic<int> sweep_live{0};        // 1 = 扫描线程正在跳频
+    std::atomic<std::size_t> seg_idx{4};   // 从 4 起步，首次跳频即到段 0
+    std::atomic<unsigned long long> hop_ms{0};
     // M2：监测页
     flux::State<int> page;                 // 0=频谱 1=信道监测
     flux::State<bool> auto_track;          // 自动跟踪最强峰
@@ -87,6 +91,34 @@ void rx_trampoline_ui(const std::int8_t* iq, std::size_t bytes, void* ctx) {
     static_cast<hackrftool::dsp::SpectrumAnalyzer*>(ctx)->feed(iq, bytes);
 }
 
+// 扫描线程：驻留到点改中心频率（绝不碰 UI/绘制线程——在 paint 里同步
+// set_freq 会把首帧 build 挂死）
+void sweep_loop(App& app) {
+    while (app.sweep_live.load() == 1) {
+        Sleep(20);
+        if (app.sweep_live.load() != 1) break;
+        const unsigned long long now = GetTickCount64();
+        if (now - app.hop_ms.load() >= kDwellMs) {
+            app.seg_idx.store((app.seg_idx.load() + 1) % 5);
+            app.hop_ms.store(now);
+            (void)app.radio.set_center_hz(seg_center_mhz(app.seg_idx.load()) * 1e6);
+        }
+    }
+}
+
+void set_sweep_live(App& app, bool on) {
+    const bool was = app.sweep_live.load() == 1;
+    if (on == was) return;
+    if (on) {
+        app.hop_ms.store(0);
+        app.pano.clear_fresh();
+        app.sweep_live.store(1);
+        std::thread(sweep_loop, std::ref(app)).detach();
+    } else {
+        app.sweep_live.store(0);
+    }
+}
+
 void apply_radio(App& app) {
     hackrftool::radio::RadioConfig cfg;
     cfg.center_hz = app.center_mhz.get() * 1e6;
@@ -106,6 +138,7 @@ void apply_radio(App& app) {
 
 void toggle_rx(App& app) {
     if (app.running.get()) {
+        set_sweep_live(app, false);
         app.radio.stop_rx();
         app.running.set(false);
         app.status.set(L"已停止");
@@ -122,6 +155,7 @@ void toggle_rx(App& app) {
         return;
     }
     app.running.set(true);
+    if (app.sweep_on.get() == 1) set_sweep_live(app, true);
 }
 
 void export_csv_dialog(App& app) {
@@ -179,8 +213,7 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
         pal, L"模式",
         flux::ui::segmented(pal, {L"单窗", L"全频段"}, app.sweep_on.get(), [&app](int i) {
             app.sweep_on.set(i);
-            app.pano.clear_fresh();
-            app.hop_ms = 0;   // 立即重跳到段 0
+            set_sweep_live(app, i == 1 && app.running.get());
         })));
     if (app.sweep_on.get() == 0) {
         controls->children.push_back(flux::ui::field(
@@ -352,21 +385,12 @@ flux::ElementPtr monitor_page(App& app, const flux::Palette& pal) {
 flux::ElementPtr build(App& app) {
     app.host.animate_for(100);   // 10 fps 心跳：驱动持续重绘
 
-    // 全频段扫描：驻留到点 → 跳下一段（UI 心跳驱动，±1 tick 抖动可接受）
+    // 全频段扫描：先落当前段数据，后跳频（顺序关键！先跳频会让
+    // now-hop_ms>settle 永不成立，慢构建下全景永远拿不到数据）
     const ULONGLONG now = GetTickCount64();
-    const bool running = app.running.get();
-    if (running && app.sweep_on.get() == 1 && now - app.hop_ms >= kDwellMs) {
-        app.seg_idx = (app.seg_idx + 1) % app.pano.segments();
-        app.hop_ms = now;
-        hackrftool::radio::RadioConfig cfg;
-        cfg.center_hz = seg_center_mhz(app.seg_idx) * 1e6;
-        cfg.sample_rate_hz = kRatesMsps[size_t(app.rate_index.get())] * 1e6;
-        cfg.lna_gain_db = unsigned(app.lna.get());
-        cfg.vga_gain_db = unsigned(app.vga.get());
-        (void)app.radio.apply(cfg);   // 跳频失败静默（下个心跳重试）
-    }
 
-    // 帧拉取：新帧 → 瀑布/全景 + 信道监测推进
+    // 帧拉取：新帧 → 瀑布/全景 + 信道监测推进（跳频由后台线程完成，
+    // 此处只按原子 seg_idx/hop_ms 打段标签；静默期内的帧属旧频，丢弃）
     const auto f = app.analyzer.snapshot();
     if (!f.db.empty()) {
         const bool fresh = f.seq != app.frame.seq;
@@ -375,9 +399,8 @@ flux::ElementPtr build(App& app) {
                 app.waterfall.push(f.db);
                 app.monitor.push(f);
             }
-        } else if (fresh && now - app.hop_ms > kSettleMs) {
-            // 跳频后静默期外的帧才属于当前段
-            app.pano.set(app.seg_idx, f.db);
+        } else if (fresh && now - app.hop_ms.load() > kSettleMs) {
+            app.pano.set(app.seg_idx.load(), f.db);
             app.monitor.push(f);
             if (app.pano.complete()) {
                 app.waterfall_sweep.push(app.pano.downscaled(320));
@@ -421,7 +444,6 @@ flux::ElementPtr build(App& app) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     flux::enable_per_monitor_dpi_v2();
-
     App app;
     app.running = app.host.make_state<bool>(false);
     app.status = app.host.make_state<std::wstring>(L"未开始（点击「开始」）");
@@ -457,6 +479,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             apply_radio(app);
             if (app.radio.start_rx(&rx_trampoline_ui, &app.analyzer, &err)) {
                 app.running.set(true);
+                if (app.sweep_on.get() == 1) set_sweep_live(app, true);
             } else {
                 app.status.set(L"启动接收失败: " + widen(err));
             }
@@ -470,5 +493,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     cfg.width = 1200;
     cfg.height = 860;
     if (!app.host.create(cfg, instance)) return 1;
-    return app.host.run();
+    const int exit_code = app.host.run();
+    app.sweep_live.store(0);   // 收扫描线程（detach 线程须先令其退出再析构 App）
+    Sleep(80);
+    return exit_code;
 }

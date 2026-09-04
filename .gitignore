@@ -29,3 +29,5 @@ hackrftool-debug.log
 
 # IQ 采集数据（大文件）
 *.cs8
+m4-boot.log
+m4-hop.log

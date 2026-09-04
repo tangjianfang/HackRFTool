@@ -106,6 +106,11 @@ bool HackRadio::apply(const RadioConfig& cfg, std::string* error) {
     return true;
 }
 
+bool HackRadio::set_center_hz(double hz) noexcept {
+    if (!is_open()) return false;
+    return fn_set_freq(dev_, static_cast<std::uint64_t>(hz)) == HACKRF_SUCCESS;
+}
+
 bool HackRadio::start_rx(Callback cb, void* ctx, std::string* error) {
     if (!is_open()) {
         if (error != nullptr) *error = "设备未打开";

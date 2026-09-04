@@ -39,6 +39,8 @@ public:
     [[nodiscard]] bool open(std::string* error = nullptr);
     void close();
     [[nodiscard]] bool apply(const RadioConfig& cfg, std::string* error = nullptr);
+    // 仅改中心频率（扫描跳频线程用；可与流式接收并发，等价于运行中拖频率滑杆）
+    [[nodiscard]] bool set_center_hz(double hz) noexcept;
     [[nodiscard]] bool start_rx(Callback cb, void* ctx, std::string* error = nullptr);
     void stop_rx();
 
