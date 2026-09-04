@@ -18,7 +18,13 @@ list(APPEND CMAKE_MODULE_PATH "${WINFLUX_ROOT}/cmake")
 add_subdirectory(${WINFLUX_ROOT} winflux EXCLUDE_FROM_ALL)
 include(WinFluxCompilerOptions)
 
-add_executable(HackRFTool WIN32 src/app/main.cpp)
+add_executable(HackRFTool WIN32
+    src/app/main.cpp
+    src/dsp/analyzer.cpp
+    src/dsp/fft.cpp
+    src/dsp/waterfall.cpp
+    src/radio/hackrf.cpp
+    src/ui/views.cpp)
 target_include_directories(HackRFTool PRIVATE src ${MSYS2_UCRT64_INCLUDE})
 target_link_libraries(HackRFTool PRIVATE WinFlux::flux)
 flux_apply_compiler_options(HackRFTool)
