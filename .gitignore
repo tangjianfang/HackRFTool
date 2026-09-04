@@ -31,3 +31,4 @@ hackrftool-debug.log
 *.cs8
 m4-boot.log
 m4-hop.log
+selftest-report-*.txt

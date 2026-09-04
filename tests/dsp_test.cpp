@@ -282,6 +282,25 @@ static void test_gfsk_short_input() {
           "不足一个符号返回空");
 }
 
+static void test_gfsk_roundtrip_2m() {
+    // 2 Mbps：sps=10，同口径往返
+    std::vector<unsigned> bits(4, 0u);
+    unsigned lcg = 99u;
+    for (std::size_t i = 0; i < 200; ++i) {
+        lcg = lcg * 1664525u + 1013904223u;
+        bits.push_back((lcg >> 31) & 1u);
+    }
+    bits.insert(bits.end(), 4, 0u);
+    const auto wave = gfsk_modulate(bits, 10, 160e3, 20e6);
+    hackrftool::dsp::GfskDemod demod(20e6, 2e6, 160e3);
+    check(demod.samples_per_symbol() == 10, "2M 符号率 sps=10");
+    const auto r = demod.demod(wave, 0);
+    std::size_t errors = 0;
+    for (std::size_t i = 4; i < 204; ++i)
+        errors += (r.bits[i] != bits[i]);
+    check(errors == 0, "GFSK 2 Mbps 往返 BER=0");
+}
+
 static void test_burst_detector() {
     // 8 万复样本：静默 (1,0) ≈ -42 dB，三个幅度 100 复单音突发 ≈ -2 dB
     const std::size_t n = 80000;
@@ -558,6 +577,7 @@ int main() {
     test_monitor_stats();
     test_monitor_ring_and_csv();
     test_gfsk_roundtrip();
+    test_gfsk_roundtrip_2m();
     test_gfsk_short_input();
     test_burst_detector();
     test_iq_recorder_file();

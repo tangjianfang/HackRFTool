@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <complex>
 #include <atomic>
+#include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <functional>
 #include <map>
@@ -74,7 +76,12 @@ struct App {
     flux::State<std::wstring> mon_text;    // 监测目标 MHz 文本
     flux::State<double> threshold;         // 活动阈值 dB
     flux::State<double> burst_thr;         // M5：突发检测阈值 dB
+    flux::State<int> symrate_idx;          // M6：解调符号率 0=1M 1=2M
+    double mon_lock_mhz = 0.0;             // M6：手动锁定频率（中心变化时重算 bin）
     hackrftool::dsp::SpectrumFrame frame;   // 本帧快照（build 前拉取）
+    // M6：自测指标（selftest 模式汇总断言用）
+    std::atomic<unsigned> build_count{0};
+    std::atomic<unsigned> esb_hits{0};
 };
 
 constexpr double kSweepLoMhz = 2400.0;
@@ -243,6 +250,10 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
         controls->children.push_back(flux::button(L"应用频率", [&app] {
             app.center_mhz.set(
                 clamp_center(std::wcstod(app.freq_text.get().c_str(), nullptr)));
+            // M6：手动锁定监测时按新中心重算 bin
+            if (app.mon_lock_mhz > 0.0 && !app.auto_track.get())
+                app.monitor.set_fixed_bin(
+                    mhz_to_bin(app.mon_lock_mhz, app.center_mhz.get()));
             if (app.running.get()) apply_radio(app);
         }, std::move(btn_secondary)));
     }
@@ -328,6 +339,7 @@ flux::ElementPtr monitor_page(App& app, const flux::Palette& pal) {
     sel->children.push_back(flux::button(L"锁定该频率", [&app] {
         const double mhz =
             clamp_center(std::wcstod(app.mon_text.get().c_str(), nullptr));
+        app.mon_lock_mhz = mhz;   // 记住目标频率，中心变化时重算 bin（M6）
         app.monitor.set_fixed_bin(mhz_to_bin(mhz, app.center_mhz.get()));
         app.monitor.set_mode(hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
         app.auto_track.set(false);
@@ -439,7 +451,8 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
                 cmplx[static_cast<std::size_t>(i)] = {
                     float(slice[static_cast<std::size_t>(i) * 2]),
                     float(slice[static_cast<std::size_t>(i) * 2 + 1])};
-            const hackrftool::dsp::GfskDemod demod(sample_rate_hz, 1e6, 160e3);
+            const hackrftool::dsp::GfskDemod demod(
+                sample_rate_hz, app.symrate_idx.get() == 1 ? 2e6 : 1e6, 160e3);
             const auto r = demod.demod(cmplx, 0);
             const std::size_t n_bits = std::min<std::size_t>(r.bits.size(), 64);
             wchar_t hex[64];
@@ -456,6 +469,7 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
             text += hex;
             const auto frames = hackrftool::dsp::esb_scan(r.bits);
             if (!frames.empty()) {
+                app.esb_hits.fetch_add(unsigned(frames.size()));
                 text += L"  ESB✓";
                 for (const auto& fr : frames) {
                     text += L" addr:";
@@ -493,6 +507,10 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
         flux::slider(float(app.burst_thr.get()), -60.0f, -20.0f, [&app](float v) {
             app.burst_thr.set(double(int(v)));
         })));
+    tools->children.push_back(flux::ui::field(
+        pal, L"解调符号率",
+        flux::ui::segmented(pal, {L"1 Mbps", L"2 Mbps"}, app.symrate_idx.get(),
+                            [&app](int i) { app.symrate_idx.set(i); })));
     flux::Props btn_clear;
     btn_clear.background = pal.surface;
     btn_clear.hover_background = pal.surface_hover;
@@ -554,7 +572,11 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
 // ---- 根 -------------------------------------------------------------------
 
 flux::ElementPtr build(App& app) {
-    app.host.animate_for(100);   // 10 fps 心跳：驱动持续重绘
+    // 心跳续期：每次 build 续 400ms——首帧冷启动（D2D/字体初始化）可能超
+    // 过 100ms，窗口太窄会让动画期限在首个 tick 前过期，渲染循环被
+    // KillTimer 永久熄火（builds=1 玄学的根因）
+    app.host.animate_for(400);
+    app.build_count.fetch_add(1);
 
     // 全频段扫描：先落当前段数据，后跳频（顺序关键！先跳频会让
     // now-hop_ms>settle 永不成立，慢构建下全景永远拿不到数据）
@@ -653,9 +675,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     app.mon_text = app.host.make_state<std::wstring>(L"2450");
     app.threshold = app.host.make_state<double>(-70.0);
     app.burst_thr = app.host.make_state<double>(-40.0);
+    app.symrate_idx = app.host.make_state<int>(0);
 
-    // 命令行：auto = 启动即接收（频谱页）；autom = 接收+监测页；autos = 接收+全频段扫描
+    // 命令行：auto=接收+频谱页；autom=+监测页；autos=+全频段；autocap=+抓包页；
+    // selftest/selftestsweep=自测模式（跑 N 秒→断言→写 selftest-report.txt→退出码）
     bool auto_start = false;
+    bool selftest = false;
+    bool device_ok = false;
     if (cmd_line != nullptr) {
         if (wcscmp(cmd_line, L"auto") == 0) auto_start = true;
         if (wcscmp(cmd_line, L"autom") == 0) {
@@ -670,6 +696,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             auto_start = true;
             app.page.set(2);
         }
+        if (wcscmp(cmd_line, L"selftest") == 0) {
+            auto_start = true;
+            selftest = true;
+        }
+        if (wcscmp(cmd_line, L"selftestsweep") == 0) {
+            auto_start = true;
+            selftest = true;
+            app.sweep_on.set(1);
+        }
     }
     if (auto_start) {
         std::string err;
@@ -679,6 +714,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             apply_radio(app);
             if (app.radio.start_rx(&rx_trampoline_ui, &app, &err)) {
                 app.running.set(true);
+                device_ok = true;
                 if (app.sweep_on.get() == 1) set_sweep_live(app, true);
             } else {
                 app.status.set(L"启动接收失败: " + widen(err));
@@ -693,8 +729,74 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     cfg.width = 1200;
     cfg.height = 860;
     if (!app.host.create(cfg, instance)) return 1;
+
+    // M6：自测看门狗——收集指标、断言、写报告、发 WM_QUIT
+    if (selftest) {
+        const DWORD ui_tid = GetCurrentThreadId();
+        const int seconds = app.sweep_on.get() == 1 ? 8 : 6;
+        const char* report_path =
+            app.sweep_on.get() == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt";
+        std::thread([&app, ui_tid, seconds, device_ok, report_path] {
+            Sleep(500);
+            if (app.build_count.load() < 3 && device_ok) {
+                // 渲染循环疑似被遮挡停摆：跨线程激活自己窗口（等价用户点任务栏）
+                if (HWND h = FindWindowW(nullptr, L"HackRFTool")) {
+                    keybd_event(VK_MENU, 0, 0, 0);
+                    keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                    ShowWindow(h, SW_RESTORE);
+                    SetForegroundWindow(h);
+                }
+            }
+            Sleep(seconds * 1000);
+            const unsigned builds = app.build_count.load();
+            const unsigned frames = app.frame.seq;
+            const unsigned wf = app.waterfall.seq();
+            const unsigned wfs = app.waterfall_sweep.seq();
+            const unsigned bursts = unsigned(app.live.bursts().size());
+            const unsigned esb = app.esb_hits.load();
+            const bool hard_ok = device_ok && builds >= 10 && frames >= 50;
+            if (std::FILE* rp = std::fopen(report_path, "w")) {
+                std::fprintf(rp, "HackRFTool selftest\n模式: %s  时长: %ds\n",
+                             app.sweep_on.get() == 1 ? "全频段" : "单窗", seconds);
+                std::fprintf(rp, "设备: %s\n", device_ok ? "OK" : "未找到");
+                std::fprintf(rp,
+                             "builds=%u frames=%u wf_single=%u wf_sweep=%u "
+                             "bursts=%u esb_hits=%u\n",
+                             builds, frames, wf, wfs, bursts, esb);
+                std::fprintf(rp, "硬断言 builds>=10: %s  frames>=50: %s\n",
+                             builds >= 10 ? "PASS" : "FAIL",
+                             frames >= 50 ? "PASS" : "FAIL");
+                std::fprintf(rp, "软指标: bursts=%u wf_sweep轮=%u esb=%u（仅记录）\n",
+                             bursts, wfs, esb);
+                std::fprintf(rp, "结果: %s\n",
+                             !device_ok ? "SKIP（无设备）" : (hard_ok ? "PASS" : "FAIL"));
+                std::fclose(rp);
+            }
+            PostThreadMessage(ui_tid, WM_QUIT, 0, 0);
+        }).detach();
+    }
+
     const int exit_code = app.host.run();
     app.sweep_live.store(0);   // 收扫描线程（detach 线程须先令其退出再析构 App）
     Sleep(80);
+
+    if (selftest) {
+        // 退出码：无设备 42（CTest SKIP），硬断言失败 1，通过 0
+        const char* report_path =
+            app.sweep_on.get() == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt";
+        std::FILE* rp = std::fopen(report_path, "r");
+        bool device_ok_read = false, pass = true;
+        if (rp != nullptr) {
+            char line[256];
+            while (std::fgets(line, sizeof line, rp) != nullptr) {
+                if (std::strstr(line, "设备: OK") != nullptr) device_ok_read = true;
+                if (std::strstr(line, "结果: FAIL") != nullptr) pass = false;
+                if (std::strstr(line, "SKIP") != nullptr) device_ok_read = false;
+            }
+            std::fclose(rp);
+        }
+        if (!device_ok_read) return 42;
+        return pass ? 0 : 1;
+    }
     return exit_code;
 }

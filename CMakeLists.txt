@@ -15,7 +15,7 @@ set(MSYS2_UCRT64_INCLUDE "C:/msys64/ucrt64/include" CACHE PATH "libhackrf 头文
 
 # 子目录作用域不回传 CMAKE_MODULE_PATH，须在本工程挂 WinFlux 的 cmake/
 list(APPEND CMAKE_MODULE_PATH "${WINFLUX_ROOT}/cmake")
-add_subdirectory(${WINFLUX_ROOT} winflux EXCLUDE_FROM_ALL)
+add_subdirectory(${WINFLUX_ROOT} winflux)
 include(WinFluxCompilerOptions)
 
 add_executable(HackRFTool WIN32
@@ -78,3 +78,11 @@ add_executable(HackRFToolTest tests/dsp_test.cpp src/dsp/analyzer.cpp
 target_include_directories(HackRFToolTest PRIVATE src)
 flux_apply_compiler_options(HackRFToolTest)
 add_test(NAME HackRFToolTest COMMAND HackRFToolTest)
+
+# M6：整机自测（需设备；无设备返回 42 → CTest 记为 SKIP）
+if(WIN32)
+    add_test(NAME HackRFSelfTestSingle COMMAND HackRFTool selftest)
+    set_tests_properties(HackRFSelfTestSingle PROPERTIES SKIP_RETURN_CODE 42)
+    add_test(NAME HackRFSelfTestSweep COMMAND HackRFTool selftestsweep)
+    set_tests_properties(HackRFSelfTestSweep PROPERTIES SKIP_RETURN_CODE 42)
+endif()
