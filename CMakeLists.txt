@@ -30,6 +30,15 @@ foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)
         COMMENT "复制 ${dll}")
 endforeach()
 
+add_executable(HackRFSmoke tools/hackrf_smoke.cpp src/radio/hackrf.cpp)
+target_include_directories(HackRFSmoke PRIVATE src ${MSYS2_UCRT64_INCLUDE})
+flux_apply_compiler_options(HackRFSmoke)
+foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)
+    add_custom_command(TARGET HackRFSmoke POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${MSYS2_UCRT64_BIN}/${dll}" $<TARGET_FILE_DIR:HackRFSmoke>)
+endforeach()
+
 enable_testing()
 add_executable(HackRFToolTest tests/dsp_test.cpp src/dsp/analyzer.cpp src/dsp/fft.cpp
                               src/dsp/waterfall.cpp)
