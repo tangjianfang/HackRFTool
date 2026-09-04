@@ -1,0 +1,27 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sln.docstates
+
+# CMake / 构建输出
+out/
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# 编译产物
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.obj
+*.lib
+*.pdb
+*.exe
+*.dll
+
+# 系统杂项
+Thumbs.db
+Desktop.ini
