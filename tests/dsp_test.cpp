@@ -10,6 +10,7 @@
 #include "dsp/burst_detector.hpp"
 #include "dsp/channel_monitor.hpp"
 #include "dsp/fft.hpp"
+#include "dsp/esb.hpp"
 #include "dsp/gfsk.hpp"
 #include "dsp/live_bursts.hpp"
 #include "dsp/panorama.hpp"
@@ -396,6 +397,71 @@ static void test_live_bursts() {
     check(live.bursts().empty(), "clear 复位");
 }
 
+// ---- nRF24 ESB 合成打包器（测试助手） --------------------------------------
+// 空口比特 LSB-first：前导 0xAA + 地址(3-5B) + PCF(9bit: 低6位载荷长) + 载荷 + CRC16
+static void push_bits_lsb(std::vector<std::uint8_t>& bits, unsigned v, unsigned n) {
+    for (unsigned i = 0; i < n; ++i) bits.push_back((v >> i) & 1u);
+}
+
+static unsigned short esb_crc16(const std::vector<std::uint8_t>& bits, std::size_t from,
+                                std::size_t count) {
+    unsigned short crc = 0xFFFF;
+    for (std::size_t i = 0; i < count; ++i) {
+        const unsigned bit = bits[from + i];
+        // LSB-first 进位的 CCITT（poly 0x1021）：以反转多项式 0x8408 实现
+        const unsigned fb = (crc & 1u) ^ bit;
+        crc >>= 1;
+        if (fb != 0u) crc ^= 0x8408u;
+    }
+    return crc;
+}
+
+static std::vector<std::uint8_t> esb_pack(const std::vector<unsigned char>& address,
+                                          const std::vector<unsigned char>& payload) {
+    std::vector<std::uint8_t> bits;
+    push_bits_lsb(bits, 0xAA, 8);   // 前导
+    for (const unsigned char b : address) push_bits_lsb(bits, b, 8);
+    push_bits_lsb(bits, unsigned(payload.size()) & 0x3Fu, 6);   // PCF 载荷长
+    push_bits_lsb(bits, 0x01, 2);                                // PID
+    push_bits_lsb(bits, 0, 1);                                   // NO_ACK
+    for (const unsigned char b : payload) push_bits_lsb(bits, b, 8);
+    const unsigned short crc =
+        esb_crc16(bits, 8, bits.size() - 8);   // 覆盖地址+PCF+载荷
+    push_bits_lsb(bits, crc, 16);
+    return bits;
+}
+
+static void test_esb_roundtrip() {
+    const std::vector<unsigned char> addr = {0xE7, 0xE7, 0xE7, 0xE7, 0xE7};
+    const std::vector<unsigned char> payload = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC};
+    auto bits = esb_pack(addr, payload);
+    const auto frames = hackrftool::dsp::esb_scan(bits);
+    check(frames.size() == 1, "ESB 还原出 1 帧");
+    if (!frames.empty()) {
+        check(frames[0].address == addr, "ESB 地址还原");
+        check(frames[0].payload == payload, "ESB 载荷还原");
+    }
+}
+
+static void test_esb_corruption_rejected() {
+    const std::vector<unsigned char> addr = {0x12, 0x34, 0x56};
+    const std::vector<unsigned char> payload = {0xDE, 0xAD};
+    auto bits = esb_pack(addr, payload);
+    bits[bits.size() / 2] ^= 1u;   // 翻转一个载荷比特
+    check(hackrftool::dsp::esb_scan(bits).empty(), "ESB 比特错误被 CRC 拒绝");
+}
+
+static void test_esb_noise() {
+    // 纯随机比特（确定性 LCG）不应产出任何帧
+    std::vector<std::uint8_t> bits(2000, 0);
+    unsigned lcg = 42u;
+    for (auto& b : bits) {
+        lcg = lcg * 1664525u + 1013904223u;
+        b = (lcg >> 31) & 1u;
+    }
+    check(hackrftool::dsp::esb_scan(bits).empty(), "ESB 噪声无帧");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -414,6 +480,9 @@ int main() {
     test_iq_recorder_file();
     test_panorama_stitch();
     test_live_bursts();
+    test_esb_roundtrip();
+    test_esb_corruption_rejected();
+    test_esb_noise();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }
