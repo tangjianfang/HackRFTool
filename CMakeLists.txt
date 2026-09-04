@@ -21,12 +21,14 @@ include(WinFluxCompilerOptions)
 add_executable(HackRFTool WIN32
     src/app/main.cpp
     src/dsp/analyzer.cpp
+    src/dsp/channel_monitor.cpp
     src/dsp/fft.cpp
     src/dsp/waterfall.cpp
     src/radio/hackrf.cpp
+    src/ui/monitor_view.cpp
     src/ui/views.cpp)
 target_include_directories(HackRFTool PRIVATE src ${MSYS2_UCRT64_INCLUDE})
-target_link_libraries(HackRFTool PRIVATE WinFlux::flux)
+target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32)
 flux_apply_compiler_options(HackRFTool)
 
 foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)

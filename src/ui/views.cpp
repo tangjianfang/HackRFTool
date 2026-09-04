@@ -105,8 +105,6 @@ flux::ElementPtr waterfall_view(const flux::Palette& pal,
                             wf_color(level));
             }
         }
-        r.draw_text(flux::Rect{x + 8.0f, y + 4.0f, 160.0f, 16.0f}, L"瀑布（最新在上）",
-                    10.0f, pal.text_secondary, false, flux::Align::start, 0.8f);
     };
     return flux::view(std::move(p));
 }
