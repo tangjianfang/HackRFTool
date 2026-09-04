@@ -423,8 +423,8 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
     if (const auto it = app.row_cache.find(b.start_sample); it != app.row_cache.end())
         return it->second;
 
-    const unsigned long long us =
-        b.samples * 1000000ull / unsigned(sample_rate_hz / 1e6 + 0.5);
+    // µs = 样本数 / (fs/1e6)；fs 已折算为 Msps，不能再乘 1e6
+    const unsigned long long us = b.samples / unsigned(sample_rate_hz / 1e6 + 0.5);
     wchar_t head[96];
     swprintf(head, 96, L"t=%.3fs  %llu.%02llums  %.1f dB",
              double(b.start_sample) / sample_rate_hz, us / 1000, (us % 1000) / 10,
@@ -516,14 +516,14 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
     sum_p.text_align = flux::Align::start;
     auto summary = flux::ui::caption(
         pal, L"突发总数 " + std::to_wstring(app.live.bursts().size()) +
-                 L"（新在上；GFSK 比特按 1 Msps 解调；ESB✓ = 识别出 nRF24 兼容帧）",
+                 L"（新在上；GFSK 比特按 1 Msps 解调；ESB✓ = 识别出 nRF24 兼容帧；"
+                 L"若时长都接近 100ms，说明增益过高整段连片，请下调 LNA/VGA）",
         std::move(sum_p));
 
-    // 列表（最新 60 条）
+    // 列表（最新 60 条）：视口必须 flex_grow 占满剩余高度，否则塌 0 不渲染
     flux::Props list_p;
     list_p.direction = flux::Direction::column;
     list_p.gap = 2.0f;
-    list_p.flex_grow = 1.0f;
     auto list = flux::view(std::move(list_p));
     const auto& bursts = app.live.bursts();
     const std::size_t n_rows = std::min<std::size_t>(bursts.size(), 60);
@@ -536,7 +536,6 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
         list->children.push_back(
             flux::label(burst_row_text(app, b, fs_hz), std::move(row_p)));
     }
-
     flux::Props page_p;
     page_p.direction = flux::Direction::column;
     page_p.align = flux::Align::stretch;
@@ -545,7 +544,10 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
     auto page_el = flux::view(std::move(page_p));
     page_el->children.push_back(std::move(tools));
     page_el->children.push_back(std::move(summary));
-    page_el->children.push_back(flux::scroll_view(std::move(list)));
+    // 视口 flex_grow 占满剩余高度，否则列内视口高度塌 0 导致列表不渲染
+    flux::Props scroll_p;
+    scroll_p.flex_grow = 1.0f;
+    page_el->children.push_back(flux::scroll_view(std::move(list), std::move(scroll_p)));
     return page_el;
 }
 
@@ -579,6 +581,10 @@ flux::ElementPtr build(App& app) {
         app.frame = f;
     }
 
+    // M5：实时突发检测——必须在页面构建之前跑，否则行文本生成滞后一个
+    // 构建周期，突发已被环形缓冲挤出（read_slice 失败 → 永久缓存无 hex）
+    if (app.running.get()) app.live.refresh(float(app.burst_thr.get()));
+
     const flux::Palette& pal = app.host.palette();
 
     flux::Props root_p;
@@ -597,9 +603,6 @@ flux::ElementPtr build(App& app) {
     case 2: root->children.push_back(capture_page(app, pal)); break;
     default: root->children.push_back(spectrum_page(app, pal)); break;
     }
-
-    // M5：实时突发检测（任何模式，只要在接收；行文本在抓包页懒生成）
-    if (app.running.get()) app.live.refresh(float(app.burst_thr.get()));
 
     // 状态栏（M5：按模式动态拼接，实时信息不再固化在 status 文本里）
     flux::Props cap_p;
@@ -639,8 +642,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     app.status = app.host.make_state<std::wstring>(L"未开始（点击「开始」）");
     app.freq_text = app.host.make_state<std::wstring>(L"2450");
     app.center_mhz = app.host.make_state<double>(2450.0);
-    app.lna = app.host.make_state<double>(32.0);
-    app.vga = app.host.make_state<double>(30.0);
+    // 增益默认 16/16：32/30 时时域饱和（频谱分 bin 看不出），突发检测会
+    // 把整段信号连成一片（M3 教训，详见 docs/m3、m4 交付记录）
+    app.lna = app.host.make_state<double>(16.0);
+    app.vga = app.host.make_state<double>(16.0);
     app.rate_index = app.host.make_state<int>(3);
     app.sweep_on = app.host.make_state<int>(0);
     app.page = app.host.make_state<int>(0);

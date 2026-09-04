@@ -16,7 +16,7 @@ struct LiveBurst {
 
 class LiveBursts {
 public:
-    explicit LiveBursts(std::size_t ring_complex = 1'000'000);
+    explicit LiveBursts(std::size_t ring_complex = 2'000'000);   // ~100ms @20Msps
 
     // USB 回调线程：追加 IQ 字节（I/Q 交错 int8）
     void write(const std::int8_t* iq, std::size_t bytes);
