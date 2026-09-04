@@ -11,6 +11,7 @@
 #include "dsp/channel_monitor.hpp"
 #include "dsp/fft.hpp"
 #include "dsp/gfsk.hpp"
+#include "dsp/live_bursts.hpp"
 #include "dsp/panorama.hpp"
 #include "dsp/waterfall.hpp"
 #include "radio/iq_recorder.hpp"
@@ -358,6 +359,43 @@ static void test_panorama_stitch() {
     check(pano.panorama()[0] == -50.0f, "clear_fresh 保序（数据仍在）");
 }
 
+static void test_live_bursts() {
+    hackrftool::dsp::LiveBursts live(100000);
+    const auto push_burst = [&live](std::size_t start, std::size_t len) {
+        std::vector<std::int8_t> buf(len * 2, 1);   // 静默底
+        for (std::size_t i = 0; i < len; ++i) {
+            buf[i * 2] = 100;
+            buf[i * 2 + 1] = 0;
+        }
+        std::vector<std::int8_t> silence(start, 1);   // 字节数即样本数一半？——直接拼字节
+        (void)silence;
+        live.write(buf.data(), buf.size());
+    };
+    // 构造：静默 4000B + 突发2000样本 + 静默 + 突发 + 静默
+    std::vector<std::int8_t> silence(8000, 1);
+    live.write(silence.data(), silence.size());
+    push_burst(0, 2000);
+    live.write(silence.data(), silence.size());
+    push_burst(0, 2000);
+    live.write(silence.data(), silence.size());
+
+    const std::size_t n1 = live.refresh(-30.0f, 200);
+    check(n1 == 2, "首轮检出 2 个突发");
+    check(live.bursts().size() == 2, "列表 2 条");
+
+    // 新静默 + 1 个新突发 → 只新增 1
+    live.write(silence.data(), silence.size());
+    push_burst(0, 2000);
+    live.write(silence.data(), silence.size());
+    const std::size_t n2 = live.refresh(-30.0f, 200);
+    check(n2 == 1, "次轮仅新增 1（去重）");
+    check(live.bursts().size() == 3, "累计 3 条");
+    check(live.total_samples() > 0, "样本计数累计");
+
+    live.clear();
+    check(live.bursts().empty(), "clear 复位");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -375,6 +413,7 @@ int main() {
     test_burst_detector();
     test_iq_recorder_file();
     test_panorama_stitch();
+    test_live_bursts();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }
