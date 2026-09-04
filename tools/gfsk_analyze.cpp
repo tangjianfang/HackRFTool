@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "dsp/burst_detector.hpp"
+#include "dsp/esb.hpp"
 #include "dsp/gfsk.hpp"
 
 int main(int argc, char** argv) {
@@ -81,6 +82,17 @@ int main(int argc, char** argv) {
                     double(bu.start_sample) / fs * 1e6,
                     double(bu.length_samples) / fs * 1e6, bu.peak_db, r.bits.size(),
                     good, hex);
+
+        // M5：nRF24 ESB 帧搜索（CRC 通过才产出）
+        const auto frames = hackrftool::dsp::esb_scan(r.bits);
+        for (const auto& fr : frames) {
+            std::printf("     ESB✓ addr=");
+            for (const unsigned char a : fr.address) std::printf("%02X", a);
+            std::printf(" len=%zu payload=", fr.payload.size());
+            for (std::size_t i = 0; i < fr.payload.size() && i < 16; ++i)
+                std::printf("%02X", fr.payload[i]);
+            std::printf("\n");
+        }
     }
 
     if (bursts.empty()) {

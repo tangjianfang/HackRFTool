@@ -65,7 +65,7 @@ foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)
 endforeach()
 
 add_executable(HackRFAnalyze tools/gfsk_analyze.cpp src/dsp/burst_detector.cpp
-                                       src/dsp/gfsk.cpp)
+                                       src/dsp/esb.cpp src/dsp/gfsk.cpp)
 target_include_directories(HackRFAnalyze PRIVATE src)
 flux_apply_compiler_options(HackRFAnalyze)
 
