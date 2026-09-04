@@ -46,7 +46,8 @@ foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)
 endforeach()
 
 enable_testing()
-add_executable(HackRFToolTest tests/dsp_test.cpp src/dsp/analyzer.cpp src/dsp/fft.cpp
+add_executable(HackRFToolTest tests/dsp_test.cpp src/dsp/analyzer.cpp
+                              src/dsp/channel_monitor.cpp src/dsp/fft.cpp
                               src/dsp/waterfall.cpp)
 target_include_directories(HackRFToolTest PRIVATE src)
 flux_apply_compiler_options(HackRFToolTest)

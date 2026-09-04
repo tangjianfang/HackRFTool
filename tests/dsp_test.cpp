@@ -3,9 +3,11 @@
 #include <complex>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #include "dsp/analyzer.hpp"
+#include "dsp/channel_monitor.hpp"
 #include "dsp/fft.hpp"
 #include "dsp/waterfall.hpp"
 
@@ -121,6 +123,84 @@ static void test_waterfall_prefill() {
     check(snap[2] == -130 && snap[4] == -130, "未填充行 = -130");
 }
 
+static hackrftool::dsp::SpectrumFrame frame_with(std::size_t n, std::size_t peak_bin,
+                                                 float peak_db, float floor_db) {
+    hackrftool::dsp::SpectrumFrame f;
+    f.db.assign(n, floor_db);
+    f.peak = f.db;
+    if (peak_bin < n) f.db[peak_bin] = peak_db;
+    f.seq = 1;
+    return f;
+}
+
+static void test_monitor_auto_peak_tracks() {
+    hackrftool::dsp::ChannelMonitor mon(8);
+    mon.set_mode(hackrftool::dsp::ChannelMonitor::Mode::auto_peak);
+    mon.push(frame_with(256, 10, -40.0f, -90.0f));
+    check(mon.tracked_bin() == 10, "自动跟踪 argmax bin");
+    mon.push(frame_with(256, 200, -35.0f, -90.0f));
+    check(mon.tracked_bin() == 200, "峰移动后跟踪新 bin");
+    const auto s = mon.series();
+    check(s.size() == 2 && s[1].db == -35.0f, "序列记录 RSSI");
+}
+
+static void test_monitor_fixed_bin_and_clamp() {
+    hackrftool::dsp::ChannelMonitor mon(8);
+    mon.set_mode(hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
+    mon.set_fixed_bin(999);   // 越界 → clamp 255
+    mon.push(frame_with(256, 10, -40.0f, -90.0f));
+    check(mon.tracked_bin() == 255, "fixed bin 钳制到 255");
+    check(mon.series().back().db == -90.0f, "读取的是 bin255 的底噪");
+}
+
+static void test_monitor_stats() {
+    hackrftool::dsp::ChannelMonitor mon(16);
+    mon.set_mode(hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
+    mon.set_fixed_bin(0);
+    for (const float db : {-50.0f, -80.0f, -45.0f, -90.0f}) {
+        mon.push(frame_with(256, 0, db, db));   // bin0 即目标
+    }
+    const auto st = mon.stats(-70.0f);
+    check(st.count == 4, "统计样本数");
+    check(std::abs(st.mean - (-66.25f)) < 0.01, "均值");
+    check(std::abs(st.peak - (-45.0f)) < 0.01, "峰值");
+    // 样本方差（除以 count）：{-50,-80,-45,-90} → 367.19
+    check(std::abs(st.variance - 367.1875f) < 0.5, "方差");
+    check(std::abs(st.duty - 0.5f) < 0.001, "占空比 = 高于阈值比例");
+}
+
+static void test_monitor_ring_and_csv() {
+    hackrftool::dsp::ChannelMonitor mon(4);
+    mon.set_mode(hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
+    mon.set_fixed_bin(0);
+    for (int i = 0; i < 6; ++i)
+        mon.push(frame_with(256, 0, float(-50 - i), float(-50 - i)));
+    const auto s = mon.series();
+    check(s.size() == 4, "环形容量限制");
+    check(std::abs(s.front().db - (-52.0f)) < 0.01, "最旧样本被滚动掉（front=-52）");
+    const std::wstring path = L"test-monitor-export.csv";
+    check(mon.export_csv(path), "CSV 导出成功");
+    if (std::FILE* fp = _wfopen(path.c_str(), L"r")) {
+        char line[128];
+        unsigned lines = 0;
+        bool header_ok = false, first_data_ok = false;
+        while (std::fgets(line, sizeof line, fp) != nullptr) {
+            if (lines == 0) header_ok = (std::strcmp(line, "elapsed_s,db\n") == 0);
+            if (lines == 1) {
+                double t = 0.0, db = 0.0;
+                first_data_ok =
+                    (std::sscanf(line, "%lf,%lf", &t, &db) == 2 && db < -51.9 && db > -52.1);
+            }
+            ++lines;
+        }
+        std::fclose(fp);
+        check(header_ok, "CSV 表头");
+        check(first_data_ok, "CSV 首行数据（-52）");
+        check(lines == 5, "CSV 行数 = 表头 + 4 样本");
+    }
+    std::remove("test-monitor-export.csv");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -129,6 +209,10 @@ int main() {
     test_analyzer_peak_hold_and_reset();
     test_waterfall_ring();
     test_waterfall_prefill();
+    test_monitor_auto_peak_tracks();
+    test_monitor_fixed_bin_and_clamp();
+    test_monitor_stats();
+    test_monitor_ring_and_csv();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }
