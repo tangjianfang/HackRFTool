@@ -7,8 +7,10 @@
 #include <vector>
 
 #include "dsp/analyzer.hpp"
+#include "dsp/burst_detector.hpp"
 #include "dsp/channel_monitor.hpp"
 #include "dsp/fft.hpp"
+#include "dsp/gfsk.hpp"
 #include "dsp/waterfall.hpp"
 
 static int failures = 0;
@@ -201,6 +203,113 @@ static void test_monitor_ring_and_csv() {
     std::remove("test-monitor-export.csv");
 }
 
+// ---- GFSK 合成调制器（测试助手） ------------------------------------------
+
+static double qfunc(double x) { return 0.5 * std::erfc(x / std::sqrt(2.0)); }
+
+// GFSK 频率脉冲：矩形符号脉冲经 BT=0.5 高斯（Q 函数形式），归一化面积 1
+static std::vector<double> gfsk_pulse(std::size_t sps) {
+    std::vector<double> pulse(4 * sps, 0.0);
+    const double c = 2.0 * 3.14159265358979323846 * 0.5 / std::sqrt(0.6931471805599453);
+    double area = 0.0;
+    for (std::size_t i = 0; i < pulse.size(); ++i) {
+        const double t = (double(i) - 2.0 * sps) / double(sps);   // -2..2 符号
+        pulse[i] = qfunc(c * (t - 0.5)) - qfunc(c * (t + 0.5));
+        area += pulse[i];
+    }
+    for (auto& v : pulse) v /= area;
+    return pulse;
+}
+
+static std::vector<std::complex<float>> gfsk_modulate(const std::vector<unsigned>& bits,
+                                                      std::size_t sps, double dev_hz,
+                                                      double fs) {
+    const auto pulse = gfsk_pulse(sps);
+    std::vector<double> nrz(bits.size() * sps, 0.0);
+    for (std::size_t i = 0; i < bits.size(); ++i)
+        for (std::size_t j = 0; j < sps; ++j)
+            nrz[i * sps + j] = bits[i] ? 1.0 : -1.0;
+    const std::size_t n = nrz.size() + pulse.size();
+    std::vector<double> freq(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i)
+        for (std::size_t k = 0; k < pulse.size(); ++k) {
+            const auto src = std::ptrdiff_t(i) - std::ptrdiff_t(k) +
+                             std::ptrdiff_t(pulse.size() / 2) - 1;
+            if (src >= 0 && src < std::ptrdiff_t(nrz.size()))
+                freq[i] += nrz[size_t(src)] * pulse[k];
+        }
+    std::vector<std::complex<float>> out(n);
+    double phase = 0.0;
+    const double k_dev = 2.0 * 3.14159265358979323846 * dev_hz / fs;
+    for (std::size_t i = 0; i < n; ++i) {
+        phase += k_dev * freq[i];
+        out[i] = {float(std::cos(phase)), float(std::sin(phase))};
+    }
+    return out;
+}
+
+static void test_gfsk_roundtrip() {
+    // 200 随机载荷比特，首尾各 4 个哑符号（避开成形拖尾）
+    std::vector<unsigned> bits(4, 0u);
+    unsigned lcg = 7u;
+    for (std::size_t i = 0; i < 200; ++i) {
+        lcg = lcg * 1664525u + 1013904223u;
+        bits.push_back((lcg >> 31) & 1u);
+    }
+    bits.insert(bits.end(), 4, 0u);
+    const auto wave = gfsk_modulate(bits, 20, 160e3, 20e6);
+    hackrftool::dsp::GfskDemod demod(20e6, 1e6, 160e3);
+    const auto r = demod.demod(wave, 0);
+    check(r.bits.size() > 204, "解调符号数足够");
+    std::size_t errors = 0;
+    for (std::size_t i = 4; i < 204; ++i)
+        errors += (r.bits[i] != bits[i]);
+    check(errors == 0, "GFSK 无噪往返 BER=0");
+    float qmin = 1.0f;
+    for (std::size_t i = 4; i < 204; ++i) qmin = std::min(qmin, r.quality[i]);
+    check(qmin > 0.3f, "符号置信度健康");
+}
+
+static void test_gfsk_short_input() {
+    hackrftool::dsp::GfskDemod demod(20e6, 1e6, 160e3);
+    check(demod.demod({}, 0).bits.empty(), "空输入返回空");
+    check(demod.demod(std::vector<std::complex<float>>(15, {1.f, 0.f}), 0).bits.empty(),
+          "不足一个符号返回空");
+}
+
+static void test_burst_detector() {
+    // 8 万复样本：静默 (1,0) ≈ -42 dB，三个幅度 100 复单音突发 ≈ -2 dB
+    const std::size_t n = 80000;
+    std::vector<std::int8_t> iq(n * 2, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+        iq[i * 2] = 1;   // 静默底噪
+    }
+    const std::size_t starts[3] = {5000, 30000, 60000};
+    const std::size_t len = 2000;
+    for (const std::size_t st : starts) {
+        for (std::size_t i = 0; i < len; ++i) {
+            const double ph = 2.0 * 3.14159265358979323846 * double(i) / 20.0;
+            iq[(st + i) * 2] = std::int8_t(100 * std::cos(ph));
+            iq[(st + i) * 2 + 1] = std::int8_t(100 * std::sin(ph));
+        }
+    }
+    const auto bursts =
+        hackrftool::dsp::detect_bursts(iq.data(), iq.size(), -30.0f, 200);
+    check(bursts.size() == 3, "恰好检出 3 个突发");
+    if (bursts.size() == 3) {
+        for (std::size_t b = 0; b < 3; ++b) {
+            const auto want = starts[b];
+            check(std::abs(std::ptrdiff_t(bursts[b].start_sample) -
+                           std::ptrdiff_t(want)) < 300,
+                  "突发起点容差内");
+            check(std::abs(std::ptrdiff_t(bursts[b].length_samples) -
+                           std::ptrdiff_t(len)) < 600,
+                  "突发长度容差内");
+            check(bursts[b].peak_db > -5.0f, "突发峰值电平");
+        }
+    }
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -213,6 +322,9 @@ int main() {
     test_monitor_fixed_bin_and_clamp();
     test_monitor_stats();
     test_monitor_ring_and_csv();
+    test_gfsk_roundtrip();
+    test_gfsk_short_input();
+    test_burst_detector();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }
