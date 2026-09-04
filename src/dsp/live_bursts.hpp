@@ -29,6 +29,10 @@ public:
     void clear() noexcept;
     [[nodiscard]] unsigned long long total_samples() const noexcept;
 
+    // 取 [start, start+count) 的 IQ 切片（字节交错 int8）；越界/已被挤出环返回 false
+    [[nodiscard]] bool read_slice(unsigned long long start, unsigned long long count,
+                                  std::vector<std::int8_t>& out);
+
 private:
     const std::size_t ring_complex_;
     mutable std::mutex mutex_;
@@ -36,7 +40,6 @@ private:
     std::size_t ring_pos_ = 0;              // 下一写入（复样本）
     unsigned long long written_ = 0;        // 累计复样本数
     unsigned long long detected_upto_ = 0;  // 已检测边界
-    unsigned long long ring_base_ = 0;      // ring_[0] 的绝对样本号
     std::vector<LiveBurst> bursts_;
 };
 

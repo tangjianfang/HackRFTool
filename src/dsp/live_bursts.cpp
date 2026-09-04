@@ -21,7 +21,6 @@ void LiveBursts::write(const std::int8_t* iq, std::size_t bytes) {
         ring_[ring_pos_ * 2] = iq[i * 2];
         ring_[ring_pos_ * 2 + 1] = iq[i * 2 + 1];
         ring_pos_ = (ring_pos_ + 1) % ring_complex_;
-        if (ring_pos_ == 0) ring_base_ += ring_complex_;
     }
     written_ += complex_in;
 }
@@ -74,6 +73,21 @@ void LiveBursts::clear() noexcept {
 unsigned long long LiveBursts::total_samples() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return written_;
+}
+
+bool LiveBursts::read_slice(unsigned long long start, unsigned long long count,
+                            std::vector<std::int8_t>& out) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const unsigned long long oldest =
+        (written_ > ring_complex_) ? written_ - ring_complex_ : 0;
+    if (start < oldest || start + count > written_ || count == 0) return false;
+    out.resize(static_cast<std::size_t>(count) * 2);
+    for (unsigned long long i = 0; i < count; ++i) {
+        const std::size_t idx = static_cast<std::size_t>((start + i) % ring_complex_);
+        out[static_cast<std::size_t>(i) * 2] = ring_[idx * 2];
+        out[static_cast<std::size_t>(i) * 2 + 1] = ring_[idx * 2 + 1];
+    }
+    return true;
 }
 
 } // namespace hackrftool::dsp

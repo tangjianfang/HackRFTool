@@ -4,9 +4,11 @@
 #include <commdlg.h>
 
 #include <algorithm>
+#include <complex>
 #include <atomic>
 #include <cwchar>
 #include <functional>
+#include <map>
 #include <string>
 #include <thread>
 
@@ -15,9 +17,13 @@
 
 #include "dsp/analyzer.hpp"
 #include "dsp/channel_monitor.hpp"
+#include "dsp/esb.hpp"
+#include "dsp/gfsk.hpp"
+#include "dsp/live_bursts.hpp"
 #include "dsp/panorama.hpp"
 #include "dsp/waterfall.hpp"
 #include "radio/hackrf.hpp"
+#include "radio/iq_recorder.hpp"
 #include "ui/monitor_view.hpp"
 #include "ui/views.hpp"
 
@@ -45,7 +51,10 @@ struct App {
     hackrftool::dsp::WaterfallModel waterfall_sweep{320, 64};  // 全频段瀑布
     hackrftool::dsp::PanoramaModel pano{5, 256};               // 全频段拼接
     hackrftool::dsp::ChannelMonitor monitor{3600};
+    hackrftool::dsp::LiveBursts live;                          // M5：实时突发
     hackrftool::radio::HackRadio radio;
+    hackrftool::radio::IqRecorder recorder;                    // M5：UI 内 IQ 录制
+    std::map<unsigned long long, std::wstring> row_cache;      // 突发行文本（按 start_sample）
 
     flux::State<bool> running;
     flux::State<std::wstring> status;
@@ -60,10 +69,11 @@ struct App {
     std::atomic<std::size_t> seg_idx{4};   // 从 4 起步，首次跳频即到段 0
     std::atomic<unsigned long long> hop_ms{0};
     // M2：监测页
-    flux::State<int> page;                 // 0=频谱 1=信道监测
+    flux::State<int> page;                 // 0=频谱 1=信道监测 2=实时抓包
     flux::State<bool> auto_track;          // 自动跟踪最强峰
     flux::State<std::wstring> mon_text;    // 监测目标 MHz 文本
     flux::State<double> threshold;         // 活动阈值 dB
+    flux::State<double> burst_thr;         // M5：突发检测阈值 dB
     hackrftool::dsp::SpectrumFrame frame;   // 本帧快照（build 前拉取）
 };
 
@@ -88,7 +98,10 @@ std::size_t mhz_to_bin(double mhz, double center_mhz) noexcept {
 }
 
 void rx_trampoline_ui(const std::int8_t* iq, std::size_t bytes, void* ctx) {
-    static_cast<hackrftool::dsp::SpectrumAnalyzer*>(ctx)->feed(iq, bytes);
+    auto* app = static_cast<App*>(ctx);
+    app->analyzer.feed(iq, bytes);
+    app->live.write(iq, bytes);
+    if (app->recorder.recording()) app->recorder.write(iq, bytes);
 }
 
 // 扫描线程：驻留到点改中心频率（绝不碰 UI/绘制线程——在 paint 里同步
@@ -130,15 +143,14 @@ void apply_radio(App& app) {
         app.status.set(L"配置失败: " + widen(err));
         return;
     }
-    app.status.set(L"接收中 " + wd1(app.center_mhz.get()) + L" MHz / " +
-                    std::to_wstring(unsigned(cfg.sample_rate_hz / 1e6)) + L" Msps / LNA " +
-                    std::to_wstring(cfg.lna_gain_db) + L" / VGA " +
-                    std::to_wstring(cfg.vga_gain_db));
+    // 频率等实时信息由状态栏按模式动态拼接（M5 清理：不再固化在状态文本里）
+    app.status.set(L"接收中");
 }
 
 void toggle_rx(App& app) {
     if (app.running.get()) {
         set_sweep_live(app, false);
+        if (app.recorder.recording()) app.recorder.stop();
         app.radio.stop_rx();
         app.running.set(false);
         app.status.set(L"已停止");
@@ -150,7 +162,7 @@ void toggle_rx(App& app) {
         return;
     }
     apply_radio(app);
-    if (!app.radio.start_rx(&rx_trampoline_ui, &app.analyzer, &err)) {
+    if (!app.radio.start_rx(&rx_trampoline_ui, &app, &err)) {
         app.status.set(L"启动接收失败: " + widen(err));
         return;
     }
@@ -380,6 +392,163 @@ flux::ElementPtr monitor_page(App& app, const flux::Palette& pal) {
     return page_el;
 }
 
+// ---- 实时抓包页（M5） -------------------------------------------------------
+
+void record_toggle(App& app) {
+    if (app.recorder.recording()) {
+        app.recorder.stop();
+        app.status.set(L"录制完成: " + std::to_wstring(app.recorder.bytes_written()) +
+                       L" 字节");
+        return;
+    }
+    wchar_t path[MAX_PATH] = L"hackrftool-iq.cs8";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = L"IQ 采集 (*.cs8)\0*.cs8\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"cs8";
+    ofn.Flags = OFN_OVERWRITEPROMPT;
+    if (!GetSaveFileNameW(&ofn)) return;
+    if (!app.recorder.start(path)) {
+        app.status.set(L"无法创建录制文件");
+        return;
+    }
+    app.status.set(L"录制中…");
+}
+
+// 突发行文本（懒生成 + 缓存）：时间/时长/峰值 + GFSK 前 8 字节 hex + ESB 帧识别
+std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
+                            double sample_rate_hz) {
+    if (const auto it = app.row_cache.find(b.start_sample); it != app.row_cache.end())
+        return it->second;
+
+    const unsigned long long us =
+        b.samples * 1000000ull / unsigned(sample_rate_hz / 1e6 + 0.5);
+    wchar_t head[96];
+    swprintf(head, 96, L"t=%.3fs  %llu.%02llums  %.1f dB",
+             double(b.start_sample) / sample_rate_hz, us / 1000, (us % 1000) / 10,
+             b.peak_db);
+    std::wstring text = head;
+
+    if (b.samples >= 128) {
+        std::vector<std::int8_t> slice;
+        if (app.live.read_slice(b.start_sample, b.samples, slice)) {
+            std::vector<std::complex<float>> cmplx(b.samples);
+            for (unsigned long long i = 0; i < b.samples; ++i)
+                cmplx[static_cast<std::size_t>(i)] = {
+                    float(slice[static_cast<std::size_t>(i) * 2]),
+                    float(slice[static_cast<std::size_t>(i) * 2 + 1])};
+            const hackrftool::dsp::GfskDemod demod(sample_rate_hz, 1e6, 160e3);
+            const auto r = demod.demod(cmplx, 0);
+            const std::size_t n_bits = std::min<std::size_t>(r.bits.size(), 64);
+            wchar_t hex[64];
+            std::size_t hx = 0;
+            for (std::size_t byte_i = 0; byte_i < 8; ++byte_i) {
+                unsigned v = 0;
+                for (std::size_t bit = 0; bit < 8; ++bit) {
+                    const std::size_t idx = byte_i * 8 + bit;
+                    v = (v << 1) | ((idx < n_bits) ? unsigned(r.bits[idx] & 1u) : 0u);
+                }
+                hx += swprintf(hex + hx, 32 - hx, L"%02X", v);
+            }
+            text += L"  |  ";
+            text += hex;
+            const auto frames = hackrftool::dsp::esb_scan(r.bits);
+            if (!frames.empty()) {
+                text += L"  ESB✓";
+                for (const auto& fr : frames) {
+                    text += L" addr:";
+                    for (const unsigned char a : fr.address) {
+                        wchar_t ab[8];
+                        swprintf(ab, 8, L"%02X", a);
+                        text += ab;
+                    }
+                    text += L" len:" + std::to_wstring(fr.payload.size());
+                }
+            }
+        }
+    }
+
+    app.row_cache[b.start_sample] = text;
+    if (app.row_cache.size() > 800) {   // 限额淘汰最旧
+        auto cut = app.row_cache.begin();
+        std::advance(cut, 200);
+        app.row_cache.erase(app.row_cache.begin(), cut);
+    }
+    return text;
+}
+
+flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
+    const double fs_hz = kRatesMsps[size_t(app.rate_index.get())] * 1e6;
+
+    // 工具行
+    flux::Props tools_p;
+    tools_p.direction = flux::Direction::row;
+    tools_p.align = flux::Align::center;
+    tools_p.gap = 12.0f;
+    auto tools = flux::view(std::move(tools_p));
+    tools->children.push_back(flux::ui::field(
+        pal, L"突发阈值 " + wd1(app.burst_thr.get()) + L" dB",
+        flux::slider(float(app.burst_thr.get()), -60.0f, -20.0f, [&app](float v) {
+            app.burst_thr.set(double(int(v)));
+        })));
+    flux::Props btn_clear;
+    btn_clear.background = pal.surface;
+    btn_clear.hover_background = pal.surface_hover;
+    btn_clear.text_color = pal.text;
+    btn_clear.border_color = pal.border;
+    btn_clear.border_width = 1.0f;
+    tools->children.push_back(flux::button(L"清空", [&app] {
+        app.live.clear();
+        app.row_cache.clear();
+    }, std::move(btn_clear)));
+    flux::Props btn_rec;
+    btn_rec.background = app.recorder.recording() ? pal.danger : pal.accent;
+    btn_rec.hover_background = pal.accent_hover;
+    btn_rec.text_color = pal.on_accent;
+    tools->children.push_back(
+        flux::button(app.recorder.recording() ? L"■ 停止录制" : L"● 录制 IQ",
+                     [&app] { record_toggle(app); }, std::move(btn_rec)));
+
+    // 概览行
+    flux::Props sum_p;
+    sum_p.text_align = flux::Align::start;
+    auto summary = flux::ui::caption(
+        pal, L"突发总数 " + std::to_wstring(app.live.bursts().size()) +
+                 L"（新在上；GFSK 比特按 1 Msps 解调；ESB✓ = 识别出 nRF24 兼容帧）",
+        std::move(sum_p));
+
+    // 列表（最新 60 条）
+    flux::Props list_p;
+    list_p.direction = flux::Direction::column;
+    list_p.gap = 2.0f;
+    list_p.flex_grow = 1.0f;
+    auto list = flux::view(std::move(list_p));
+    const auto& bursts = app.live.bursts();
+    const std::size_t n_rows = std::min<std::size_t>(bursts.size(), 60);
+    for (std::size_t k = 0; k < n_rows; ++k) {
+        const auto& b = bursts[bursts.size() - 1 - k];   // 新→旧
+        flux::Props row_p;
+        row_p.text_align = flux::Align::start;
+        row_p.font_size_pt = 12.0f;
+        row_p.text_color = pal.text;
+        list->children.push_back(
+            flux::label(burst_row_text(app, b, fs_hz), std::move(row_p)));
+    }
+
+    flux::Props page_p;
+    page_p.direction = flux::Direction::column;
+    page_p.align = flux::Align::stretch;
+    page_p.gap = 8.0f;
+    page_p.flex_grow = 1.0f;
+    auto page_el = flux::view(std::move(page_p));
+    page_el->children.push_back(std::move(tools));
+    page_el->children.push_back(std::move(summary));
+    page_el->children.push_back(flux::scroll_view(std::move(list)));
+    return page_el;
+}
+
 // ---- 根 -------------------------------------------------------------------
 
 flux::ElementPtr build(App& app) {
@@ -421,21 +590,42 @@ flux::ElementPtr build(App& app) {
     root_p.padding = flux::EdgeInsets{16.0f, 16.0f, 16.0f, 16.0f};
     auto root = flux::view(std::move(root_p));
     root->children.push_back(flux::ui::tabs(
-        pal, {L"频谱", L"信道监测"}, app.page.get(),
+        pal, {L"频谱", L"信道监测", L"实时抓包"}, app.page.get(),
         [&app](int i) { app.page.set(i); }));
-    root->children.push_back(app.page.get() == 0 ? spectrum_page(app, pal)
-                                                 : monitor_page(app, pal));
+    switch (app.page.get()) {
+    case 1: root->children.push_back(monitor_page(app, pal)); break;
+    case 2: root->children.push_back(capture_page(app, pal)); break;
+    default: root->children.push_back(spectrum_page(app, pal)); break;
+    }
 
-    // 状态栏（追加扫描进度与帧号，便于肉眼确认数据在流动）
+    // M5：实时突发检测（任何模式，只要在接收；行文本在抓包页懒生成）
+    if (app.running.get()) app.live.refresh(float(app.burst_thr.get()));
+
+    // 状态栏（M5：按模式动态拼接，实时信息不再固化在 status 文本里）
     flux::Props cap_p;
     cap_p.text_align = flux::Align::start;
     std::wstring status_text = app.status.get();
-    if (app.running.get() && app.sweep_on.get() == 1) {
-        status_text += L"  ·  扫描 段 " + std::to_wstring(app.seg_idx + 1) + L"/5 @ " +
-                       wd1(seg_center_mhz(app.seg_idx)) + L" MHz";
+    if (app.running.get()) {
+        status_text = L"接收中 · ";
+        status_text += (app.sweep_on.get() == 1)
+                           ? L"扫描 段 " + std::to_wstring(app.seg_idx.load() + 1) +
+                                 L"/5 @ " + wd1(seg_center_mhz(app.seg_idx.load())) +
+                                 L" MHz"
+                           : L"中心 " + wd1(app.center_mhz.get()) + L" MHz";
+        status_text += L" · " +
+                       std::to_wstring(
+                           unsigned(kRatesMsps[size_t(app.rate_index.get())])) +
+                       L" Msps · LNA " + std::to_wstring(unsigned(app.lna.get())) +
+                       L"/VGA " + std::to_wstring(unsigned(app.vga.get()));
+        if (!app.frame.db.empty())
+            status_text += L" · 帧 " + std::to_wstring(app.frame.seq);
+        if (app.recorder.recording())
+            status_text += L" · ●录制 " +
+                           std::to_wstring(app.recorder.bytes_written() / (1024 * 1024)) +
+                           L"MB";
+    } else if (!app.frame.db.empty()) {
+        status_text += L"  ·  帧 " + std::to_wstring(app.frame.seq);
     }
-    status_text +=
-        (app.frame.db.empty() ? L"" : L"  ·  帧 " + std::to_wstring(app.frame.seq));
     root->children.push_back(flux::ui::caption(pal, status_text, std::move(cap_p)));
     return root;
 }
@@ -457,6 +647,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     app.auto_track = app.host.make_state<bool>(true);
     app.mon_text = app.host.make_state<std::wstring>(L"2450");
     app.threshold = app.host.make_state<double>(-70.0);
+    app.burst_thr = app.host.make_state<double>(-40.0);
 
     // 命令行：auto = 启动即接收（频谱页）；autom = 接收+监测页；autos = 接收+全频段扫描
     bool auto_start = false;
@@ -470,6 +661,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             auto_start = true;
             app.sweep_on.set(1);
         }
+        if (wcscmp(cmd_line, L"autocap") == 0) {
+            auto_start = true;
+            app.page.set(2);
+        }
     }
     if (auto_start) {
         std::string err;
@@ -477,7 +672,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             app.status.set(L"打开失败: " + widen(err));
         } else {
             apply_radio(app);
-            if (app.radio.start_rx(&rx_trampoline_ui, &app.analyzer, &err)) {
+            if (app.radio.start_rx(&rx_trampoline_ui, &app, &err)) {
                 app.running.set(true);
                 if (app.sweep_on.get() == 1) set_sweep_live(app, true);
             } else {
