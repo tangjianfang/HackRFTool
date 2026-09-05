@@ -444,10 +444,14 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
     std::wstring text = head;
 
     if (b.samples >= 128) {
+        // 解调切片上限 262144 样本（13ms）：增益饱和时"突发"会连成整环
+        // （2M 样本），不限长会引发每行 16MB 的分配风暴
+        const unsigned long long n_demod =
+            std::min<unsigned long long>(b.samples, 262144);
         std::vector<std::int8_t> slice;
-        if (app.live.read_slice(b.start_sample, b.samples, slice)) {
-            std::vector<std::complex<float>> cmplx(b.samples);
-            for (unsigned long long i = 0; i < b.samples; ++i)
+        if (app.live.read_slice(b.start_sample, n_demod, slice)) {
+            std::vector<std::complex<float>> cmplx(n_demod);
+            for (unsigned long long i = 0; i < n_demod; ++i)
                 cmplx[static_cast<std::size_t>(i)] = {
                     float(slice[static_cast<std::size_t>(i) * 2]),
                     float(slice[static_cast<std::size_t>(i) * 2 + 1])};
@@ -696,6 +700,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             auto_start = true;
             app.page.set(2);
         }
+        if (wcscmp(cmd_line, L"autosc") == 0) {
+            // 压测组合：接收 + 全频段扫描 + 实时抓包页（demod 高负载路径）
+            auto_start = true;
+            app.sweep_on.set(1);
+            app.page.set(2);
+        }
         if (wcscmp(cmd_line, L"selftest") == 0) {
             auto_start = true;
             selftest = true;
@@ -733,7 +743,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     // M6：自测看门狗——收集指标、断言、写报告、发 WM_QUIT
     if (selftest) {
         const DWORD ui_tid = GetCurrentThreadId();
-        const int seconds = app.sweep_on.get() == 1 ? 8 : 6;
+        int seconds = app.sweep_on.get() == 1 ? 8 : 6;
+        // 浸润测试：HACKRFTOOL_SOAK=秒数 覆盖默认时长（覆盖"一段时间后才崩"的尺度）
+        char soak[16] = {};
+        if (GetEnvironmentVariableA("HACKRFTOOL_SOAK", soak, sizeof soak) > 0) {
+            const int s = std::atoi(soak);
+            if (s > 0 && s <= 900) seconds = s;
+        }
         const char* report_path =
             app.sweep_on.get() == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt";
         std::thread([&app, ui_tid, seconds, device_ok, report_path] {
