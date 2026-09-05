@@ -148,6 +148,9 @@ struct App {
     // 设置持久化（#57）：序列化比对变化才写盘，3s 节流
     std::string last_settings;
     unsigned long long last_set_ms = 0;
+    // 数据面遥测（#60）：UI 状态变更快照 + DSP 1Hz 节流
+    std::string last_ui_state;
+    unsigned long long last_dsp_ms = 0;
     bool afc_on = true;                    // AFC 自动频率微调（收音页）
     HWND check_afc = nullptr;
     int fm_bw = 0;                         // 收听带宽：0=±120k 1=±80k 2=±50k
@@ -1285,6 +1288,55 @@ flux::ElementPtr build(App& app) {
     // 原生骨架状态同步（工具栏按钮态 + 状态栏分段文本；心跳驱动，零定时器）
     sync_chrome(app);
     save_settings_tick(app);   // 设置缓存（#57）：3s 节流、变化才写盘
+    // 遥测（#60）：UI 状态变更即记（非周期轮询——变化才是事件）；
+    // DSP 数据 1Hz 快照（峰值/静噪/导频/人声/在线台——分析信号质量用）
+    {
+        std::string st = std::to_string(app.page) + "|" +
+                         std::to_string(app.center_mhz) + "|" +
+                         std::to_string(app.rate_index) + "|" +
+                         std::to_string(app.lna) + "," +
+                         std::to_string(app.vga) + "|" +
+                         (app.amp ? "1" : "0") + "|" +
+                         (app.afc_on ? "1" : "0") + "|" +
+                         (app.stereo_opt ? "1" : "0") + "|" +
+                         std::to_string(app.fm_bw) + "|" +
+                         std::to_string(app.vol);
+        if (st != app.last_ui_state) {
+            app.last_ui_state = st;
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::info, "UI", "state",
+                {{"page", std::to_string(app.page)},
+                 {"center", std::to_string(app.center_mhz)},
+                 {"rate", std::to_string(app.rate_index)},
+                 {"gain", std::to_string(app.lna) + "/" + std::to_string(app.vga)},
+                 {"amp", app.amp ? "1" : "0"},
+                 {"afc", app.afc_on ? "1" : "0"},
+                 {"stereo", app.stereo_opt ? "1" : "0"},
+                 {"bw", std::to_string(app.fm_bw)},
+                 {"vol", std::to_string(app.vol)}});
+        }
+        if (app.fm_on.load() && now - app.last_dsp_ms >= 1000) {
+            app.last_dsp_ms = now;
+            char pk[16], pl[16], vc[16];
+            float mx = -999.0f, sum = 0.0f;
+            for (const float v : app.frame.db) {
+                mx = std::max(mx, v);
+                sum += v;
+            }
+            snprintf(pk, 16, "%.1f", mx);
+            snprintf(pl, 16, "%.3f", app.fm_pilot.load());
+            snprintf(vc, 16, "%.1f", app.voice_cur);
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::info, "DSP", "fm",
+                {{"peak_db", pk},
+                 {"pilot", pl},
+                 {"voice_db", vc},
+                 {"sq", app.squelch_open.load() ? "1" : "0"},
+                 {"avg_db", std::to_string(
+                                sum / float(std::max<std::size_t>(
+                                           app.frame.db.size(), 1)))}});
+        }
+    }
 
     // 几何看门狗：不信任任何消息配对（EXITSIZEMOVE/WM_SIZE 均可能丢失——
     // 用户实测拖拽后卡死在小尺寸），每心跳核对内容区实际/目标矩形，
@@ -2848,6 +2900,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                              bursts, wfs, esb);
                 std::fprintf(rp, "结果: %s\n",
                              !device_ok ? "SKIP（无设备）" : (hard_ok ? "PASS" : "FAIL"));
+                // 遥测证据（#60）：事件总数 + 关键事件计数——报告自带日志摘要
+                {
+                    auto& lg = hackrftool::log::Logger::instance();
+                    std::fprintf(rp, "遥测: events=%zu ui_cmd=%zu tune=%zu\n",
+                                 lg.count(), lg.count_event("UI", "cmd"),
+                                 lg.count_event("RADIO", "tune"));
+                    for (const auto& e : lg.tail(5))
+                        std::fprintf(rp, "  [%s/%s] %s\n", e.cat.c_str(),
+                                     e.event.c_str(),
+                                     e.kv.empty() ? "" : e.kv[0].first.c_str());
+                }
                 std::fclose(rp);
             }
             PostThreadMessage(ui_tid, WM_QUIT, 0, 0);
