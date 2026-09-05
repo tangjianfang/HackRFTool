@@ -1260,12 +1260,39 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
 // ---- 云图页（#54）：原生 GDI 云图窗覆盖内容区（此 WinFlux 占位被覆盖） ------
 
 flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
-    (void)app;   // 云图显示由原生 apt_view 承担（WinFlux 占位被覆盖）
+    // 状态卡（#65）：链路判读直接上 UI——用户"云图没法用不知道哪错"
+    // 的答案在这里（判读规则与 APT diag 日志同源）：
+    //   sub<0.05=无信号（等过境/查天线）  sub 高 sync=0=行同步未锁定
+    //   sync≈2/s 且 lines 递增=正在成像
     flux::Props page_p;
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
-    (void)pal;
-    return page_el;   // 实际显示由 apt_view（原生窗）承担
+    const float sub = app.apt.subcarrier_level();
+    const unsigned sps = app.apt.sync_per_sec();
+    const std::uint64_t lines = app.apt.lines();
+    const bool imaging = sps >= 1 && lines > 0;
+    wchar_t txt[96];
+    swprintf(txt, 96, L"子载波 %.3f｜同步 %u/s｜累计行 %llu",
+             double(sub), sps, (unsigned long long)lines);
+    flux::Props head_p;
+    head_p.direction = flux::Direction::row;
+    head_p.align = flux::Align::center;
+    head_p.gap = 12.0f;
+    head_p.height = 36.0f;
+    auto head = flux::view(std::move(head_p));
+    head->children.push_back(flux::ui::badge(
+        pal, imaging ? flux::ui::BadgeKind::success
+                     : sub > 0.05f ? flux::ui::BadgeKind::warning
+                                   : flux::ui::BadgeKind::neutral,
+        imaging   ? L"● 正在成像"
+        : sub > 0.05f ? L"● 有信号未同步"
+                      : L"○ 等待卫星过境"));
+    head->children.push_back(flux::ui::caption(pal, txt, {}));
+    head->children.push_back(flux::ui::caption(
+        pal, L"（NOAA 每天过境数次，每次 10–15 分钟；无信号时属正常等待）",
+        {}));
+    page_el->children.push_back(std::move(head));
+    return page_el;   // 图像区由 apt_view（原生窗）覆盖显示（状态卡下方起）
 }
 
 // ---- 内容区根（WinFlux，每帧重建） -----------------------------------------
@@ -2191,6 +2218,9 @@ void create_statusbar(App& app) {
 // 设置行行数（host_target 与 layout 共用——几何看门狗铁律：同一算法）
 int settings_rows(const App& app) { return app.page == 3 ? 2 : 1; }
 
+// 云图页状态卡带高（#65）：host_target/layout/appt_view 共用
+int weather_strip_px(const App& app) { return app.page == 4 ? 46 : 0; }
+
 bool host_target(App& app, RECT* out) {
     if (app.main_wnd == nullptr || app.toolbar == nullptr ||
         app.statusbar == nullptr || app.host.hwnd() == nullptr)
@@ -2202,7 +2232,8 @@ bool host_target(App& app, RECT* out) {
     const int s = int(GetDpiForWindow(app.main_wnd)) / 96;
     const int row_h = 34 * s;
     out->left = 0;
-    out->top = (tb.bottom - tb.top) + row_h * settings_rows(app);
+    out->top = (tb.bottom - tb.top) + row_h * settings_rows(app) +
+               weather_strip_px(app) * s;
     out->right = rc.right;
     out->bottom = std::max(rc.bottom - (sb.bottom - sb.top), out->top);
     return true;
@@ -2296,8 +2327,10 @@ void layout(App& app) {
                    ht.bottom - ht.top, FALSE);
         // APT 云图窗覆盖内容区（云图页；原生 GDI 位图显示，WinFlux 无位图接口）
         if (app.apt_view.hwnd() != nullptr) {
-            MoveWindow(app.apt_view.hwnd(), ht.left, ht.top, ht.right - ht.left,
-                       ht.bottom - ht.top, FALSE);
+            // 云图页：WinFlux 顶部状态卡带以下才是图像区（#65）
+            const int strip = weather_strip_px(app);
+            MoveWindow(app.apt_view.hwnd(), ht.left, ht.top + strip,
+                       ht.right - ht.left, ht.bottom - ht.top - strip, FALSE);
             ShowWindow(app.apt_view.hwnd(), app.page == 4 ? SW_SHOW : SW_HIDE);
         }
     }
