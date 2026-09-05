@@ -17,6 +17,7 @@
 #include "dsp/live_bursts.hpp"
 #include "dsp/panorama.hpp"
 #include "dsp/waterfall.hpp"
+#include "dsp/fm.hpp"
 #include "radio/iq_recorder.hpp"
 #include "ui/status_text.hpp"
 
@@ -810,6 +811,169 @@ static void test_status_dynamic() {
           "动态段含 ESB（>0 时）");
 }
 
+// ---- FM 收音机链路（#53） --------------------------------------------------
+
+// Goertzel 单频幅度（音频检测用）
+static double goertzel(const std::vector<float>& x, double fs, double f) {
+    const double w = 2.0 * hackrftool::dsp::kPi * f / fs;
+    const double coeff = 2.0 * std::cos(w);
+    double s1 = 0.0, s2 = 0.0;
+    for (const float v : x) {
+        const double s0 = v + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    return std::sqrt(std::max(s1 * s1 + s2 * s2 - coeff * s1 * s2, 0.0)) /
+           double(x.size());
+}
+
+// 合成 FM 广播 IQ：MPX（可选导频+DSBSC）→ ±75 kHz FM 调制 → int8 IQ
+static std::vector<std::int8_t> synth_fm_stereo(std::size_t n_samples, double fs,
+                                                bool with_pilot,
+                                                std::vector<float>* ref_l,
+                                                std::vector<float>* ref_r) {
+    std::vector<float> l(n_samples), r(n_samples);
+    for (std::size_t i = 0; i < n_samples; ++i) {
+        const double t = double(i) / fs;
+        l[i] = float(0.45 * std::sin(2 * hackrftool::dsp::kPi * 1000.0 * t));
+        r[i] = float(0.45 * std::sin(2 * hackrftool::dsp::kPi * 3000.0 * t));
+    }
+    std::vector<std::int8_t> iq(n_samples * 2);
+    double phase = 0.0;
+    for (std::size_t i = 0; i < n_samples; ++i) {
+        const double t = double(i) / fs;
+        double mpx = 0.5 * (l[i] + r[i]);                       // L+R ≤15 kHz
+        if (with_pilot) {
+            mpx += 0.09 * std::sin(2 * hackrftool::dsp::kPi * 19e3 * t);   // 导频
+            // 38k 副载波与导频同源同相（广播惯例：sin 族），非独立 cos
+            mpx += 0.5 * (l[i] - r[i]) *
+                   std::sin(2 * 2 * hackrftool::dsp::kPi * 19e3 * t);      // L−R DSBSC
+        }
+        phase += 2 * hackrftool::dsp::kPi * 75e3 * mpx / fs;
+        const float re = 0.8f * float(std::cos(phase));
+        const float im = 0.8f * float(std::sin(phase));
+        iq[i * 2] = std::int8_t(re * 127.0f);
+        iq[i * 2 + 1] = std::int8_t(im * 127.0f);
+    }
+    if (ref_l != nullptr) *ref_l = l;
+    if (ref_r != nullptr) *ref_r = r;
+    return iq;
+}
+
+// 音频收集上下文
+struct FmCollect {
+    std::vector<float> l, r;
+    static void cb(const float* li, const float* ri, std::size_t n, void* ctx) {
+        auto* c = static_cast<FmCollect*>(ctx);
+        c->l.insert(c->l.end(), li, li + n);
+        c->r.insert(c->r.end(), ri, ri + n);
+    }
+};
+
+static void test_fm_discriminator_unit() {
+    using hackrftool::dsp::fm_discriminator;
+    // 恒定频偏 +f 的复信号，鉴频输出恒定
+    std::complex<float> prev{1.0f, 0.0f};
+    const double f = 0.25;   // 归一化（×fs/2）
+    std::complex<float> cur(std::cos(float(2 * hackrftool::dsp::kPi * f)),
+                            std::sin(float(2 * hackrftool::dsp::kPi * f)));
+    const float d = fm_discriminator(cur, prev);
+    check(std::abs(d - 0.5f) < 0.01f, "鉴频器恒定频偏还原（每样本 π/2 相位 → 0.5）");
+    const float dn = fm_discriminator(prev, cur);
+    check(std::abs(dn + 0.5f) < 0.01f, "鉴频器负频偏还原");
+}
+
+static void test_fm_receiver_stereo() {
+    using hackrftool::dsp::FmReceiver;
+    const double fs = 2e6;
+    // 0.4 秒信号：导频 PLL 锁定（测试带宽 300 Hz → ~15 ms 锁定）
+    const std::size_t n = std::size_t(0.4 * fs);
+    const std::vector<std::int8_t> iq = synth_fm_stereo(n, fs, true, nullptr, nullptr);
+    FmCollect out;
+    FmReceiver rx(fs, 300.0);
+    rx.set_audio_callback(&FmCollect::cb, &out);
+    rx.feed(iq.data(), iq.size());
+    check(out.l.size() > 15000, "立体声链产出音频样本（0.4s≈19200）");
+    check(rx.stereo_locked(), "导频锁定 → 立体声");
+    // 跳过前 0.1s（PLL 收敛），Goertzel 检测声道分离
+    const std::size_t skip = 4800;
+    std::vector<float> ll(out.l.begin() + skip, out.l.end());
+    std::vector<float> rr(out.r.begin() + skip, out.r.end());
+    const double l_1k = goertzel(ll, 48e3, 1000.0);
+    const double l_3k = goertzel(ll, 48e3, 3000.0);
+    const double r_3k = goertzel(rr, 48e3, 3000.0);
+    const double r_1k = goertzel(rr, 48e3, 1000.0);
+    check(l_1k > 0.05, "L 声道含 1 kHz（左信号）");
+    check(r_3k > 0.05, "R 声道含 3 kHz（右信号）");
+    check(l_3k < l_1k * 0.4, "L 声道 3 kHz 泄漏 < −8dB（立体声分离）");
+    check(r_1k < r_3k * 0.4, "R 声道 1 kHz 泄漏 < −8dB（立体声分离）");
+}
+
+static void test_fm_receiver_mono_fallback() {
+    using hackrftool::dsp::FmReceiver;
+    const double fs = 2e6;
+    const std::size_t n = std::size_t(0.2 * fs);
+    const std::vector<std::int8_t> iq = synth_fm_stereo(n, fs, false, nullptr, nullptr);
+    FmCollect out;
+    FmReceiver rx(fs, 300.0);
+    rx.set_audio_callback(&FmCollect::cb, &out);
+    rx.feed(iq.data(), iq.size());
+    check(!rx.stereo_locked(), "无导频 → 单声道模式");
+    check(out.l.size() == out.r.size() && !out.l.empty(), "单声道仍有输出");
+    const std::size_t skip = 4800;
+    std::vector<float> ll(out.l.begin() + skip, out.l.end());
+    std::vector<float> rr(out.r.begin() + skip, out.r.end());
+    const double l_1k = goertzel(ll, 48e3, 1000.0);
+    const double r_1k = goertzel(rr, 48e3, 1000.0);
+    check(l_1k > 0.05 && r_1k > 0.05, "单声道 L=R 都含 1 kHz");
+    check(std::abs(l_1k - r_1k) < 0.02, "单声道双声道幅度一致");
+}
+
+static void test_fm_decimator_stopband() {
+    using hackrftool::dsp::Decimator;
+    // 2 Msps → 250 kHz：带内 40 kHz 通过，带外 400 kHz 显著衰减
+    Decimator dec(2e6, 128);
+    const double f_in = 40e3, f_out = 400e3;
+    double p_out = 0.0;
+    std::size_t n_out = 0;
+    double phase = 0.0;
+    const std::size_t n = 40000;
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto s = std::complex<float>(float(std::cos(phase)),
+                                           float(std::sin(phase)));
+        const auto o = dec.push(s);
+        if (i > n / 2) {
+            if (o) {
+                p_out += std::norm(*o);
+                ++n_out;
+            }
+            if (!o) {
+            }
+        }
+        phase += 2 * hackrftool::dsp::kPi * f_in / 2e6;
+    }
+    check(n_out > 2000, "抽取器产出 250k 流（0.02s≈2500）");
+    // 再跑带外频率
+    Decimator dec2(2e6, 128);
+    double p_stop = 0.0;
+    std::size_t n_stop = 0;
+    phase = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto s = std::complex<float>(float(std::cos(phase)),
+                                           float(std::sin(phase)));
+        const auto o = dec2.push(s);
+        if (i > n / 2 && o) {
+            p_stop += std::norm(*o);
+            ++n_stop;
+        }
+        phase += 2 * hackrftool::dsp::kPi * f_out / 2e6;
+    }
+    check(n_stop > 2000, "带外路径同样产出样本");
+    const double ratio = std::sqrt(p_stop / double(n_stop)) /
+                         std::sqrt(p_out / double(n_out));
+    check(ratio < 0.1, "400 kHz 带外衰减 > 20 dB（实测线性比 <0.1）");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -841,6 +1005,10 @@ int main() {
     test_esb_hex_dump();
     test_waterfall_runs();
     test_status_dynamic();
+    test_fm_discriminator_unit();
+    test_fm_receiver_stereo();
+    test_fm_receiver_mono_fallback();
+    test_fm_decimator_stopband();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }

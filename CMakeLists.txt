@@ -26,17 +26,19 @@ add_executable(HackRFTool WIN32
     src/dsp/channel_monitor.cpp
     src/dsp/esb.cpp
     src/dsp/fft.cpp
+    src/dsp/fm.cpp
     src/dsp/gfsk.cpp
     src/dsp/live_bursts.cpp
     src/dsp/panorama.cpp
     src/dsp/waterfall.cpp
+    src/audio/waveout.cpp
     src/radio/hackrf.cpp
     src/radio/iq_recorder.cpp
     src/ui/monitor_view.cpp
     src/ui/status_text.cpp
     src/ui/views.cpp)
 target_include_directories(HackRFTool PRIVATE src ${MSYS2_UCRT64_INCLUDE})
-target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32 Dbghelp Comctl32)
+target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32 Dbghelp Comctl32 Winmm)
 # 清单由 app.rc 内嵌（RT_MANIFEST），关闭链接器自动生成避免 CVT1100 重复
 set_target_properties(HackRFTool PROPERTIES LINK_FLAGS "/MANIFEST:NO")
 flux_apply_compiler_options(HackRFTool)
@@ -76,7 +78,8 @@ flux_apply_compiler_options(HackRFAnalyze)
 enable_testing()
 add_executable(HackRFToolTest tests/dsp_test.cpp src/dsp/analyzer.cpp
                               src/dsp/burst_detector.cpp src/dsp/channel_monitor.cpp
-                              src/dsp/esb.cpp src/dsp/fft.cpp src/dsp/gfsk.cpp
+                              src/dsp/esb.cpp src/dsp/fft.cpp src/dsp/fm.cpp
+                              src/dsp/gfsk.cpp
                               src/dsp/live_bursts.cpp src/dsp/panorama.cpp
                               src/dsp/waterfall.cpp src/radio/iq_recorder.cpp
                               src/ui/status_text.cpp)

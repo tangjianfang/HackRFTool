@@ -17,6 +17,7 @@
 #include <cwchar>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,10 +28,12 @@
 #include "dsp/analyzer.hpp"
 #include "dsp/channel_monitor.hpp"
 #include "dsp/esb.hpp"
+#include "dsp/fm.hpp"
 #include "dsp/gfsk.hpp"
 #include "dsp/live_bursts.hpp"
 #include "dsp/panorama.hpp"
 #include "dsp/waterfall.hpp"
+#include "audio/waveout.hpp"
 #include "radio/hackrf.hpp"
 #include "radio/iq_recorder.hpp"
 #include "ui/monitor_view.hpp"
@@ -93,9 +96,9 @@ struct App {
 
     // ---- 控件值（#52 起由原生控件持有；内容区每帧重建，普通字段即够） ----
     bool running = false;
-    int page = 0;                 // 0=频谱 1=信道监测 2=实时抓包
+    int page = 0;                 // 0=频谱 1=监测 2=抓包 3=收音 4=云图
     int sweep_on = 0;             // 0=单窗 1=全频段
-    int rate_index = 3;           // kRatesMsps 下标
+    int rate_index = 4;           // kRatesMsps 下标（默认 20 Msps）
     double center_mhz = 2450.0;
     unsigned lna = 16;            // 8..40，步进 8（默认 16/16：32/30 时域饱和，M3 教训）
     unsigned vga = 16;            // 2..62，步进 2
@@ -114,6 +117,47 @@ struct App {
     // M6：自测指标（selftest 模式汇总断言用）
     std::atomic<unsigned> build_count{0};
     std::atomic<unsigned> esb_hits{0};
+
+    // ---- 收音机（#53）----
+    std::atomic<bool> fm_on{false};        // fm 解调线程运行
+    std::atomic<bool> fm_scan{false};      // 扫台进行中
+    std::atomic<float> fm_pilot{0.0f};     // 导频相关（立体声判定，UI 读）
+    std::atomic<float> fm_peak{0.0f};      // 音频峰值表
+    double radio_mhz = 98.0;               // 收音机页当前频率
+    std::vector<double> stations;          // 扫台结果（MHz）
+    hackrftool::audio::WaveOut waveout;
+    std::unique_ptr<hackrftool::dsp::FmReceiver> fm_rx;   // 采样率切换时重建
+    // SPSC 字节环：rx 线程写 → fm 线程读（满则覆盖旧数据，保实时）
+    struct SpscRing {
+        std::vector<std::int8_t> buf = std::vector<std::int8_t>(4 << 20);
+        std::atomic<std::size_t> w{0}, r{0};
+        void write(const std::int8_t* p, std::size_t n) {
+            for (std::size_t i = 0; i < n; ++i) {
+                buf[w.load(std::memory_order_relaxed)] = p[i];
+                w.store((w.load(std::memory_order_relaxed) + 1) % buf.size(),
+                        std::memory_order_release);
+            }
+        }
+        std::size_t read(std::int8_t* p, std::size_t n) {
+            std::size_t got = 0;
+            while (got < n) {
+                const std::size_t rr = r.load(std::memory_order_relaxed);
+                if (rr == w.load(std::memory_order_acquire)) break;
+                p[got++] = buf[rr];
+                r.store((rr + 1) % buf.size(), std::memory_order_release);
+            }
+            return got;
+        }
+        void clear() {
+            r.store(w.load(std::memory_order_relaxed));
+        }
+    } iq_ring;
+    HWND edit_radio = nullptr;      // 收音机页频率
+    HWND combo_stations = nullptr;  // 扫台结果
+    HWND track_vol = nullptr;
+    HWND check_mute = nullptr;
+    HWND lbl_vol = nullptr;
+    HWND combo_sat = nullptr;       // 云图页卫星预设（#54 接收调谐）
 
     // ---- 原生骨架 HWND（#52） ----
     HWND main_wnd = nullptr;
@@ -142,6 +186,8 @@ struct App {
     std::vector<CtlSlot> row_common;    // 所有页可见
     std::vector<CtlSlot> row_monitor;   // 仅监测页
     std::vector<CtlSlot> row_capture;   // 仅抓包页
+    std::vector<CtlSlot> row_radio;     // 仅收音机页（#53）
+    std::vector<CtlSlot> row_weather;   // 仅云图页（#54）
     // 工具栏状态同步缓存（避免每帧重复 TB_SETSTATE 消息）
     int sync_run = -1, sync_page = -1, sync_sweep = -1, sync_rec = -1;
     std::wstring sync_sb[6];   // 状态栏分段文本缓存（相同文本不重发 SB_SETTEXT）
@@ -168,12 +214,18 @@ double seg_center_mhz(std::size_t i) {
     return kSweepLoMhz + usable / 2.0 + double(i) * (kSweepHiMhz - kSweepLoMhz - usable) / 4.0;
 }
 
-constexpr double kRatesMsps[4] = {8.0, 10.0, 16.0, 20.0};
+constexpr double kRatesMsps[5] = {2.0, 8.0, 10.0, 16.0, 20.0};
 
 double clamp_center(double mhz) noexcept { return std::clamp(mhz, 2400.0, 2483.5); }
 
-std::size_t mhz_to_bin(double mhz, double center_mhz) noexcept {
-    const double t = (mhz - (center_mhz - 10.0)) / 20.0;   // 0..1
+// 频谱窗半宽（MHz）随采样率（#53 前 20 Msps 硬编码，低速档频标会错位）
+double half_bw_mhz(const App& app) noexcept { return kRatesMsps[size_t(app.rate_index)] / 2.0; }
+
+// 收音机/卫星段频率（不受 2.4G 限幅约束）
+double clamp_radio(double mhz) noexcept { return std::clamp(mhz, 24.0, 1800.0); }
+
+std::size_t mhz_to_bin(double mhz, double center_mhz, double bw_mhz) noexcept {
+    const double t = (mhz - (center_mhz - bw_mhz / 2.0)) / bw_mhz;   // 0..1
     return static_cast<std::size_t>(std::clamp(t, 0.0, 1.0) * 255.0 + 0.5);
 }
 
@@ -182,6 +234,7 @@ void rx_trampoline_ui(const std::int8_t* iq, std::size_t bytes, void* ctx) {
     app->analyzer.feed(iq, bytes);
     app->live.write(iq, bytes);
     if (app->recorder.recording()) app->recorder.write(iq, bytes);
+    if (app->fm_on.load()) app->iq_ring.write(iq, bytes);
 }
 
 // 报告文件落在 exe 旁边而非进程 CWD（CTest/脚本从任意目录拉起时路径确定）
@@ -249,9 +302,12 @@ void device_open_failed(App& app, const std::string& err) {
                  L"② 设备重插后先 hackrf_spiflash -R 软复位";
 }
 
+void ensure_fm(App& app, bool on);   // 收音机音频链开关（定义在收音机节）
+
 void toggle_rx(App& app) {
     if (app.running) {
         set_sweep_live(app, false);
+        ensure_fm(app, false);
         if (app.recorder.recording()) app.recorder.stop();
         app.radio.stop_rx();
         app.running = false;
@@ -270,11 +326,28 @@ void toggle_rx(App& app) {
     }
     app.running = true;
     if (app.sweep_on == 1) set_sweep_live(app, true);
+    if (app.page >= 3) ensure_fm(app, true);   // 收音/云图页直接起音频链
 }
 
-// 应用中心频率（工具栏「应用频率」）：读取设置行 EDIT，重算监测锁定 bin
+// 应用中心频率（工具栏「应用频率」）：读当前页频率框（频谱页/收音机页）
 void apply_center_freq(App& app) {
     wchar_t buf[32] = {};
+    if (app.page == 3) {
+        // 收音机页：调谐 FM 广播段（87.5–108），监测 bin 语义不适用
+        GetWindowTextW(app.edit_radio, buf, 32);
+        const double mhz = clamp_radio(std::wcstod(buf, nullptr));
+        if (app.running) {
+            hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+            cfg.center_hz = mhz * 1e6;
+            std::string err;
+            if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
+        }
+        app.radio_mhz = mhz;
+        app.center_mhz = mhz;   // 频谱窗/状态栏跟随
+        SetWindowTextW(app.edit_radio, wd1(mhz).c_str());
+        app.status = L"收音机调谐 " + wd1(mhz) + L" MHz";
+        return;
+    }
     GetWindowTextW(app.edit_freq, buf, 32);
     const double mhz = clamp_center(std::wcstod(buf, nullptr));
     const bool relock = app.mon_lock_mhz > 0.0 && !app.auto_track;
@@ -284,9 +357,10 @@ void apply_center_freq(App& app) {
         std::string err;
         if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
     }
-    if (relock) app.monitor.set_fixed_bin(mhz_to_bin(app.mon_lock_mhz, mhz));
+    if (relock)
+        app.monitor.set_fixed_bin(mhz_to_bin(app.mon_lock_mhz, mhz, 2.0 * half_bw_mhz(app)));
     app.center_mhz = mhz;
-    SetWindowTextW(app.edit_freq, wd1(mhz).c_str());   // 回写规范化文本
+    SetWindowTextW(app.edit_freq, wd1(mhz).c_str());
 }
 
 void monitor_lock(App& app) {
@@ -294,7 +368,7 @@ void monitor_lock(App& app) {
     GetWindowTextW(app.edit_mon, buf, 32);
     const double mhz = clamp_center(std::wcstod(buf, nullptr));
     app.mon_lock_mhz = mhz;   // 记住目标频率，中心变化时重算 bin（M6）
-    app.monitor.set_fixed_bin(mhz_to_bin(mhz, app.center_mhz));
+    app.monitor.set_fixed_bin(mhz_to_bin(mhz, app.center_mhz, 2.0 * half_bw_mhz(app)));
     app.monitor.set_mode(hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
     app.status = L"监测已锁定 " + wd1(mhz) + L" MHz（bin " +
                  std::to_wstring(app.monitor.tracked_bin()) + L"）";
@@ -325,7 +399,126 @@ void clear_bursts(App& app) {
     app.last_esb.clear();
 }
 
-// ---- 内容区三页（纯显示；全部控制在顶部工具栏） ------------------------------
+// ---- 收音机（#53）：fm 解调线程 / 音频开关 / 自动扫台 ------------------------
+
+// fm 线程：SPSC 环拉 IQ → FmReceiver → waveOut（音频回调在本线程执行）
+void fm_audio_cb(const float* l, const float* r, std::size_t n, void* ctx) {
+    auto* app = static_cast<App*>(ctx);
+    app->waveout.write(l, r, n);
+    app->fm_pilot.store(app->fm_rx ? app->fm_rx->pilot_level() : 0.0f);
+    app->fm_peak.store(app->fm_rx ? app->fm_rx->audio_peak() : 0.0f);
+}
+
+void fm_loop(App& app) {
+    std::vector<std::int8_t> tmp(65536);
+    while (app.fm_on.load()) {
+        const std::size_t n = app.iq_ring.read(tmp.data(), tmp.size());
+        if (n == 0) {
+            Sleep(4);
+            continue;
+        }
+        if (app.fm_rx) app.fm_rx->feed(tmp.data(), n);
+    }
+}
+
+// 开/关收音机音频链（进入收音页 + 接收中 → 开；离开/停止 → 关）。
+// 采样率自动切 2 Msps（窄带任务省算力，FmReceiver 按当前率重建）
+void ensure_fm(App& app, bool on) {
+    const bool was = app.fm_on.load();
+    if (on == was) {
+        if (on && !app.waveout.running()) (void)app.waveout.start();
+        return;
+    }
+    if (on) {
+        if (app.rate_index != 0) {
+            if (app.running) {
+                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                cfg.sample_rate_hz = 2e6;
+                std::string err;
+                if (!app.radio.apply(cfg, &err))
+                    app.status = L"切 2 Msps 失败: " + widen(err);
+            }
+            app.rate_index = 0;
+            SendMessageW(app.combo_rate, CB_SETCURSEL, 0, 0);
+        }
+        app.iq_ring.clear();
+        app.fm_rx = std::make_unique<hackrftool::dsp::FmReceiver>(
+            kRatesMsps[size_t(app.rate_index)] * 1e6, 80.0);
+        app.fm_rx->set_audio_callback(&fm_audio_cb, &app);
+        (void)app.waveout.start();
+        app.fm_on.store(true);
+        std::thread(fm_loop, std::ref(app)).detach();
+    } else {
+        app.fm_on.store(false);
+        app.waveout.stop();
+        Sleep(30);   // 等线程退出读环
+        app.fm_rx.reset();
+    }
+}
+
+// 扫台线程：87.5–108 MHz 步进 100 kHz，驻留 80 ms 取均值峰；结束回原频
+void scan_stations_loop(App& app, double return_mhz) {
+    app.waveout.set_mute(true);
+    std::vector<std::pair<double, float>> hits;
+    for (double f = 87.5; f <= 108.0 && app.fm_scan.load(); f += 0.1) {
+        (void)app.radio.set_center_hz(f * 1e6);
+        app.iq_ring.clear();
+        Sleep(80);
+        const auto frame = app.analyzer.snapshot();
+        if (frame.db.empty()) continue;
+        float sum = 0.0f, mx = -999.0f;
+        for (const float v : frame.db) {
+            sum += v;
+            mx = std::max(mx, v);
+        }
+        const float avg = sum / float(frame.db.size());
+        if (mx > -45.0f && mx - avg > 6.0f) hits.emplace_back(f, mx);
+    }
+    app.stations.clear();
+    SendMessageW(app.combo_stations, CB_RESETCONTENT, 0, 0);
+    double best = 0.0f;
+    float best_db = -999.0f;
+    wchar_t item[48];
+    for (const auto& [f, db] : hits) {
+        swprintf(item, 48, L"%.1f MHz  %.0f dB", f, db);
+        SendMessageW(app.combo_stations, CB_ADDSTRING, 0, LPARAM(item));
+        app.stations.push_back(f);
+        if (db > best_db) {
+            best_db = db;
+            best = f;
+        }
+    }
+    // 回到原频率（或最强台）
+    const double back = (best > 0.0 && !hits.empty()) ? best : return_mhz;
+    (void)app.radio.set_center_hz(back * 1e6);
+    app.radio_mhz = back;
+    app.center_mhz = back;
+    wchar_t buf[32];
+    swprintf(buf, 32, L"%.1f", back);
+    SetWindowTextW(app.edit_radio, buf);
+    app.waveout.set_mute(false);
+    app.fm_scan.store(false);
+    app.status = L"扫描完成：" + std::to_wstring(app.stations.size()) + L" 个电台" +
+                 (hits.empty() ? L"（未检出，检查天线）" : L"，已调谐最强台");
+}
+
+void start_scan(App& app) {
+    if (app.fm_scan.load()) return;
+    if (!app.running) {
+        app.status = L"请先开始接收再扫描电台";
+        return;
+    }
+    if (app.sweep_on == 1) {
+        app.status = L"扫描电台需先退出全频段模式";
+        return;
+    }
+    app.fm_scan.store(true);
+    app.status = L"扫台中…（87.5–108 MHz）";
+    std::thread(scan_stations_loop, std::ref(app), app.radio_mhz).detach();
+}
+
+
+// ---- 内容区各页（纯显示；全部控制在顶部工具栏） ------------------------------
 
 flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
     flux::Props page_p;
@@ -334,15 +527,19 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
     page_p.gap = 8.0f;
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
+    const double half = half_bw_mhz(app);   // 窗宽随采样率（#53：低速档不再错位）
     if (app.sweep_on == 0) {
+        wchar_t lo[16], hi[16];
+        swprintf(lo, 16, L"-%.0fM", half);
+        swprintf(hi, 16, L"+%.0fM", half);
         const std::vector<hackrftool::ui::SpectrumTick> ticks = {
-            {app.center_mhz - 10.0, L"-10M"},
+            {app.center_mhz - half, lo},
             {app.center_mhz, L"中心"},
-            {app.center_mhz + 10.0, L"+10M"},
+            {app.center_mhz + half, hi},
         };
         page_el->children.push_back(hackrftool::ui::spectrum_view(
-            pal, app.frame.db, app.frame.peak, app.center_mhz - 10.0,
-            app.center_mhz + 10.0, ticks, app.frame.seq));
+            pal, app.frame.db, app.frame.peak, app.center_mhz - half,
+            app.center_mhz + half, ticks, app.frame.seq));
         page_el->children.push_back(
             hackrftool::ui::waterfall_view(pal, app.waterfall, app.waterfall.seq()));
     } else {
@@ -586,6 +783,89 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
     return page_el;
 }
 
+// ---- 收音机页（#53）：纯显示（频率/音量/扫描控制在工具栏） -------------------
+
+flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
+    flux::Props page_p;
+    page_p.direction = flux::Direction::column;
+    page_p.align = flux::Align::stretch;
+    page_p.gap = 12.0f;
+    page_p.flex_grow = 1.0f;
+    auto page_el = flux::view(std::move(page_p));
+
+    // 频率大字 + 立体声徽章
+    flux::Props head_p;
+    head_p.direction = flux::Direction::row;
+    head_p.align = flux::Align::center;
+    head_p.gap = 12.0f;
+    auto head = flux::view(std::move(head_p));
+    flux::Props freq_p;
+    freq_p.bold = true;
+    freq_p.font_size_pt = 28.0f;
+    freq_p.flex_grow = 1.0f;
+    freq_p.text_align = flux::Align::start;
+    head->children.push_back(
+        flux::label(wd1(app.radio_mhz) + L" MHz", std::move(freq_p)));
+    const bool stereo = app.fm_pilot.load() > 0.02f;
+    head->children.push_back(flux::ui::badge(
+        pal, stereo ? flux::ui::BadgeKind::success : flux::ui::BadgeKind::neutral,
+        stereo ? L"STEREO" : L"MONO"));
+    page_el->children.push_back(std::move(head));
+
+    // 信号/音频电平表（读数行）
+    const float peak = app.fm_peak.load();
+    const int bars = std::min(int(peak * 24.0f + 0.5f), 24);
+    std::wstring meter = L"音频 [";
+    for (int i = 0; i < 24; ++i) meter += (i < bars) ? L"█" : L"·";
+    meter += L"]  ";
+    float mx = -200.0f;
+    for (const float v : app.frame.db) mx = std::max(mx, v);
+    flux::Props meter_p;
+    meter_p.text_align = flux::Align::start;
+    page_el->children.push_back(flux::label(
+        meter + L"信号 " + wd1(mx) + L" dB", std::move(meter_p)));
+
+    // 使用说明
+    flux::Props tip_p;
+    tip_p.text_align = flux::Align::start;
+    page_el->children.push_back(flux::ui::caption(
+        pal, L"频率输入后点「应用频率」调谐；「扫描电台」自动找台并填入预设下拉。"
+             L"增益建议 LNA 24–32 / VGA 20–30（广播信号强，过载会静音失真）。",
+        std::move(tip_p)));
+
+    // 频谱（当前电台周边）：复用频谱视图，显示 FM 信号形态
+    const double half = half_bw_mhz(app);
+    if (!app.frame.db.empty()) {
+        page_el->children.push_back(hackrftool::ui::spectrum_view(
+            pal, app.frame.db, app.frame.peak, app.center_mhz - half,
+            app.center_mhz + half, {}, app.frame.seq));
+    }
+    return page_el;
+}
+
+// ---- 云图页（#54 占位：NOAA APT 解码下一迭代交付） --------------------------
+
+flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
+    flux::Props page_p;
+    page_p.direction = flux::Direction::column;
+    page_p.align = flux::Align::stretch;
+    page_p.gap = 8.0f;
+    page_p.flex_grow = 1.0f;
+    auto page_el = flux::view(std::move(page_p));
+    flux::Props t1;
+    t1.bold = true;
+    page_el->children.push_back(flux::label(L"NOAA 气象卫星 APT 云图", std::move(t1)));
+    flux::Props tip_p;
+    tip_p.text_align = flux::Align::start;
+    page_el->children.push_back(flux::ui::caption(
+        pal, L"解码链路（2.4 kHz 子载波同步检波 → 行同步 → 2080 像素行装配 → 云图）"
+             L"在下一迭代（#54）交付。当前可先用预设下拉调谐卫星频率、"
+             L"在收音机页以音频监听 APT 信号（特殊的嗡嗡声即卫星下行）。",
+        std::move(tip_p)));
+    (void)app;
+    return page_el;
+}
+
 // ---- 内容区根（WinFlux，每帧重建） -----------------------------------------
 
 void sync_chrome(App& app);   // 定义在原生骨架节（工具栏态 + 状态栏文本）
@@ -663,6 +943,8 @@ flux::ElementPtr build(App& app) {
     switch (app.page) {
     case 1: content->children.push_back(monitor_display(app, pal)); break;
     case 2: content->children.push_back(capture_display(app, pal)); break;
+    case 3: content->children.push_back(radio_display(app, pal)); break;
+    case 4: content->children.push_back(weather_display(app, pal)); break;
     default: content->children.push_back(spectrum_display(app, pal)); break;
     }
     return content;
@@ -676,21 +958,29 @@ enum : int {
     IDC_PAGE0,
     IDC_PAGE1,
     IDC_PAGE2,
+    IDC_PAGE3,
+    IDC_PAGE4,
     IDC_SWEEP,
     IDC_RECORD,
     IDC_LOCK,
     IDC_EXPORT,
     IDC_CLEAR,
     IDC_APPLYFREQ,
+    IDC_SCAN,
     IDC_EDIT_FREQ,
     IDC_EDIT_MON,
+    IDC_EDIT_RADIO,
     IDC_COMBO_RATE,
     IDC_COMBO_SYM,
+    IDC_COMBO_STATION,
+    IDC_COMBO_SAT,
     IDC_TRACK_LNA,
     IDC_TRACK_VGA,
     IDC_TRACK_THR,
     IDC_TRACK_BURST,
+    IDC_TRACK_VOL,
     IDC_CHECK_AUTOTRACK,
+    IDC_CHECK_MUTE,
 };
 
 constexpr int kIconSize = 24;
@@ -848,6 +1138,44 @@ void apply_freq(HDC dc) {
     DeleteObject(p);
 }
 
+void radio(HDC dc) {
+    // 喇叭：方箱 + 锥形声波
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(180, 60, 120));
+    const HGDIOBJ old = SelectObject(dc, p);
+    HBRUSH b = CreateSolidBrush(RGB(180, 60, 120));
+    RECT rc{4, 10, 9, 15};
+    FillRect(dc, &rc, b);
+    DeleteObject(b);
+    POINT pts[3] = {{9, 10}, {13, 6}, {13, 19}};
+    const HGDIOBJ ob = SelectObject(dc, b = CreateSolidBrush(RGB(180, 60, 120)));
+    Polygon(dc, pts, 3);
+    DeleteObject(b);
+    SelectObject(dc, ob);
+    MoveToEx(dc, 15, 8, nullptr);
+    Arc(dc, 13, 5, 20, 19, 15, 6, 15, 18);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
+void satellite(HDC dc) {
+    // 卫星：本体 + 两翼太阳板 + 下行波束
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(60, 130, 190));
+    const HGDIOBJ old = SelectObject(dc, p);
+    Rectangle(dc, 9, 8, 15, 15);
+    MoveToEx(dc, 4, 10, nullptr);
+    LineTo(dc, 9, 10);
+    MoveToEx(dc, 4, 13, nullptr);
+    LineTo(dc, 9, 13);
+    MoveToEx(dc, 15, 10, nullptr);
+    LineTo(dc, 20, 10);
+    MoveToEx(dc, 15, 13, nullptr);
+    LineTo(dc, 20, 13);
+    MoveToEx(dc, 12, 15, nullptr);
+    LineTo(dc, 8, 20);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
 } // namespace icon
 
 // 图标索引表（工具栏位图号 = 此处顺序）
@@ -864,6 +1192,8 @@ enum : int {
     ICON_EXPORT,
     ICON_CLEAR,
     ICON_APPLY,
+    ICON_RADIO,
+    ICON_SAT,
     ICON_COUNT,
 };
 
@@ -907,6 +1237,7 @@ void create_toolbar(App& app) {
         icon::play,        icon::stop,         icon::page_spectrum, icon::page_monitor,
         icon::page_capture, icon::sweep,       icon::record,        icon::record_on,
         icon::lock,        icon::export_csv,   icon::clear,         icon::apply_freq,
+        icon::radio,       icon::satellite,
     };
     static_assert(sizeof(painters) / sizeof(painters[0]) == ICON_COUNT,
                   "图标表与枚举不一致");
@@ -937,6 +1268,8 @@ void create_toolbar(App& app) {
         tb_btn(ICON_PAGE0, IDC_PAGE0, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"频谱"),
         tb_btn(ICON_PAGE1, IDC_PAGE1, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"监测"),
         tb_btn(ICON_PAGE2, IDC_PAGE2, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"抓包"),
+        tb_btn(ICON_RADIO, IDC_PAGE3, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"收音"),
+        tb_btn(ICON_SAT, IDC_PAGE4, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"云图"),
         tb_btn(0, 0, BTNS_SEP, nullptr),
         tb_btn(ICON_SWEEP, IDC_SWEEP, BTNS_CHECK | BTNS_AUTOSIZE, L"全频段"),
         tb_btn(ICON_REC, IDC_RECORD, BTNS_CHECK | BTNS_AUTOSIZE, L"录制 IQ"),
@@ -945,6 +1278,7 @@ void create_toolbar(App& app) {
         tb_btn(ICON_EXPORT, IDC_EXPORT, BTNS_AUTOSIZE, L"导出 CSV"),
         tb_btn(ICON_CLEAR, IDC_CLEAR, BTNS_AUTOSIZE, L"清空"),
         tb_btn(ICON_APPLY, IDC_APPLYFREQ, BTNS_AUTOSIZE, L"应用频率"),
+        tb_btn(ICON_SAT, IDC_SCAN, BTNS_AUTOSIZE, L"扫描电台"),
     };
     SendMessageW(app.toolbar, TB_ADDBUTTONS, WPARAM(sizeof(btns) / sizeof(btns[0])),
                  LPARAM(btns));
@@ -967,7 +1301,7 @@ void create_settings_row(App& app) {
          make_ctl(app, WC_STATICW, L"采样率", SS_LEFT | SS_CENTERIMAGE, 0, 0), 52);
     app.combo_rate = make_ctl(app, WC_COMBOBOXW, nullptr,
                               CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_RATE);
-    for (const wchar_t* r : {L"8", L"10", L"16", L"20"})
+    for (const wchar_t* r : {L"2", L"8", L"10", L"16", L"20"})
         SendMessageW(app.combo_rate, CB_ADDSTRING, 0, LPARAM(r));
     SendMessageW(app.combo_rate, CB_SETCURSEL, WPARAM(app.rate_index), 0);
     slot(app.row_common, app.combo_rate, 64, true);
@@ -1033,6 +1367,40 @@ void create_settings_row(App& app) {
         SendMessageW(app.combo_symrate, CB_ADDSTRING, 0, LPARAM(r));
     SendMessageW(app.combo_symrate, CB_SETCURSEL, WPARAM(app.symrate_idx), 0);
     slot(app.row_capture, app.combo_symrate, 80, true);
+
+    // 收音机页（#53）：频率 / 电台预设 / 音量 / 静音 / 扫描
+    slot(app.row_radio,
+         make_ctl(app, WC_STATICW, L"电台 MHz", SS_LEFT | SS_CENTERIMAGE, 0, 0), 56);
+    app.edit_radio = make_ctl(app, WC_EDITW, L"98.0",
+                              ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0,
+                              IDC_EDIT_RADIO);
+    slot(app.row_radio, app.edit_radio, 80);
+    slot(app.row_radio,
+         make_ctl(app, WC_STATICW, L"预设", SS_LEFT | SS_CENTERIMAGE, 0, 0), 36);
+    app.combo_stations = make_ctl(app, WC_COMBOBOXW, nullptr,
+                                  CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_STATION);
+    slot(app.row_radio, app.combo_stations, 110, true);
+    app.track_vol = make_ctl(app, TRACKBAR_CLASSW, nullptr,
+                             TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP, 0, IDC_TRACK_VOL);
+    SendMessageW(app.track_vol, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+    SendMessageW(app.track_vol, TBM_SETPOS, TRUE, 80);
+    slot(app.row_radio, app.track_vol, 100);
+    app.lbl_vol = make_ctl(app, WC_STATICW, L"音量 80", SS_LEFT | SS_CENTERIMAGE, 0, 0);
+    slot(app.row_radio, app.lbl_vol, 56);
+    app.check_mute = make_ctl(app, WC_BUTTONW, L"静音", BS_AUTOCHECKBOX | WS_TABSTOP,
+                              0, IDC_CHECK_MUTE);
+    slot(app.row_radio, app.check_mute, 52);
+    // 「扫描电台」为动作按钮，归工具栏行 1（布局契约：按钮在工具栏）
+
+    // 云图页（#54）：卫星预设（先调谐，解码下一迭代）
+    slot(app.row_weather,
+         make_ctl(app, WC_STATICW, L"卫星", SS_LEFT | SS_CENTERIMAGE, 0, 0), 40);
+    app.combo_sat = make_ctl(app, WC_COMBOBOXW, nullptr,
+                             CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_SAT);
+    for (const wchar_t* s : {L"NOAA 19 · 137.100", L"NOAA 15 · 137.620",
+                             L"NOAA 18 · 137.9125"})
+        SendMessageW(app.combo_sat, CB_ADDSTRING, 0, LPARAM(s));
+    slot(app.row_weather, app.combo_sat, 130, true);
 }
 
 void create_statusbar(App& app) {
@@ -1100,12 +1468,19 @@ void layout(App& app) {
     };
     place(app.row_common);
     const bool mon = app.page == 1, cap = app.page == 2;
+    const bool rad = app.page == 3, wx = app.page == 4;
     for (const auto& c : app.row_monitor)
         ShowWindow(c.h, mon ? SW_SHOW : SW_HIDE);
     for (const auto& c : app.row_capture)
         ShowWindow(c.h, cap ? SW_SHOW : SW_HIDE);
+    for (const auto& c : app.row_radio)
+        ShowWindow(c.h, rad ? SW_SHOW : SW_HIDE);
+    for (const auto& c : app.row_weather)
+        ShowWindow(c.h, wx ? SW_SHOW : SW_HIDE);
     if (mon) place(app.row_monitor);
     if (cap) place(app.row_capture);
+    if (rad) place(app.row_radio);
+    if (wx) place(app.row_weather);
 
     // 状态栏（先自适应高，再贴底 + 分段右缘）
     SendMessageW(app.statusbar, WM_SIZE, 0, 0);
@@ -1154,8 +1529,9 @@ void sync_chrome(App& app) {
             app.sync_run = int(app.running);
         }
         if (app.sync_page != app.page) {
-            const int ids[3] = {IDC_PAGE0, IDC_PAGE1, IDC_PAGE2};
-            for (int i = 0; i < 3; ++i)
+            const int ids[5] = {IDC_PAGE0, IDC_PAGE1, IDC_PAGE2, IDC_PAGE3,
+                                IDC_PAGE4};
+            for (int i = 0; i < 5; ++i)
                 SendMessageW(app.toolbar, TB_SETSTATE, ids[i],
                              LPARAM(TBSTATE_ENABLED |
                                     (app.page == i ? TBSTATE_CHECKED : 0)));
@@ -1214,12 +1590,34 @@ void sync_chrome(App& app) {
 void on_command(App& app, int id, int code, HWND from) {
     switch (id) {
     case IDC_STARTSTOP: toggle_rx(app); break;
-    case IDC_PAGE0: app.page = 0; layout(app); break;
-    case IDC_PAGE1: app.page = 1; layout(app); break;
-    case IDC_PAGE2: app.page = 2; layout(app); break;
+    case IDC_PAGE0: app.page = 0; ensure_fm(app, false); layout(app); break;
+    case IDC_PAGE1: app.page = 1; ensure_fm(app, false); layout(app); break;
+    case IDC_PAGE2: app.page = 2; ensure_fm(app, false); layout(app); break;
+    case IDC_PAGE3:
+        app.page = 3;
+        ensure_fm(app, app.running);
+        layout(app);
+        break;
+    case IDC_PAGE4:
+        app.page = 4;
+        ensure_fm(app, app.running);   // 云图先以音频监听 APT（#54 换解码）
+        layout(app);
+        break;
     case IDC_SWEEP: {
         const LRESULT st = SendMessageW(app.toolbar, TB_GETSTATE, IDC_SWEEP, 0);
         const bool on = (st & TBSTATE_CHECKED) != 0;
+        if (on && app.rate_index != 4) {
+            // 全频段扫描按 20 Msps 窗设计（5 段×17.5 MHz），强制顶档
+            if (app.running) {
+                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                cfg.sample_rate_hz = 20e6;
+                std::string err;
+                if (!app.radio.apply(cfg, &err))
+                    app.status = L"切 20 Msps 失败: " + widen(err);
+            }
+            app.rate_index = 4;
+            SendMessageW(app.combo_rate, CB_SETCURSEL, 4, 0);
+        }
         set_sweep_live(app, on && app.running);
         app.sweep_on = on ? 1 : 0;
         break;
@@ -1229,10 +1627,45 @@ void on_command(App& app, int id, int code, HWND from) {
     case IDC_EXPORT: export_csv_dialog(app); break;
     case IDC_CLEAR: clear_bursts(app); break;
     case IDC_APPLYFREQ: apply_center_freq(app); break;
+    case IDC_SCAN: start_scan(app); break;
+    case IDC_COMBO_STATION:
+        if (code == CBN_SELCHANGE) {
+            const int i = int(SendMessageW(app.combo_stations, CB_GETCURSEL, 0, 0));
+            if (i >= 0 && i < int(app.stations.size())) {
+                const double mhz = app.stations[size_t(i)];
+                wchar_t buf[32];
+                swprintf(buf, 32, L"%.1f", mhz);
+                SetWindowTextW(app.edit_radio, buf);
+                if (app.running)
+                    (void)app.radio.set_center_hz(mhz * 1e6);
+                app.radio_mhz = mhz;
+                app.center_mhz = mhz;
+                app.status = L"已调谐 " + wd1(mhz) + L" MHz";
+            }
+        }
+        break;
+    case IDC_COMBO_SAT:
+        if (code == CBN_SELCHANGE) {
+            // NOAA 19/15/18 下行频率（#54 起配合 APT 解码）
+            static const double kSatMhz[3] = {137.100, 137.620, 137.9125};
+            const int i = int(SendMessageW(app.combo_sat, CB_GETCURSEL, 0, 0));
+            if (i >= 0 && i < 3 && app.running) {
+                (void)app.radio.set_center_hz(kSatMhz[i] * 1e6);
+                app.center_mhz = kSatMhz[i];
+                app.radio_mhz = kSatMhz[i];
+                app.status = L"已调谐 " + wd1(kSatMhz[i]) + L" MHz（NOAA APT）";
+            }
+        }
+        break;
+    case IDC_CHECK_MUTE:
+        if (code == BN_CLICKED)
+            app.waveout.set_mute(SendMessageW(app.check_mute, BM_GETCHECK, 0, 0) ==
+                                 BST_CHECKED);
+        break;
     case IDC_COMBO_RATE:
         if (code == CBN_SELCHANGE) {
             const int i = int(SendMessageW(app.combo_rate, CB_GETCURSEL, 0, 0));
-            if (i >= 0 && i < 4) {
+            if (i >= 0 && i < 5) {
                 if (app.running) {
                     hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
                     cfg.sample_rate_hz = kRatesMsps[size_t(i)] * 1e6;
@@ -1241,6 +1674,13 @@ void on_command(App& app, int id, int code, HWND from) {
                         app.status = L"配置失败: " + widen(err);
                 }
                 app.rate_index = i;
+                // 收音链运行中换采样率：按新率重建解调器
+                if (app.fm_on.load()) {
+                    app.iq_ring.clear();
+                    app.fm_rx = std::make_unique<hackrftool::dsp::FmReceiver>(
+                        kRatesMsps[size_t(i)] * 1e6, 80.0);
+                    app.fm_rx->set_audio_callback(&fm_audio_cb, &app);
+                }
             }
         }
         break;
@@ -1296,6 +1736,10 @@ void on_hscroll(App& app, HWND ctl) {
         const int v = int(SendMessageW(ctl, TBM_GETPOS, 0, 0));
         app.burst_thr = double(v);
         SetWindowTextW(app.lbl_burst, (std::to_wstring(v) + L" dB").c_str());
+    } else if (ctl == app.track_vol) {
+        const int v = int(SendMessageW(ctl, TBM_GETPOS, 0, 0));
+        app.waveout.set_volume(float(v) / 100.0f);
+        SetWindowTextW(app.lbl_vol, (L"音量 " + std::to_wstring(v)).c_str());
     }
 }
 
@@ -1454,6 +1898,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             auto_start = true;
             app.page = 2;
         }
+        if (wcscmp(cmd_line, L"autoradio") == 0) {
+            auto_start = true;
+            app.page = 3;
+            app.center_mhz = 98.0;
+        }
+        if (wcscmp(cmd_line, L"autowx") == 0) {
+            auto_start = true;
+            app.page = 4;
+            app.center_mhz = 137.620;
+        }
         if (wcscmp(cmd_line, L"autosc") == 0) {
             // 压测组合：接收 + 全频段扫描 + 实时抓包页（demod 高负载路径）
             auto_start = true;
@@ -1506,6 +1960,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                 app.running = true;
                 device_ok = true;
                 if (app.sweep_on == 1) set_sweep_live(app, true);
+                if (app.page >= 3) ensure_fm(app, true);
             } else {
                 app.status = L"启动接收失败: " + widen(err);
             }
