@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #71（Meteor 接线：云图页 Meteor 模式+符号流/帧计数状态）
-- rounds done: 25（#50–#70 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #72（遥测体积治理：DSP frame/fm 1Hz 的日志量测量+分级）
+- rounds done: 26（#50–#71 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
@@ -56,6 +56,7 @@
 #68 | selftest 报告事件链断言（真机实测 app.start→rx.start PASS） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~25) | 报告行为证据：tail 顺序校验+设备失败退化存在性检查；AGENTS 反引号 bash 命令替换坑补修（含反引号文本经 bash 内联写文件=执行——第八次转义坑变体）
 #69 | 遥测文件轮转回归测试（baseline 228→230） | findings(0) | actions(1) | result(green+progress, 5 ctest/230 断言) | diff(+~45) | 独立实例+小文件上限实测 .1 归档/主文件重写
 #70 | Meteor QPSK 解调器纯函数（Costas+Gardner+ASM，#55 顺延项启动） | findings(1) | actions(1) | result(green+progress, 5 ctest/235 断言) | diff(+~290) | 四象限 Costas+Gardner sps 自适应+眼图诊断；合成 4000 符号加噪频偏实测 >95% 判决/ASM 精确命中。断言余量教训：符号产出 = 总数−收敛期−末端半符号（首轮 400 余量不够）
+#71 | Meteor 接线（云图页 QPSK 直解诊断，三部曲 #3 交付） | findings(1) | actions(1) | result(green+progress, 5 ctest/235 断言) | diff(+~120) | 预设 Meteor 137.900→QpskDemod(sps=率/72k)+数据线程喂 IQ+16k 滑窗 ASM；状态卡眼图/频偏/命中+METEOR diag 遥测；真机日志验收 ALL PASS。坑：跨进程 CBN_SELCHANGE 伪造 wparam=MAKEWPARAM(id,1)（id 单发走不进 handler）
 
 ## 运行总结（#1–#4，用户指令停止）
 
