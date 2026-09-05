@@ -643,6 +643,32 @@ static void test_live_bursts_ring_wrap() {
     check(!live.read_slice(0, 10, out), "被挤出环的区间拒绝");
 }
 
+static void test_capture_sidecar() {
+    hackrftool::radio::SidecarInfo cfg;
+    cfg.center_hz = 2450e6;
+    cfg.sample_rate_hz = 20e6;
+    cfg.lna_db = 16;
+    cfg.vga_db = 24;
+    check(hackrftool::radio::write_capture_sidecar(L"test-sc.cs8", cfg),
+          "sidecar 写入成功");
+    std::FILE* fp = _wfopen(L"test-sc.cs8.txt", L"r");
+    check(fp != nullptr, "sidecar 文件名 = IQ 路径 + .txt");
+    if (fp != nullptr) {
+        std::string content;
+        char buf[256];
+        while (std::fgets(buf, sizeof buf, fp) != nullptr) content += buf;
+        std::fclose(fp);
+        check(content.find("center_mhz=2450") != std::string::npos,
+              "sidecar 含中心频率");
+        check(content.find("sample_rate_msps=20") != std::string::npos,
+              "sidecar 含采样率");
+        check(content.find("lna_db=16") != std::string::npos, "sidecar 含 LNA");
+        check(content.find("vga_db=24") != std::string::npos, "sidecar 含 VGA");
+        check(content.find("int8") != std::string::npos, "sidecar 含样本格式");
+    }
+    _wremove(L"test-sc.cs8.txt");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -669,6 +695,7 @@ int main() {
     test_iq_recorder_contract_edges();
     test_burst_detector_edges();
     test_live_bursts_ring_wrap();
+    test_capture_sidecar();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }

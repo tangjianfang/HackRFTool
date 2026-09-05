@@ -61,6 +61,15 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(int(seconds * 1000)));
     radio.stop_rx();
     g_rec.stop();
+    {   // 参数 sidecar：与 .cs8 同名 .txt，离线分析对上采集条件
+        hackrftool::radio::SidecarInfo info;
+        info.center_hz = cfg.center_hz;
+        info.sample_rate_hz = cfg.sample_rate_hz;
+        info.lna_db = cfg.lna_gain_db;
+        info.vga_db = cfg.vga_gain_db;
+        info.amp = cfg.amp;
+        (void)hackrftool::radio::write_capture_sidecar(path, info);
+    }
 
     const std::uint64_t bytes = g_rec.bytes_written();
     std::printf("完成: %llu 字节 / %llu 块（期望 %llu 字节，丢弃 %llu 块）\n",

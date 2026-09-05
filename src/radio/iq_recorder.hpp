@@ -12,6 +12,20 @@
 
 namespace hackrftool::radio {
 
+// 采集参数快照（与 RadioConfig 字段对应；独立结构避免测试目标依赖 libhackrf 头）
+struct SidecarInfo {
+    double center_hz = 0.0;
+    double sample_rate_hz = 0.0;
+    unsigned lna_db = 0;
+    unsigned vga_db = 0;
+    bool amp = false;
+};
+
+// 在 IQ 文件旁写 <path>.txt 参数侧车（频率/采样率/增益/格式/时间），
+// 供离线分析工具对上采集条件。失败返回 false。
+[[nodiscard]] bool write_capture_sidecar(const std::wstring& iq_path,
+                                         const SidecarInfo& info);
+
 class IqRecorder {
 public:
     ~IqRecorder();

@@ -3,10 +3,38 @@
 #include <chrono>
 #include <cstdio>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 namespace hackrftool::radio {
 
 namespace {
 constexpr std::size_t kMaxQueueBlocks = 64;   // ≈16 MB @262144B/块
+}
+
+bool write_capture_sidecar(const std::wstring& iq_path, const SidecarInfo& cfg) {
+    std::wstring path = iq_path + L".txt";
+    if (std::FILE* fp = _wfopen(path.c_str(), L"w")) {
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        std::fprintf(fp,
+                     "# HackRFTool IQ capture\n"
+                     "center_mhz=%.1f\n"
+                     "sample_rate_msps=%.0f\n"
+                     "lna_db=%u\n"
+                     "vga_db=%u\n"
+                     "amp=%d\n"
+                     "format=int8 interleaved I/Q (.cs8)\n"
+                     "captured=%04u-%02u-%02u %02u:%02u:%02u\n",
+                     cfg.center_hz / 1e6, cfg.sample_rate_hz / 1e6,
+                     cfg.lna_db, cfg.vga_db, cfg.amp ? 1 : 0, st.wYear,
+                     st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        std::fclose(fp);
+        return true;
+    }
+    return false;
 }
 
 IqRecorder::~IqRecorder() { stop(); }

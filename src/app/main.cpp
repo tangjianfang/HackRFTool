@@ -80,6 +80,7 @@ struct App {
     hackrftool::dsp::LiveBursts live;                          // M5：实时突发
     hackrftool::radio::HackRadio radio;
     hackrftool::radio::IqRecorder recorder;                    // M5：UI 内 IQ 录制
+    std::wstring rec_path;                                     // 当前录制文件（sidecar 用）
     std::map<unsigned long long, std::wstring> row_cache;      // 突发行文本（按 start_sample）
 
     flux::State<bool> running;
@@ -498,8 +499,15 @@ flux::ElementPtr monitor_page(App& app, const flux::Palette& pal) {
 void record_toggle(App& app) {
     if (app.recorder.recording()) {
         app.recorder.stop();
+        // 参数 sidecar：按停止时配置写 <path>.txt（自由函数读 State 安全）
+        hackrftool::radio::SidecarInfo info;
+        info.center_hz = app.center_mhz.get() * 1e6;
+        info.sample_rate_hz = kRatesMsps[size_t(app.rate_index.get())] * 1e6;
+        info.lna_db = unsigned(app.lna.get());
+        info.vga_db = unsigned(app.vga.get());
+        (void)hackrftool::radio::write_capture_sidecar(app.rec_path, info);
         app.status.set(L"录制完成: " + std::to_wstring(app.recorder.bytes_written()) +
-                       L" 字节");
+                       L" 字节（参数已写 .txt）");
         return;
     }
     wchar_t path[MAX_PATH] = L"hackrftool-iq.cs8";
@@ -511,6 +519,7 @@ void record_toggle(App& app) {
     ofn.lpstrDefExt = L"cs8";
     ofn.Flags = OFN_OVERWRITEPROMPT;
     if (!GetSaveFileNameW(&ofn)) return;
+    app.rec_path = path;
     if (!app.recorder.start(path)) {
         app.status.set(L"无法创建录制文件");
         return;
