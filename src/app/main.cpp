@@ -363,7 +363,12 @@ void reconfigure_rx(App& app, const hackrftool::radio::RadioConfig& cfg) {
          {"vga", std::to_string(cfg.vga_gain_db)}});
     if (!app.running) {
         std::string err;
-        if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
+        if (!app.radio.apply(cfg, &err)) {
+                app.status = L"配置失败: " + widen(err);
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::error, "RADIO", "apply.fail",
+                    {{"err", err}});
+            }
         return;
     }
     app.radio.stop_rx();
@@ -448,7 +453,12 @@ void apply_center_freq(App& app) {
             hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
             cfg.center_hz = mhz * 1e6;
             std::string err;
-            if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
+            if (!app.radio.apply(cfg, &err)) {
+                app.status = L"配置失败: " + widen(err);
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::error, "RADIO", "apply.fail",
+                    {{"err", err}});
+            }
         }
         app.radio_mhz = mhz;
         app.center_mhz = mhz;   // 频谱窗/状态栏跟随
@@ -463,7 +473,12 @@ void apply_center_freq(App& app) {
         hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
         cfg.center_hz = mhz * 1e6;
         std::string err;
-        if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
+        if (!app.radio.apply(cfg, &err)) {
+                app.status = L"配置失败: " + widen(err);
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::error, "RADIO", "apply.fail",
+                    {{"err", err}});
+            }
     }
     if (relock)
         app.monitor.set_fixed_bin(mhz_to_bin(app.mon_lock_mhz, mhz, 2.0 * half_bw_mhz(app)));
@@ -1336,6 +1351,17 @@ flux::ElementPtr build(App& app) {
         app.frame = f;
     }
 
+    // ESB 命中沿（#66）：计数增长即记（帧级事件，突发风暴时每秒至多 1 条）
+    {
+        static unsigned last_esb = 0;
+        const unsigned eh = app.esb_hits.load();
+        if (eh != last_esb) {
+            last_esb = eh;
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::info, "ESB", "hit",
+                {{"total", std::to_string(eh)}});
+        }
+    }
     // M5：实时突发检测——必须在页面构建之前跑，否则行文本生成滞后一个
     // 构建周期，突发已被环形缓冲挤出（read_slice 失败 → 永久缓存无 hex）
     if (app.running) app.live.refresh(float(app.burst_thr));
@@ -1374,6 +1400,25 @@ flux::ElementPtr build(App& app) {
                  {"stereo", app.stereo_opt ? "1" : "0"},
                  {"bw", std::to_string(app.fm_bw)},
                  {"vol", std::to_string(app.vol)}});
+        }
+        if (!app.fm_on.load() && !app.frame.db.empty() &&
+            now - app.last_dsp_ms >= 1000) {
+            // 非 FM 页（频谱/监测/抓包）1Hz：峰值+均值——空底噪 vs 有信号
+            // 一眼可辨，抓包/监测问题可离线回溯
+            app.last_dsp_ms = now;
+            float mx2 = -999.0f, sum2 = 0.0f;
+            for (const float v : app.frame.db) {
+                mx2 = std::max(mx2, v);
+                sum2 += v;
+            }
+            char pk2[16];
+            snprintf(pk2, 16, "%.1f", mx2);
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::info, "DSP", "frame",
+                {{"peak_db", pk2},
+                 {"avg_db", std::to_string(
+                                sum2 / float(app.frame.db.size()))},
+                 {"page", std::to_string(app.page)}});
         }
         if (app.fm_on.load() && now - app.last_dsp_ms >= 1000) {
             app.last_dsp_ms = now;
@@ -2861,7 +2906,12 @@ void on_hscroll(App& app, HWND ctl) {
             hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
             cfg.lna_gain_db = unsigned(v);
             std::string err;
-            if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
+            if (!app.radio.apply(cfg, &err)) {
+                app.status = L"配置失败: " + widen(err);
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::error, "RADIO", "apply.fail",
+                    {{"err", err}});
+            }
         }
         app.lna = unsigned(v);
         SendMessageW(ctl, TBM_SETPOS, TRUE, LPARAM(v));
@@ -2873,7 +2923,12 @@ void on_hscroll(App& app, HWND ctl) {
             hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
             cfg.vga_gain_db = unsigned(v);
             std::string err;
-            if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
+            if (!app.radio.apply(cfg, &err)) {
+                app.status = L"配置失败: " + widen(err);
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::error, "RADIO", "apply.fail",
+                    {{"err", err}});
+            }
         }
         app.vga = unsigned(v);
         SendMessageW(ctl, TBM_SETPOS, TRUE, LPARAM(v));
@@ -3131,6 +3186,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                 read_text_file(exe_dir_path("settings.tsv")))) {
             restore_settings(app, *st);
             auto_start = true;   // 打开即回到上次工作状态（含自动开始接收）
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::info, "SETTINGS", "restore",
+                {{"page", std::to_string(st->page)},
+                 {"center", std::to_string(st->center_mhz)},
+                 {"radio", std::to_string(st->radio_mhz)}});
         }
     }
     // APT 云图原生窗（云图页覆盖内容区；位于 WinFlux host 之上）
