@@ -18,6 +18,7 @@
 #include "dsp/panorama.hpp"
 #include "dsp/waterfall.hpp"
 #include "dsp/fm.hpp"
+#include "dsp/apt.hpp"
 #include "radio/iq_recorder.hpp"
 #include "ui/status_text.hpp"
 
@@ -974,6 +975,74 @@ static void test_fm_decimator_stopband() {
     check(ratio < 0.1, "400 kHz 带外衰减 > 20 dB（实测线性比 <0.1）");
 }
 
+// ---- NOAA APT 云图解码（#54） ------------------------------------------------
+
+// 合成 APT 音频行：1040 Hz×7 同步串 + 2080 像素（梯度 + 明/暗标记）调幅 2.4 kHz
+static void synth_apt_line(std::vector<float>& out, double marker_bright,
+                           double marker_dark) {
+    const double fs = 48000.0;
+    // 同步串：7 周期 1040 Hz 方波（半周期幅度交替 0.9/0.1）
+    const std::size_t sync_n = std::size_t(7.0 * fs / 1040.0);
+    for (std::size_t i = 0; i < sync_n; ++i) {
+        const double half = std::fmod(double(i) / fs * 1040.0, 1.0) < 0.5 ? 0.9 : 0.1;
+        out.push_back(float(half * std::sin(2 * hackrftool::dsp::kPi * 2400.0 *
+                                            double(i) / fs)));
+    }
+    // 像素：4160 Hz 像素率，按精确分数推进（每行总长恰 24000 样本）
+    const std::size_t line_len = 24000;
+    for (std::size_t i = sync_n; i < line_len; ++i) {
+        const std::size_t p =
+            std::size_t(double(i - sync_n) * 4160.0 / fs);
+        double v = p < 2080 ? double(p) / 2079.0 * 0.8 + 0.1 : 0.1;
+        if (p >= 500 && p < 503) v = marker_bright;   // 3 px 亮标记
+        if (p >= 600 && p < 603) v = marker_dark;     // 3 px 暗标记
+        const std::size_t idx = out.size();
+        out.push_back(float(v * std::sin(2 * hackrftool::dsp::kPi * 2400.0 *
+                                         double(idx) / fs)));
+    }
+}
+
+static void test_apt_decode() {
+    using hackrftool::dsp::AptDecoder;
+    // 6 行合成信号（前两行用于锁定）
+    std::vector<float> audio;
+    synth_apt_line(audio, 1.0, 0.0);
+    synth_apt_line(audio, 1.0, 0.0);
+    synth_apt_line(audio, 1.0, 0.0);
+    synth_apt_line(audio, 1.0, 0.0);
+    synth_apt_line(audio, 1.0, 0.0);
+    synth_apt_line(audio, 1.0, 0.0);
+    AptDecoder dec;
+    dec.feed(audio.data(), audio.size());
+    hackrftool::dsp::AptImage imgd;
+    dec.snapshot(imgd);
+    if (imgd.rows == 0) {
+        std::printf("apt: NO ROWS (synced=%d lines=%llu)\n", int(dec.synced()),
+                    (unsigned long long)dec.lines());
+        check(false, "APT 未产出任何行");
+        return;
+    }
+    check(dec.synced(), "APT 行同步锁定");
+    check(dec.lines() >= 1, "至少装配出 1 行（6 行输入）");
+    hackrftool::dsp::AptImage img;
+    dec.snapshot(img);
+    check(img.rows >= 1, "图像缓冲含行");
+    // 取末行（锁定后的完整行）验证像素：亮/暗标记 + 梯度
+    const std::uint8_t* row =
+        img.px.data() + (img.rows - 1) * AptDecoder::kWidth;
+    {
+        // 亮标记经包络低通平滑为 ~5px 钟形（峰≈背景×1.9）——取窗口峰值判定
+        int mx = 0;
+        for (int i = 497; i <= 503; ++i) mx = std::max(mx, int(row[i]));
+        check(mx > 165 && mx > int(row[400]) + 50,
+              "像素 ~500 = 亮标记（窗口峰值显著高于背景）");
+    }
+    check(row[600] < 50, "像素 600 = 暗标记（<50）");
+    check(row[100] < row[1500], "梯度：px100 < px1500");
+    const int grad = int(row[1500]) - int(row[100]);
+    check(grad > 80, "梯度斜率显著（Δ>80）");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -1009,6 +1078,7 @@ int main() {
     test_fm_receiver_stereo();
     test_fm_receiver_mono_fallback();
     test_fm_decimator_stopband();
+    test_apt_decode();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }

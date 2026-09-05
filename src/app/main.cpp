@@ -26,6 +26,7 @@
 #include <flux/Components.hpp>
 
 #include "dsp/analyzer.hpp"
+#include "dsp/apt.hpp"
 #include "dsp/channel_monitor.hpp"
 #include "dsp/esb.hpp"
 #include "dsp/fm.hpp"
@@ -36,6 +37,7 @@
 #include "audio/waveout.hpp"
 #include "radio/hackrf.hpp"
 #include "radio/iq_recorder.hpp"
+#include "ui/apt_view.hpp"
 #include "ui/monitor_view.hpp"
 #include "ui/status_text.hpp"
 #include "ui/views.hpp"
@@ -158,6 +160,12 @@ struct App {
     HWND check_mute = nullptr;
     HWND lbl_vol = nullptr;
     HWND combo_sat = nullptr;       // 云图页卫星预设（#54 接收调谐）
+    // ---- 云图（#54）----
+    std::atomic<bool> apt_on{false};           // APT 解码启用（记录勾选+云图页+接收中）
+    hackrftool::dsp::AptDecoder apt;           // fm 线程 feed，UI 线程快照
+    hackrftool::ui::AptView apt_view;          // 原生 GDI 云图窗（云图页覆盖内容区）
+    std::uint64_t apt_seen_lines = 0;          // 上次刷到视图的行数
+    HWND check_apt = nullptr;                  // 「记录」勾选
 
     // ---- 原生骨架 HWND（#52） ----
     HWND main_wnd = nullptr;
@@ -303,11 +311,13 @@ void device_open_failed(App& app, const std::string& err) {
 }
 
 void ensure_fm(App& app, bool on);   // 收音机音频链开关（定义在收音机节）
+void update_apt_on(App& app);        // APT 解码开关（定义在收音机节）
 
 void toggle_rx(App& app) {
     if (app.running) {
         set_sweep_live(app, false);
         ensure_fm(app, false);
+        update_apt_on(app);
         if (app.recorder.recording()) app.recorder.stop();
         app.radio.stop_rx();
         app.running = false;
@@ -327,6 +337,7 @@ void toggle_rx(App& app) {
     app.running = true;
     if (app.sweep_on == 1) set_sweep_live(app, true);
     if (app.page >= 3) ensure_fm(app, true);   // 收音/云图页直接起音频链
+    update_apt_on(app);
 }
 
 // 应用中心频率（工具栏「应用频率」）：读当前页频率框（频谱页/收音机页）
@@ -405,6 +416,7 @@ void clear_bursts(App& app) {
 void fm_audio_cb(const float* l, const float* r, std::size_t n, void* ctx) {
     auto* app = static_cast<App*>(ctx);
     app->waveout.write(l, r, n);
+    if (app->apt_on.load()) app->apt.feed(l, n);   // APT：单声道取 L
     app->fm_pilot.store(app->fm_rx ? app->fm_rx->pilot_level() : 0.0f);
     app->fm_peak.store(app->fm_rx ? app->fm_rx->audio_peak() : 0.0f);
 }
@@ -515,6 +527,40 @@ void start_scan(App& app) {
     app.fm_scan.store(true);
     app.status = L"扫台中…（87.5–108 MHz）";
     std::thread(scan_stations_loop, std::ref(app), app.radio_mhz).detach();
+}
+
+// APT 解码开关：云图页 + 接收中 + 音频链在跑 + 「记录」勾选
+void update_apt_on(App& app) {
+    const bool on = app.page == 4 && app.running && app.fm_on.load() &&
+                    app.check_apt != nullptr &&
+                    SendMessageW(app.check_apt, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (on && !app.apt_on.load()) {
+        app.apt_seen_lines = 0;
+        app.status = L"APT 记录中（卫星过境时云图逐行累积）";
+    }
+    app.apt_on.store(on);
+}
+
+void save_apt_dialog(App& app) {
+    hackrftool::dsp::AptImage snap;
+    app.apt.snapshot(snap);
+    if (snap.rows == 0) {
+        app.status = L"尚无云图可保存（先记录卫星过境）";
+        return;
+    }
+    wchar_t path[MAX_PATH] = L"apt-cloud.png";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = app.main_wnd;
+    ofn.lpstrFilter = L"PNG 图像 (*.png)\0*.png\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"png";
+    ofn.Flags = OFN_OVERWRITEPROMPT;
+    if (!GetSaveFileNameW(&ofn)) return;
+    app.status = hackrftool::ui::save_apt_png(path, snap)
+                     ? L"云图已保存: " + std::wstring(path)
+                     : L"保存失败（PNG 编码错误）";
 }
 
 
@@ -843,27 +889,14 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
     return page_el;
 }
 
-// ---- 云图页（#54 占位：NOAA APT 解码下一迭代交付） --------------------------
+// ---- 云图页（#54）：原生 GDI 云图窗覆盖内容区（此 WinFlux 占位被覆盖） ------
 
 flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
     flux::Props page_p;
-    page_p.direction = flux::Direction::column;
-    page_p.align = flux::Align::stretch;
-    page_p.gap = 8.0f;
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
-    flux::Props t1;
-    t1.bold = true;
-    page_el->children.push_back(flux::label(L"NOAA 气象卫星 APT 云图", std::move(t1)));
-    flux::Props tip_p;
-    tip_p.text_align = flux::Align::start;
-    page_el->children.push_back(flux::ui::caption(
-        pal, L"解码链路（2.4 kHz 子载波同步检波 → 行同步 → 2080 像素行装配 → 云图）"
-             L"在下一迭代（#54）交付。当前可先用预设下拉调谐卫星频率、"
-             L"在收音机页以音频监听 APT 信号（特殊的嗡嗡声即卫星下行）。",
-        std::move(tip_p)));
-    (void)app;
-    return page_el;
+    (void)pal;
+    return page_el;   // 实际显示由 apt_view（原生窗）承担
 }
 
 // ---- 内容区根（WinFlux，每帧重建） -----------------------------------------
@@ -933,6 +966,12 @@ flux::ElementPtr build(App& app) {
         }
     }
 
+    // 云图页：行数增长 → 刷新原生云图窗（2 行/s，代价可忽略）
+    if (app.page == 4 && app.apt.lines() != app.apt_seen_lines) {
+        app.apt_seen_lines = app.apt.lines();
+        app.apt_view.refresh(app.apt);
+    }
+
     flux::Props content_p;
     content_p.direction = flux::Direction::column;
     content_p.align = flux::Align::stretch;   // 子元素横向撑满（否则纯 paint 卡片宽度塌 0）
@@ -981,6 +1020,8 @@ enum : int {
     IDC_TRACK_VOL,
     IDC_CHECK_AUTOTRACK,
     IDC_CHECK_MUTE,
+    IDC_CHECK_APT,
+    IDC_SAVEPNG,
 };
 
 constexpr int kIconSize = 24;
@@ -1392,7 +1433,7 @@ void create_settings_row(App& app) {
     slot(app.row_radio, app.check_mute, 52);
     // 「扫描电台」为动作按钮，归工具栏行 1（布局契约：按钮在工具栏）
 
-    // 云图页（#54）：卫星预设（先调谐，解码下一迭代）
+    // 云图页（#54）：卫星预设 + 记录 + 保存
     slot(app.row_weather,
          make_ctl(app, WC_STATICW, L"卫星", SS_LEFT | SS_CENTERIMAGE, 0, 0), 40);
     app.combo_sat = make_ctl(app, WC_COMBOBOXW, nullptr,
@@ -1400,7 +1441,15 @@ void create_settings_row(App& app) {
     for (const wchar_t* s : {L"NOAA 19 · 137.100", L"NOAA 15 · 137.620",
                              L"NOAA 18 · 137.9125"})
         SendMessageW(app.combo_sat, CB_ADDSTRING, 0, LPARAM(s));
+    SendMessageW(app.combo_sat, CB_SETCURSEL, 1, 0);   // 默认 NOAA 15
     slot(app.row_weather, app.combo_sat, 130, true);
+    app.check_apt = make_ctl(app, WC_BUTTONW, L"记录", BS_AUTOCHECKBOX | WS_TABSTOP,
+                             0, IDC_CHECK_APT);
+    SendMessageW(app.check_apt, BM_SETCHECK, BST_CHECKED, 0);   // 默认记录
+    slot(app.row_weather, app.check_apt, 52);
+    HWND btn_save = make_ctl(app, WC_BUTTONW, L"保存 PNG", BS_PUSHBUTTON | WS_TABSTOP,
+                             0, IDC_SAVEPNG);
+    slot(app.row_weather, btn_save, 84);
 }
 
 void create_statusbar(App& app) {
@@ -1505,9 +1554,16 @@ void layout(App& app) {
 
     // 内容区（WinFlux 子窗口）填满剩余（目标矩形与看门狗共用同一算法）
     RECT ht;
-    if (host_target(app, &ht))
+    if (host_target(app, &ht)) {
         MoveWindow(app.host.hwnd(), ht.left, ht.top, ht.right - ht.left,
                    ht.bottom - ht.top, FALSE);
+        // APT 云图窗覆盖内容区（云图页；原生 GDI 位图显示，WinFlux 无位图接口）
+        if (app.apt_view.hwnd() != nullptr) {
+            MoveWindow(app.apt_view.hwnd(), ht.left, ht.top, ht.right - ht.left,
+                       ht.bottom - ht.top, FALSE);
+            ShowWindow(app.apt_view.hwnd(), app.page == 4 ? SW_SHOW : SW_HIDE);
+        }
+    }
 }
 
 // 工具栏按钮态 + 状态栏文本（build 心跳驱动；缓存避免每帧消息风暴）。
@@ -1596,11 +1652,13 @@ void on_command(App& app, int id, int code, HWND from) {
     case IDC_PAGE3:
         app.page = 3;
         ensure_fm(app, app.running);
+        update_apt_on(app);
         layout(app);
         break;
     case IDC_PAGE4:
         app.page = 4;
-        ensure_fm(app, app.running);   // 云图先以音频监听 APT（#54 换解码）
+        ensure_fm(app, app.running);
+        update_apt_on(app);
         layout(app);
         break;
     case IDC_SWEEP: {
@@ -1661,6 +1719,12 @@ void on_command(App& app, int id, int code, HWND from) {
         if (code == BN_CLICKED)
             app.waveout.set_mute(SendMessageW(app.check_mute, BM_GETCHECK, 0, 0) ==
                                  BST_CHECKED);
+        break;
+    case IDC_CHECK_APT:
+        if (code == BN_CLICKED) update_apt_on(app);
+        break;
+    case IDC_SAVEPNG:
+        if (code == BN_CLICKED) save_apt_dialog(app);
         break;
     case IDC_COMBO_RATE:
         if (code == CBN_SELCHANGE) {
@@ -1949,6 +2013,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     create_toolbar(app);
     create_settings_row(app);
     create_statusbar(app);
+    // APT 云图原生窗（云图页覆盖内容区；位于 WinFlux host 之上）
+    hackrftool::ui::AptView::register_class(instance);
+    (void)app.apt_view.create(app.main_wnd, instance);
 
     if (auto_start) {
         std::string err;
@@ -1961,6 +2028,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                 device_ok = true;
                 if (app.sweep_on == 1) set_sweep_live(app, true);
                 if (app.page >= 3) ensure_fm(app, true);
+                update_apt_on(app);
             } else {
                 app.status = L"启动接收失败: " + widen(err);
             }
