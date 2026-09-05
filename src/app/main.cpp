@@ -145,6 +145,7 @@ struct App {
     // 工具栏状态同步缓存（避免每帧重复 TB_SETSTATE 消息）
     int sync_run = -1, sync_page = -1, sync_sweep = -1, sync_rec = -1;
     std::wstring sync_sb[6];   // 状态栏分段文本缓存（相同文本不重发 SB_SETTEXT）
+    DWORD last_sb_ms = 0;     // 状态栏上次文本刷新时刻（4Hz 节流）
     // 拖拽拉伸进行中（WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE）：内容区冻结旧尺寸，
     // 松手一次性重铺——WinFlux DComp 每次收到 WM_SIZE 都销毁重建渲染表面，
     // 拖拽中每步重建=持续闪白（上游行为，本仓库侧绕开）
@@ -1012,9 +1013,14 @@ void create_statusbar(App& app) {
                                     GetModuleHandleW(nullptr), nullptr);
 }
 
-// 摆放工具栏/设置行/状态栏/内容区（WM_SIZE、WM_DPICHANGED、页切换共用）
+// 摆放工具栏/设置行/状态栏/内容区（WM_SIZE、WM_DPICHANGED、页切换共用）。
+// 拖拽进行中（live_sizing）直接返回：冻结全部子控件几何——任何 MoveWindow/
+// SB_SETPARTS 都会引发该子窗一步"擦除+重画"，拖拽中每步执行=持续闪烁。
+// 新暴露区域由主窗 WM_PAINT 直绘填充（无擦除，构造性零闪烁），
+// WM_EXITSIZEMOVE 做一次性精确重铺。
 void layout(App& app) {
     if (app.main_wnd == nullptr || app.toolbar == nullptr) return;
+    if (app.live_sizing) return;
     const int scale = app.main_wnd != nullptr ? GetDpiForWindow(app.main_wnd) : 96;
     const int s = scale / 96;   // 整数倍缩放足够（100%/125%→1，150%→1 近似；
                                 // 控件尺寸不追求逐 DPI 精确，布局稳定优先）
@@ -1081,8 +1087,13 @@ void layout(App& app) {
                    h - tb_h - row_h - sb_h, FALSE);
 }
 
-// 工具栏按钮态 + 状态栏文本（build 心跳驱动；缓存避免每帧消息风暴）
+// 工具栏按钮态 + 状态栏文本（build 心跳驱动；缓存避免每帧消息风暴）。
+// 状态栏文本 4Hz 节流（帧号每帧都变，40Hz 重绘无意义且是拖拽外的高频
+// 重绘源）；拖拽进行中整体跳过（与 layout 冻结配套，拖拽期零子窗重绘）。
 void sync_chrome(App& app) {
+    if (app.live_sizing) return;
+    const DWORD now = GetTickCount();
+    const bool sb_due = now - app.last_sb_ms >= 250;
     if (app.toolbar != nullptr) {
         if (app.sync_run != int(app.running)) {
             TBBUTTONINFO bi{};
@@ -1121,7 +1132,8 @@ void sync_chrome(App& app) {
         }
     }
 
-    if (app.statusbar != nullptr) {
+    if (app.statusbar != nullptr && sb_due) {
+        app.last_sb_ms = now;
         // 分段 0：基础状态（接收中时由动态段首词接续，避免与分段 1 重复）
         std::wstring parts[6];
         parts[0] = app.running ? L"接收中" : app.status;
@@ -1284,7 +1296,9 @@ LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_EXITSIZEMOVE:
         if (app != nullptr) {
             app->live_sizing = false;
-            layout(*app);   // 拖拽期间内容区冻结，此处一次性精确重铺
+            layout(*app);          // 拖拽期间全部冻结，此处一次性精确重铺
+            app->last_sb_ms = 0;   // 状态栏立即补一拍（拖拽期间被节流+跳过）
+            sync_chrome(*app);
         }
         return 0;
     case WM_SIZE:
