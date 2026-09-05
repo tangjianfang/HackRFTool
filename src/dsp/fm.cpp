@@ -56,8 +56,8 @@ std::optional<std::complex<float>> Decimator::push(std::complex<float> s) {
     return acc;
 }
 
-FmReceiver::FmReceiver(double fs_in_hz, double pll_bw_hz)
-    : dec_(fs_in_hz, 128), pll_bw_(pll_bw_hz) {
+FmReceiver::FmReceiver(double fs_in_hz, double pll_bw_hz, bool force_mono)
+    : dec_(fs_in_hz, 128), pll_bw_(pll_bw_hz), force_mono_(force_mono) {
     lp_taps_ = lowpass_taps(48, kMpxHz, 15e3);
     lpr_hist_.assign(lp_taps_.size(), 0.0f);
     lmr_hist_.assign(lp_taps_.size(), 0.0f);
@@ -108,7 +108,7 @@ void FmReceiver::mpx_step(float mpx) {
 
     // ---- 立体声矩阵 + 去加重 ----
     float l, r;
-    if (stereo_locked()) {
+    if (stereo_locked() && !force_mono_) {
         l = 0.5f * (lpr + lmr);
         r = 0.5f * (lpr - lmr);
     } else {

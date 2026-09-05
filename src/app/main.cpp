@@ -129,6 +129,8 @@ struct App {
     std::atomic<bool> fm_scan{false};      // 扫台进行中
     std::atomic<float> fm_pilot{0.0f};     // 导频相关（立体声判定，UI 读）
     std::atomic<float> fm_peak{0.0f};      // 音频峰值表
+    std::atomic<bool> squelch_open{false}; // 静噪门（峰均差判据，UI 心跳写）
+    float squelch_gain = 0.0f;             // 静噪增益平滑（fm 线程私有）
     double radio_mhz = 98.0;               // 收音机页当前频率
     std::vector<double> stations;          // 扫台结果（MHz）
     hackrftool::audio::WaveOut waveout;
@@ -450,7 +452,17 @@ void clear_bursts(App& app) {
 // fm 线程：SPSC 环拉 IQ → FmReceiver → waveOut（音频回调在本线程执行）
 void fm_audio_cb(const float* l, const float* r, std::size_t n, void* ctx) {
     auto* app = static_cast<App*>(ctx);
-    app->waveout.write(l, r, n);
+    // 静噪：门开→1、门闭→0.03（近哑音）；τ≈50ms 平滑防爆音
+    const float target = app->squelch_open.load() ? 1.0f : 0.03f;
+    app->squelch_gain += 0.2f * (target - app->squelch_gain);
+    float gl[480], gr[480];
+    const std::size_t m = std::min<std::size_t>(n, 480);
+    for (std::size_t i = 0; i < m; ++i) {
+        gl[i] = l[i] * app->squelch_gain;
+        gr[i] = r[i] * app->squelch_gain;
+    }
+    app->waveout.write(gl, gr, m);
+    if (n > m) app->waveout.write(l + m, r + m, n - m);   // n 恒为 480，保险
     if (app->apt_on.load()) app->apt.feed(l, n);   // APT：单声道取 L
     app->fm_pilot.store(app->fm_rx ? app->fm_rx->pilot_level() : 0.0f);
     app->fm_peak.store(app->fm_rx ? app->fm_rx->audio_peak() : 0.0f);
@@ -1004,6 +1016,11 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
     std::wstring meter;
     for (int i = 0; i < 24; ++i) meter += (i < bars) ? L"█" : L"·";
     head->children.push_back(flux::ui::caption(pal, meter, {}));
+    head->children.push_back(flux::ui::badge(
+        pal,
+        app.squelch_open.load() ? flux::ui::BadgeKind::success
+                                : flux::ui::BadgeKind::neutral,
+        app.squelch_open.load() ? L"● 有台" : L"○ 空频点"));
     page_el->children.push_back(std::move(head));
 
     // 信号库列表（按筛选条件）：点击行=调谐（#55 零手动输入）
@@ -1130,6 +1147,19 @@ flux::ElementPtr build(App& app) {
                 (have.right - have.left) != (want.right - want.left) ||
                 (have.bottom - have.top) != (want.bottom - want.top))
                 layout(app);
+        }
+    }
+
+    // 静噪判据（收音链在跑时）：当前帧峰均差 >8dB 视为带内有台
+    if (app.fm_on.load()) {
+        if (!app.frame.db.empty()) {
+            float sum = 0.0f, mx = -999.0f;
+            for (const float v : app.frame.db) {
+                sum += v;
+                mx = std::max(mx, v);
+            }
+            const bool open = (mx - sum / float(app.frame.db.size())) > 8.0f;
+            app.squelch_open.store(open);
         }
     }
 

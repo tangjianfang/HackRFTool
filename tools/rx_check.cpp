@@ -73,7 +73,10 @@ int main(int argc, char** argv) {
         std::fclose(f);
         std::printf("file %s: %zu bytes, center %.1f MHz (assume 2 Msps)\n",
                     argv[2], got, fmhz);
-        (void)got;
+        // SWAP=1：交换 I/Q（镜像判定 A/B——交换后峰翻边且导频可锁=采集链镜像）
+        if (std::getenv("SWAP") != nullptr)
+            for (std::size_t k = 0; k < got / 2; ++k)
+                std::swap(cap.iq[k * 2], cap.iq[k * 2 + 1]);
         return run_analysis(cap.iq.data(), got, fmhz);
     }
     const double mhz = argc > 1 ? std::atof(argv[1]) : 98.0;
@@ -171,8 +174,9 @@ static int run_analysis(const std::int8_t* cap_iq, std::size_t got, double mhz) 
     }
 
     // ---- 离线 FM 解调音频质量 ----
+    const bool force_mono = std::getenv("MONO") != nullptr;
     AudioCap ac;
-    hackrftool::dsp::FmReceiver rx(2e6, 300.0);
+    hackrftool::dsp::FmReceiver rx(2e6, 300.0, force_mono);
     rx.set_audio_callback(&AudioCap::cb, &ac);
     rx.feed(cap_iq, got);
     if (ac.l.size() > 8000) {
@@ -188,9 +192,9 @@ static int run_analysis(const std::int8_t* cap_iq, std::size_t got, double mhz) 
         const double b_300 = goertzel_db(mid, 48e3, 300.0);      // 话音基带
         const double b_1k = goertzel_db(mid, 48e3, 1000.0);
         const double b_3k = goertzel_db(mid, 48e3, 3000.0);
-        std::printf("audio: rms=%.3f peak=%.3f  tone_db: 300Hz=%.1f 1k=%.1f "
+        std::printf("audio[%s]: rms=%.3f peak=%.3f  tone_db: 300Hz=%.1f 1k=%.1f "
                     "3k=%.1f 8k(noise)=%.1f  (1k-8k gap=%.1f dB)\n",
-                    arms, mx, b_300, b_1k, b_3k, n_floor, b_1k - n_floor);
+                    force_mono ? "mono" : "auto", arms, mx, b_300, b_1k, b_3k, n_floor, b_1k - n_floor);
     }
     std::printf("pilot=%.3f stereo=%d\n", ac.l.empty() ? 0.0f : 0.0f, 0);
     return 0;

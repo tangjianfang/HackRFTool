@@ -43,7 +43,11 @@ public:
                              void* ctx);
 
     // pll_bw_hz：导频环路带宽（收听 80 Hz 稳；测试用 300 Hz 加速锁定）
-    explicit FmReceiver(double fs_in_hz, double pll_bw_hz = 80.0);
+    // force_mono：诊断/弱信号模式——禁用 38k DSBSC 分支（噪声减半）
+    explicit FmReceiver(double fs_in_hz, double pll_bw_hz = 80.0,
+                        bool force_mono = false);
+
+    void set_force_mono(bool m) noexcept { force_mono_ = m; }
 
     void set_audio_callback(AudioCb cb, void* ctx) noexcept { cb_ = cb; ctx_ = ctx; }
 
@@ -69,6 +73,7 @@ private:
     std::size_t lpr_head_ = 0, lmr_head_ = 0;
     // 导频 PLL
     double pll_bw_;
+    bool force_mono_ = false;
     double theta_ = 0.0;    // 19 kHz NCO 相位
     double freq_ = 0.0;     // 环路频偏估计（Hz）
     float pilot_ = 0.0f;    // 导频相关幅度（LPF 后）
