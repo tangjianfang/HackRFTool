@@ -3307,6 +3307,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                         std::fprintf(rp, "  [%s/%s] %s\n", e.cat.c_str(),
                                      e.event.c_str(),
                                      e.kv.empty() ? "" : e.kv[0].first.c_str());
+                    // 事件链顺序断言（#68）：报告自带行为证据，非仅计数
+                    {
+                        const auto t = lg.tail(64);
+                        auto pos = [&](const char* c, const char* ev) {
+                            for (std::size_t k = 0; k < t.size(); ++k)
+                                if (t[k].cat == c && t[k].event == ev)
+                                    return long(k);
+                            return -1L;
+                        };
+                        const long start = pos("LIFE", "app.start");
+                        const long rx = pos("LIFE", device_ok ? "rx.start" : "x");
+                        const bool chain_ok =
+                            device_ok ? (start >= 0 && rx > start) : (start >= 0);
+                        std::fprintf(rp, "事件链 app.start→rx.start: %s\n",
+                                     chain_ok ? "PASS" : "FAIL");
+                    }
                 }
                 std::fclose(rp);
             }
