@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "dsp/analyzer.hpp"
+#include "app/settings.hpp"
 #include "dsp/burst_detector.hpp"
 #include "dsp/channel_monitor.hpp"
 #include "dsp/fft.hpp"
@@ -1015,6 +1016,99 @@ static void test_voice_level() {
     check(db_sil < -100.0f, "静音 ≈ -120dB（第二块）");
 }
 
+// 设置持久化（#57）：往返一致 + 单行损坏不拖垮整体 + 越界值拒绝
+static void test_settings_roundtrip() {
+    using hackrftool::app::Settings;
+    Settings s;
+    s.page = 3;
+    s.center_mhz = 107.1;
+    s.radio_mhz = 107.1;
+    s.rate_index = 0;
+    s.lna = 24;
+    s.vga = 32;
+    s.amp = true;
+    s.auto_track = false;
+    s.afc_on = false;
+    s.threshold = -65;
+    s.burst_thr = -35;
+    s.symrate_idx = 1;
+    s.fm_bw = 2;
+    s.audio_dev = 1;
+    s.vol = 55;
+    s.sig_cat = 2;
+    s.sig_online = 0;
+    s.sig_sort = 1;
+    const auto t = hackrftool::app::serialize(s);
+    const auto back = hackrftool::app::deserialize(t);
+    check(back.has_value(), "settings 序列化→反序列化成功");
+    const Settings& b = *back;
+    check(b.page == 3 && b.center_mhz == 107.1 && b.radio_mhz == 107.1,
+          "频率字段往返");
+    check(b.rate_index == 0 && b.lna == 24 && b.vga == 32 && b.amp,
+          "增益/采样率/功放往返");
+    check(!b.auto_track && !b.afc_on && b.fm_bw == 2 && b.vol == 55,
+          "开关/带宽/音量往返");
+    check(b.sig_cat == 2 && !b.sig_online && b.sig_sort == 1 &&
+              b.audio_dev == 1 && b.symrate_idx == 1,
+          "筛选/设备/符号率往返");
+    // 容错：垃圾行、越界值、未知键、缺字段（保留默认）
+    const auto mix = hackrftool::app::deserialize(
+        "# comment\njunk line no tab\n"
+        "center_mhz\t9999\npage\t7\nvol\tabc\nunknown\t5\n"
+        "fm_bw\t1\nthreshold\tnan\n");
+    check(mix.has_value(), "容错解析：有效键存在即成功");
+    check(mix->center_mhz == 2450.0 && mix->page == 0 && mix->vol == 80,
+          "越界/坏值字段保留默认");
+    check(mix->fm_bw == 1, "好行照常解析");
+    check(mix->threshold == -70.0, "nan 拒绝");
+    check(!hackrftool::app::deserialize("").has_value(), "空文本→nullopt");
+    check(!hackrftool::app::deserialize("no tabs here").has_value(),
+          "无有效行→nullopt");
+}
+
+// 音频频谱（#57）：整 bin 峰位/幅值（numpy 校准 -12.04dB）、19k 导频峰位、
+// 峰保持慢衰减
+static void test_audio_spectrum() {
+    using hackrftool::dsp::AudioSpectrumMeter;
+    constexpr std::size_t N = 2048;
+    AudioSpectrumMeter m;
+    // 整 bin 984.375 Hz（bin 42）A=0.5：期望 -12.04 dBFS（hann 相干增益，
+    // numpy 校准）；喂 3 窗确保环形缓冲全是新样本
+    std::vector<float> buf(N);
+    for (int rep = 0; rep < 3; ++rep) {
+        for (std::size_t i = 0; i < N; ++i)
+            buf[i] = float(0.5 * std::cos(2 * hackrftool::dsp::kPi * 42.0 *
+                                          double(i) / double(N)));
+        m.feed(buf.data(), buf.size());
+    }
+    const auto& db = m.spectrum_db();
+    check(db.size() == N / 2, "谱 bin 数 = N/2");
+    const auto peak_it = std::max_element(db.begin(), db.end());
+    const std::size_t pk = std::size_t(peak_it - db.begin());
+    check(pk == 42, "整 bin 音频峰位正确");
+    check(std::abs(*peak_it - (-12.04f)) < 0.15f, "峰幅值 ≈ -12.0 dBFS");
+    check(m.seq() >= 3, "每窗一次重算（seq 递增）");
+    // 19 kHz 导频：峰落 bin 811（numpy 校准 810.67）
+    AudioSpectrumMeter m2;
+    for (int rep = 0; rep < 3; ++rep) {
+        for (std::size_t i = 0; i < N; ++i)
+            buf[i] = float(0.25 * std::cos(2 * hackrftool::dsp::kPi * 19000.0 *
+                                            double(i) / 48000.0));
+        m2.feed(buf.data(), buf.size());
+    }
+    const auto& db2 = m2.spectrum_db();
+    const auto pk2 = std::size_t(std::max_element(db2.begin(), db2.end()) -
+                                 db2.begin());
+    check(pk2 >= 809 && pk2 <= 812, "19k 导频峰位正确（非整 bin 泄漏）");
+    // 峰保持：静音后实时谱塌底、保持线仍高
+    const std::vector<float> sil(N, 0.0f);
+    m2.feed(sil.data(), sil.size());
+    const auto& db3 = m2.spectrum_db();
+    const auto& pk3 = m2.peak_db();
+    check(db3[pk2] < pk3[pk2] - 3.0f, "静音后峰保持线显著高于实时谱");
+    check(pk3[pk2] > db2[pk2] - 1.0f, "保持线衰减缓慢（<1dB/帧）");
+}
+
 static void test_fm_decimator_stopband() {
     using hackrftool::dsp::Decimator;
     // 2 Msps → 250 kHz：带内 40 kHz 通过，带外 400 kHz 显著衰减
@@ -1227,6 +1321,8 @@ int main() {
     test_afc_correction();
     test_peak_snap();
     test_voice_level();
+    test_settings_roundtrip();
+    test_audio_spectrum();
     test_fm_decimator_stopband();
     test_apt_decode();
     test_sigdb();

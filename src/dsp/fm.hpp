@@ -68,6 +68,30 @@ private:
     bool init_ = false;
 };
 
+// 音频频谱（#57）：2048 点汉宁窗实 FFT，0..24 kHz 幅度谱 dBFS，
+// 附慢衰减峰保持（19 kHz 导频峰窄、24 Hz 刷新裸谱会闪烁，保持线稳读）。
+// fm 线程 feed（mono 混合），UI 心跳拷贝 spectrum_db/peak_db 绘制。
+class AudioSpectrumMeter {
+public:
+    AudioSpectrumMeter();
+    // 喂 mono 音频块；每累计 N 新样本重算一次谱（约 24 Hz @48k）
+    void feed(const float* x, std::size_t n) noexcept;
+    [[nodiscard]] const std::vector<float>& spectrum_db() const noexcept { return db_; }
+    [[nodiscard]] const std::vector<float>& peak_db() const noexcept { return peak_; }
+    [[nodiscard]] unsigned seq() const noexcept { return seq_; }
+
+private:
+    void recompute() noexcept;
+    std::vector<float> hann_;   // N 点窗
+    std::vector<float> ring_;   // N 样本环形缓冲
+    std::vector<float> db_;     // N/2 bins
+    std::vector<float> peak_;   // 峰保持（每帧 -0.3 dB 衰减）
+    std::vector<std::complex<double>> tmp_;
+    std::size_t pos_ = 0;
+    std::size_t fed_ = 0;
+    unsigned seq_ = 0;
+};
+
 // FM 广播接收机（立体声，导频丢失自动回退单声道）
 class FmReceiver {
 public:

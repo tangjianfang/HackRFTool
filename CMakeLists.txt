@@ -21,6 +21,7 @@ include(WinFluxCompilerOptions)
 add_executable(HackRFTool WIN32
     src/app/main.cpp
     src/app/app.rc
+    src/app/settings.cpp
     src/dsp/analyzer.cpp
     src/dsp/apt.cpp
     src/dsp/burst_detector.cpp
@@ -91,7 +92,7 @@ target_include_directories(HackRFAnalyze PRIVATE src)
 flux_apply_compiler_options(HackRFAnalyze)
 
 enable_testing()
-add_executable(HackRFToolTest tests/dsp_test.cpp src/dsp/analyzer.cpp
+add_executable(HackRFToolTest tests/dsp_test.cpp src/app/settings.cpp src/dsp/analyzer.cpp
                               src/dsp/apt.cpp
                               src/dsp/burst_detector.cpp src/dsp/channel_monitor.cpp
                               src/dsp/esb.cpp src/dsp/fft.cpp src/dsp/fm.cpp

@@ -27,6 +27,7 @@
 
 #include "dsp/analyzer.hpp"
 #include "dsp/apt.hpp"
+#include "app/settings.hpp"
 #include "dsp/channel_monitor.hpp"
 #include "dsp/esb.hpp"
 #include "dsp/fm.hpp"
@@ -137,6 +138,15 @@ struct App {
     unsigned voice_seq = 0;
     float voice_cur = -120.0f;
     int voice_dec = 0;                    // 10ms 块 ÷5 = 20Hz
+    // 音频频谱（#57）：fm 线程 feed mono，seq 变化时拷贝给 UI
+    hackrftool::dsp::AudioSpectrumMeter audio_spec;
+    std::mutex spec_mtx;
+    std::vector<float> spec_db, spec_peak;
+    unsigned spec_seq = 0, spec_seen = 0;   // seen=fm 线程私有比较位
+    int vol = 80;                          // 音量 0..100（waveout 外存，供设置持久化）
+    // 设置持久化（#57）：序列化比对变化才写盘，3s 节流
+    std::string last_settings;
+    unsigned long long last_set_ms = 0;
     bool afc_on = true;                    // AFC 自动频率微调（收音页）
     HWND check_afc = nullptr;
     int fm_bw = 0;                         // 收听带宽：0=±120k 1=±80k 2=±50k
@@ -188,6 +198,8 @@ struct App {
     int audio_dev = -1;   // 输出设备（-1=系统默认；WaveOut::enum_devices 下标）
     HWND combo_audio = nullptr;
     bool amp = false;            // 板载功放（+14 dB，弱信号/室内天线场景）
+    bool gains_pinned = false;   // 增益来自设置恢复（ensure_fm 不再覆盖为广播默认）
+    bool settings_hold = false;  // 自测模式禁写设置（防污染用户参数）
     HWND check_amp = nullptr;
 
     // ---- 云图（#54）----
@@ -485,6 +497,20 @@ void fm_audio_cb(const float* l, const float* r, std::size_t n, void* ctx) {
         app->voice_cur = db;
         ++app->voice_seq;
     }
+    // 音频频谱：静噪前取 (L+R)/2——静噪会掐掉底噪谱形；seq 变化才拷贝
+    {
+        float mono[480];
+        const std::size_t k = std::min<std::size_t>(n, 480);
+        for (std::size_t i = 0; i < k; ++i) mono[i] = (l[i] + r[i]) * 0.5f;
+        app->audio_spec.feed(mono, k);
+        if (app->audio_spec.seq() != app->spec_seen) {
+            app->spec_seen = app->audio_spec.seq();
+            std::lock_guard<std::mutex> g(app->spec_mtx);
+            app->spec_db = app->audio_spec.spectrum_db();
+            app->spec_peak = app->audio_spec.peak_db();
+            app->spec_seq = app->spec_seen;
+        }
+    }
     if (app->apt_on.load()) app->apt.feed(l, n);   // APT：单声道取 L
     app->fm_pilot.store(app->fm_rx ? app->fm_rx->pilot_level() : 0.0f);
     app->fm_peak.store(app->fm_rx ? app->fm_rx->audio_peak() : 0.0f);
@@ -533,8 +559,8 @@ void ensure_fm(App& app, bool on) {
     }
     if (on) {
         // 广播接收默认增益（对照 SDRSharp 可用设置：LNA 40/amp on）；
-        // 用户手动调过（≥32）则不动
-        if (app.lna < 32) {
+        // 用户手动调过（≥32）或设置恢复过则不动
+        if (app.lna < 32 && !app.gains_pinned) {
             app.lna = 40;
             app.vga = std::max(app.vga, 32u);
             app.amp = true;
@@ -1054,6 +1080,13 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
             pal, app.voice_hist, app.voice_cur, app.voice_seq));
     }
 
+    // 音频频谱 0–24 kHz（#57）：实时谱+峰保持+19k 导频参考线
+    {
+        std::lock_guard<std::mutex> g(app.spec_mtx);
+        page_el->children.push_back(hackrftool::ui::audio_spectrum_strip(
+            pal, app.spec_db, app.spec_peak, app.spec_seq));
+    }
+
     // 信号库列表（按筛选条件）：点击行=调谐（#55 零手动输入）
     using hackrftool::dsp::SigCat;
     const SigCat cat = app.sig_cat == 0   ? SigCat::radio
@@ -1117,6 +1150,7 @@ flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
 // ---- 内容区根（WinFlux，每帧重建） -----------------------------------------
 
 void sync_chrome(App& app);   // 定义在原生骨架节（工具栏态 + 状态栏文本）
+void save_settings_tick(App& app);   // 设置缓存心跳保存（#57，定义见设置节）
 void layout(App& app);        // 定义在原生骨架节（几何摆放；看门狗共用）
 bool host_target(App& app, RECT* out);   // 内容区目标矩形
 
@@ -1161,6 +1195,7 @@ flux::ElementPtr build(App& app) {
 
     // 原生骨架状态同步（工具栏按钮态 + 状态栏分段文本；心跳驱动，零定时器）
     sync_chrome(app);
+    save_settings_tick(app);   // 设置缓存（#57）：3s 节流、变化才写盘
 
     // 几何看门狗：不信任任何消息配对（EXITSIZEMOVE/WM_SIZE 均可能丢失——
     // 用户实测拖拽后卡死在小尺寸），每心跳核对内容区实际/目标矩形，
@@ -1307,6 +1342,115 @@ void apply_page_default(App& app) {
     }
     if (!hackrftool::dsp::in_band(want, app.center_mhz))
         tune_to(app, hackrftool::dsp::default_center(want));
+}
+
+// ---- 设置持久化（#57）：界面参数全部缓存 settings.tsv，启动恢复 ----
+// App 字段是唯一事实源（各控件 handler 已把值写回 App），capture 只读字段。
+[[nodiscard]] hackrftool::app::Settings capture_settings(const App& app) {
+    hackrftool::app::Settings s;
+    s.page = app.page;
+    s.center_mhz = app.center_mhz;
+    s.radio_mhz = app.radio_mhz;
+    s.rate_index = app.rate_index;
+    s.lna = app.lna;
+    s.vga = app.vga;
+    s.amp = app.amp;
+    s.auto_track = app.auto_track;
+    s.afc_on = app.afc_on;
+    s.threshold = app.threshold;
+    s.burst_thr = app.burst_thr;
+    s.symrate_idx = app.symrate_idx;
+    s.fm_bw = app.fm_bw;
+    s.audio_dev = app.audio_dev;
+    s.vol = app.vol;
+    s.sig_cat = app.sig_cat;
+    s.sig_online = app.sig_online;
+    s.sig_sort = app.sig_sort;
+    return s;
+}
+
+// 恢复：写 App 字段 + 同步原生控件（控件已创建后调用）
+void restore_settings(App& app, const hackrftool::app::Settings& s) {
+    app.page = s.page;
+    app.center_mhz = s.center_mhz;
+    app.radio_mhz = s.radio_mhz;
+    app.rate_index = s.rate_index;
+    app.lna = s.lna;
+    app.vga = s.vga;
+    app.amp = s.amp;
+    app.auto_track = s.auto_track;
+    app.afc_on = s.afc_on;
+    app.threshold = s.threshold;
+    app.burst_thr = s.burst_thr;
+    app.symrate_idx = s.symrate_idx;
+    app.fm_bw = s.fm_bw;
+    app.audio_dev = s.audio_dev;
+    app.vol = s.vol;
+    app.sig_cat = s.sig_cat;
+    app.sig_online = s.sig_online;
+    app.sig_sort = s.sig_sort;
+    SetWindowTextW(app.edit_freq, wd1(app.center_mhz).c_str());
+    SetWindowTextW(app.edit_radio, wd1(app.radio_mhz).c_str());
+    SendMessageW(app.combo_rate, CB_SETCURSEL, app.rate_index, 0);
+    SendMessageW(app.combo_symrate, CB_SETCURSEL, app.symrate_idx, 0);
+    SendMessageW(app.track_lna, TBM_SETPOS, TRUE, LPARAM(app.lna));
+    SendMessageW(app.track_vga, TBM_SETPOS, TRUE, LPARAM(app.vga));
+    SetWindowTextW(app.lbl_lna, (L"LNA " + std::to_wstring(app.lna)).c_str());
+    SetWindowTextW(app.lbl_vga, (L"VGA " + std::to_wstring(app.vga)).c_str());
+    SendMessageW(app.check_amp, BM_SETCHECK,
+                 app.amp ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(app.check_autotrack, BM_SETCHECK,
+                 app.auto_track ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(app.check_afc, BM_SETCHECK,
+                 app.afc_on ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(app.track_threshold, TBM_SETPOS, TRUE, LPARAM(int(app.threshold)));
+    SendMessageW(app.track_burst, TBM_SETPOS, TRUE, LPARAM(int(app.burst_thr)));
+    SetWindowTextW(app.lbl_thr, (std::to_wstring(int(app.threshold)) + L" dB").c_str());
+    SetWindowTextW(app.lbl_burst, (std::to_wstring(int(app.burst_thr)) + L" dB").c_str());
+    SendMessageW(app.combo_bw, CB_SETCURSEL, app.fm_bw, 0);
+    SendMessageW(app.combo_sigcat, CB_SETCURSEL, app.sig_cat, 0);
+    SendMessageW(app.combo_online, CB_SETCURSEL, app.sig_online, 0);
+    SendMessageW(app.combo_sort, CB_SETCURSEL, app.sig_sort, 0);
+    if (app.combo_audio != nullptr) {
+        // 设备列表开机可能变：越界回退系统默认（combo 下标 = audio_dev+1）
+        const int cnt = int(SendMessageW(app.combo_audio, CB_GETCOUNT, 0, 0));
+        if (app.audio_dev >= cnt - 1) app.audio_dev = -1;
+        SendMessageW(app.combo_audio, CB_SETCURSEL, app.audio_dev + 1, 0);
+    }
+    SendMessageW(app.track_vol, TBM_SETPOS, TRUE, LPARAM(app.vol));
+    SetWindowTextW(app.lbl_vol, (L"音量 " + std::to_wstring(app.vol)).c_str());
+    app.waveout.set_volume(float(app.vol) / 100.0f);
+    app.gains_pinned = true;   // 用户上次手调的增益优先于广播默认
+    app.last_settings = hackrftool::app::serialize(capture_settings(app));
+}
+
+[[nodiscard]] std::string read_text_file(const std::wstring& path) {
+    std::FILE* f = _wfopen(path.c_str(), L"rb");
+    if (f == nullptr) return {};
+    std::string buf;
+    char tmp[512];
+    for (size_t g; (g = fread(tmp, 1, sizeof tmp, f)) > 0;) buf.append(tmp, g);
+    fclose(f);
+    return buf;
+}
+
+void write_text_file(const std::wstring& path, const std::string& text) {
+    std::FILE* f = _wfopen(path.c_str(), L"wb");
+    if (f == nullptr) return;
+    fwrite(text.data(), 1, text.size(), f);
+    fclose(f);
+}
+
+// 心跳节流保存（build 调用）：序列化比对变化才写盘
+void save_settings_tick(App& app) {
+    if (app.settings_hold) return;
+    const auto now = GetTickCount64();
+    if (now - app.last_set_ms < 3000) return;
+    app.last_set_ms = now;
+    const std::string s = hackrftool::app::serialize(capture_settings(app));
+    if (s == app.last_settings) return;
+    app.last_settings = s;
+    write_text_file(exe_dir_path("settings.tsv"), s);
 }
 
 // 频谱点击调谐（#55：点信号即调谐；全景点击=跳去专门收听该段）。
@@ -2211,6 +2355,7 @@ void on_hscroll(App& app, HWND ctl) {
         SetWindowTextW(app.lbl_burst, (std::to_wstring(v) + L" dB").c_str());
     } else if (ctl == app.track_vol) {
         const int v = int(SendMessageW(ctl, TBM_GETPOS, 0, 0));
+        app.vol = v;
         app.waveout.set_volume(float(v) / 100.0f);
         SetWindowTextW(app.lbl_vol, (L"音量 " + std::to_wstring(v)).c_str());
     }
@@ -2299,7 +2444,12 @@ LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_CLOSE: DestroyWindow(wnd); return 0;
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DESTROY:
+        if (app != nullptr && !app->settings_hold)   // 设置缓存（#57）：退出兜底落盘
+            write_text_file(exe_dir_path("settings.tsv"),
+                            hackrftool::app::serialize(capture_settings(*app)));
+        PostQuitMessage(0);
+        return 0;
     default: break;
     }
     return DefWindowProcW(wnd, msg, wp, lp);
@@ -2393,10 +2543,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
         if (wcscmp(cmd_line, L"selftest") == 0) {
             auto_start = true;
             selftest = true;
+            app.settings_hold = true;   // 自测不写设置（防污染用户参数）
         }
         if (wcscmp(cmd_line, L"selftestsweep") == 0) {
             auto_start = true;
             selftest = true;
+            app.settings_hold = true;
             app.sweep_on = 1;
         }
     }
@@ -2425,6 +2577,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     create_toolbar(app);
     create_settings_row(app);
     create_statusbar(app);
+    // 设置恢复（#57）：仅交互启动加载——命令行自测模式断言依赖出厂默认。
+    // 在控件创建后、auto_start 配置前：restore 只写字段/控件，设备侧由
+    // auto_start 的 apply_radio 或用户点「开始」时按 App 字段生效。
+    if (!auto_start && !selftest) {
+        if (auto st = hackrftool::app::deserialize(
+                read_text_file(exe_dir_path("settings.tsv")))) {
+            restore_settings(app, *st);
+            auto_start = true;   // 打开即回到上次工作状态（含自动开始接收）
+        }
+    }
     // APT 云图原生窗（云图页覆盖内容区；位于 WinFlux host 之上）
     hackrftool::ui::AptView::register_class(instance);
     (void)app.apt_view.create(app.main_wnd, instance);

@@ -262,4 +262,48 @@ void FmReceiver::feed(const std::int8_t* iq, std::size_t bytes) {
     }
 }
 
+
+AudioSpectrumMeter::AudioSpectrumMeter() {
+    constexpr std::size_t N = 2048;
+    hann_.resize(N);
+    for (std::size_t i = 0; i < N; ++i)
+        hann_[i] = float(0.5 - 0.5 * std::cos(2.0 * kPi * double(i) / double(N)));
+    ring_.assign(N, 0.0f);
+    db_.assign(N / 2, -120.0f);
+    peak_.assign(N / 2, -120.0f);
+    tmp_.resize(N);
+}
+
+void AudioSpectrumMeter::recompute() noexcept {
+    const std::size_t N = ring_.size();
+    for (std::size_t i = 0; i < N; ++i) {
+        const float s = ring_[(pos_ + i) % N];   // 环形展开为时间序
+        tmp_[i] = {double(s * hann_[i]), 0.0};
+    }
+    fft(tmp_);
+    // 汉宁相干增益 1/2：满幅单音 (A=1) => |X| = A*N/2；归一到 dBFS
+    const double norm = double(N) / 2.0;
+    for (std::size_t k = 0; k < N / 2; ++k) {
+        const double mag = std::abs(tmp_[k]) / norm;
+        const float v = float(20.0 * std::log10(mag + 1e-12));
+        db_[k] = v;
+        // 峰保持：每帧慢衰减 0.3 dB（24Hz ≈ -7dB/s，闪峰也能留住读数）
+        peak_[k] = std::max(v, peak_[k] - 0.3f);
+    }
+    ++seq_;
+}
+
+void AudioSpectrumMeter::feed(const float* x, std::size_t n) noexcept {
+    const std::size_t N = ring_.size();
+    for (std::size_t i = 0; i < n; ++i) {
+        ring_[pos_] = x[i];
+        pos_ = (pos_ + 1) % N;
+        // 每累计 N 个新样本重算一次（计数器版：回绕点在块中间也不漏）
+        if (++fed_ >= N) {
+            fed_ = 0;
+            recompute();
+        }
+    }
+}
+
 } // namespace hackrftool::dsp

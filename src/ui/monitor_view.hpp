@@ -13,6 +13,11 @@ namespace hackrftool::ui {
     const flux::Palette& pal, const std::vector<float>& hist_db, float cur_db,
     unsigned seq);
 
+// 音频频谱（#57）：0..24 kHz 实 FFT 幅度谱 dBFS + 峰保持线 + 19k 导频参考线
+[[nodiscard]] flux::ElementPtr audio_spectrum_strip(
+    const flux::Palette& pal, const std::vector<float>& spec_db,
+    const std::vector<float>& peak_db, unsigned seq);
+
 [[nodiscard]] flux::ElementPtr rssi_strip(
     const flux::Palette& pal, const std::vector<hackrftool::dsp::MonitorSample>& samples,
     float threshold_db, unsigned seq);
