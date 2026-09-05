@@ -32,3 +32,5 @@ hackrftool-debug.log
 m4-boot.log
 m4-hop.log
 selftest-report-*.txt
+dumps/
+cdb-crash.log

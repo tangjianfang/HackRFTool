@@ -1,5 +1,7 @@
 // HackRFTool —— 2.4G 频谱检测工具（M1 频谱 + M2 信道监测）
 #include <windows.h>
+#include <dbghelp.h>
+#include <minidumpapiset.h>
 
 #include <commdlg.h>
 
@@ -44,6 +46,28 @@ std::wstring wd1(double v) {
     wchar_t buf[32];
     swprintf(buf, 32, L"%.1f", v);
     return buf;
+}
+
+// 崩溃时自动写 minidump 到 dumps\crash-<pid>.dmp（无需管理员权限）。
+// 生成后用 cdb -z dumps\crash-xxx.dmp -c "!analyze -v; k; q" 符号化定位。
+// flags 取数据段+间接引用内存（含环形缓冲/波形快照），不全量以免上 GB。
+LONG WINAPI write_crash_dump(EXCEPTION_POINTERS* e) {
+    CreateDirectoryW(L"dumps", nullptr);
+    wchar_t path[MAX_PATH];
+    swprintf(path, MAX_PATH, L"dumps\\crash-%lu.dmp", GetCurrentProcessId());
+    const HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei{};
+        mei.ThreadId = GetCurrentThreadId();
+        mei.ExceptionPointers = e;
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file,
+                          MINIDUMP_TYPE(MiniDumpWithDataSegs |
+                                        MiniDumpWithIndirectlyReferencedMemory),
+                          &mei, nullptr, nullptr);
+        CloseHandle(file);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;   // 仍走系统默认崩溃流程（事件日志）
 }
 
 struct App {
@@ -662,6 +686,7 @@ flux::ElementPtr build(App& app) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
+    SetUnhandledExceptionFilter(write_crash_dump);   // 崩溃自动落 dump
     flux::enable_per_monitor_dpi_v2();
     App app;
     app.running = app.host.make_state<bool>(false);

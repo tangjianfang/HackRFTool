@@ -34,7 +34,7 @@ add_executable(HackRFTool WIN32
     src/ui/monitor_view.cpp
     src/ui/views.cpp)
 target_include_directories(HackRFTool PRIVATE src ${MSYS2_UCRT64_INCLUDE})
-target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32)
+target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32 Dbghelp)
 flux_apply_compiler_options(HackRFTool)
 
 foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)
