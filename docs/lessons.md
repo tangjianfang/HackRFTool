@@ -10,7 +10,7 @@ Entry template: `| id | one-sentence lesson | how to apply (an executable action
 
 | id | lesson | how to apply | source | verified |
 |---|---|---|---|---|
-| L1 | 构建失败后 ctest 跑的是陈旧二进制，"全绿"是假象 | 每次先确认 `cmake --build` 输出零 error（`grep -cE 'warning\|error'` 为 0）再跑 ctest；宁可多跑一次空构建；grep 到 LNK1104（exe 被占用）先 Stop-Process 清残留 GUI 实例再编 | evolve#3/#4 连续两次踩中（字段名笔误后 ctest 仍绿）；evolve#51 LNK1104 被前置检查拦住 | 3 |
+| L1 | 构建失败后 ctest 跑的是陈旧二进制，"全绿"是假象 | 每次先确认 `cmake --build` 输出零 error（`grep -cE 'warning\|error'` 为 0）再跑 ctest；宁可多跑一次空构建；grep 到 LNK1104（exe 被占用）先 Stop-Process 清残留 GUI 实例再编 | evolve#3/#4 连续两次踩中（字段名笔误后 ctest 仍绿）；evolve#51 LNK1104 被前置检查拦住 | 4 |
 | L2 | 手算期望值易错（7.5 截断写成 6）——断言值用脚本算，不要心算 | 写数值断言前用一行 python/echo 核算；测试失败先验期望值再查实现 | evolve#4 waterfall_level 中点 | 1 |
 | L6 | PrintWindow(PW_RENDERFULLCONTENT) 抓 DComp 窗口会漏画普通子控件（工具栏/状态栏在、EDIT/滑条不在）——截图"控件不见了"≠UI 真不见 | 验证原生控件用前台 BitBlt（tools/screenshot-fg.ps1）或 EnumChildWindows 列 rect/vis 取证，再下结论；PrintWindow 只用于纯 D2D 内容 | evolve#52 设置行"消失"误判全程 | 1 |
 | L7 | 整文件重写最容易丢的是一行式初始化调用（#52 误删 enable_per_monitor_dpi_v2 → 整窗 DWM 模糊） | 重写后 diff 逐行核对被删除的调用清单（DPI/异常过滤器/单实例守卫这类 init 类单行者），对抗检查员必审 | evolve#52 检查员实锤（exe 内 0 处 dpiAware） | 1 |
@@ -26,8 +26,8 @@ Entry template: `| id | one-sentence lesson | how to apply (an executable action
 | id | lesson | how to apply | source | verified |
 |---|---|---|---|---|
 | L3 | 并行会话在同一工作树会互相踩（增量构建竞速、文件被改、Edit 锚点失配） | 开工前 ListAgents 查邻居；发现文件被外部修改立即重读再改；构建"成功"但 mtime 未变即 touch 强制重链；会话压缩/中断恢复先 `git diff` + todo 对账在制工作，勿盲目重做或回滚 | 2026-09-05 与 evolve-07 会话碰撞全程；evolve#50 压缩恢复对账 | 2 |
-| L13 | 跨进程 UI 驱动验证三坑：① PS pinvoke 字符串参数（string 入/字符串出）marshalling 静默失败——SetWindowText 返 True 但没写入、WM_GETTEXT 读回陈旧值；② 应用内周期写控件的逻辑（AFC 每 tick 写回频率框）会覆盖外部写入；③ BM_CLICK 是 toggle，不查 BM_GETCHECK 直接点会反向切换 | 跨进程只信数值消息（WM_COMMAND/BM_GETCHECK）；写控件前先关掉周期写回的自动逻辑（AFC 等）再写；状态判定以截图/二进制字符串为准绳（写盘前 grep 二进制确认新代码在产物里） | 2026-09-05 人声波形真机验证排障（调谐一度“不生效”實为假读假写+陈旧 exe 叠加） | 2 |
-| L14 | 视觉识别验收不可靠（本 run 两次实证：LNA 40 幻觉、未开接收报"波形有数据"），日志断言确定性 100%；但埋点有三个坑：程序性通知刷屏（AFC 每帧写频率框触发 EN_CHANGE——code 白名单 0/1 滤掉）、kv 键与 JSON 顶层字段撞名（cat 键覆盖分类——语义化键名）、埋点插在变量声明前（C2065 连锁） | UI 行为验证走 hackrftool.jsonl+tools/log-assert.py（--order 断言顺序）；截图仅核对布局；新埋点检查：键名不撞 ts/level/cat/event、位置在变量声明后 | 2026-09-06 evolve #59-#66 全程 | 1 |
+| L13 | 跨进程 UI 驱动验证三坑：① PS pinvoke 字符串参数（string 入/字符串出）marshalling 静默失败——SetWindowText 返 True 但没写入、WM_GETTEXT 读回陈旧值；② 应用内周期写控件的逻辑（AFC 每 tick 写回频率框）会覆盖外部写入；③ BM_CLICK 是 toggle，不查 BM_GETCHECK 直接点会反向切换 | 跨进程只信数值消息（WM_COMMAND/BM_GETCHECK）；写控件前先关掉周期写回的自动逻辑（AFC 等）再写；状态判定以截图/二进制字符串为准绳（写盘前 grep 二进制确认新代码在产物里） | 2026-09-05 人声波形真机验证排障（调谐一度“不生效”實为假读假写+陈旧 exe 叠加） | 3 |
+| L14 | 视觉识别验收不可靠（本 run 两次实证：LNA 40 幻觉、未开接收报"波形有数据"），日志断言确定性 100%；但埋点有三个坑：程序性通知刷屏（AFC 每帧写频率框触发 EN_CHANGE——code 白名单 0/1 滤掉）、kv 键与 JSON 顶层字段撞名（cat 键覆盖分类——语义化键名）、埋点插在变量声明前（C2065 连锁） | UI 行为验证走 hackrftool.jsonl+tools/log-assert.py（--order 断言顺序）；截图仅核对布局；新埋点检查：键名不撞 ts/level/cat/event、位置在变量声明后 | 2026-09-06 evolve #59-#66 全程 | 2 |
 
 ## WinFlux UI
 
