@@ -1,10 +1,10 @@
 # evolve log — HackRFTool
 
-- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 187 断言
-- pointer: #56（Meteor QPSK 解调+帧同步——自 #55 顺延）
-- rounds done: 10（#50–#55 为用户指定轮号/主题，#5–#49 未运行）
+- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 217 断言
+- pointer: #59（本轮主题=全量日志/遥测系统：UI/点击/事件/数据详细记录，日志替代视觉识别——用户指令）
+- rounds done: 13（#50–#58 已完成；本 run= #59–#78 共 20 轮）
 - status: active
-- metrics: findings 27 | fixes 30 | regressions 0（E4 按轮次行累加）
+- metrics: findings 36 | fixes 39 | regressions 0（E4 按轮次行累加）
 - epics pending: none
 
 ## Target pool

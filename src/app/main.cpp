@@ -28,6 +28,7 @@
 #include "dsp/analyzer.hpp"
 #include "dsp/apt.hpp"
 #include "app/settings.hpp"
+#include "app/telemetry.hpp"
 #include "dsp/channel_monitor.hpp"
 #include "dsp/esb.hpp"
 #include "dsp/fm.hpp"
@@ -342,6 +343,12 @@ hackrftool::radio::RadioConfig current_radio_cfg(App& app) {
 // 运行中重配（采样率/增益/频率）：停流→配置→重开。流中 hackrf_set_sample_rate
 // 返回成功但数据流不切换（真机实测解调全噪，#55c rx_check 铁证）
 void reconfigure_rx(App& app, const hackrftool::radio::RadioConfig& cfg) {
+    hackrftool::log::log_telemetry(
+        hackrftool::log::Level::info, "RADIO", "reconfig",
+        {{"rate_msps", std::to_string(cfg.sample_rate_hz / 1e6)},
+         {"center_mhz", std::to_string(cfg.center_hz / 1e6)},
+         {"lna", std::to_string(cfg.lna_gain_db)},
+         {"vga", std::to_string(cfg.vga_gain_db)}});
     if (!app.running) {
         std::string err;
         if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
@@ -387,6 +394,8 @@ void toggle_rx(App& app) {
         app.radio.stop_rx();
         app.running = false;
         app.status = L"已停止";
+        hackrftool::log::log_telemetry(hackrftool::log::Level::info, "LIFE",
+                                       "rx.stop", {});
         return;
     }
     std::string err;
@@ -397,9 +406,18 @@ void toggle_rx(App& app) {
     apply_radio(app);
     if (!app.radio.start_rx(&rx_trampoline_ui, &app, &err)) {
         app.status = L"启动接收失败: " + widen(err);
+        hackrftool::log::log_telemetry(hackrftool::log::Level::error, "LIFE",
+                                       "rx.start.fail", {{"err", err}});
         return;
     }
     app.running = true;
+    hackrftool::log::log_telemetry(
+        hackrftool::log::Level::info, "LIFE", "rx.start",
+        {{"center_mhz", std::to_string(app.center_mhz)},
+         {"rate_msps", std::to_string(kRatesMsps[size_t(app.rate_index)])},
+         {"lna", std::to_string(app.lna)},
+         {"vga", std::to_string(app.vga)},
+         {"src", "toolbar"}});
     if (app.sweep_on == 1) set_sweep_live(app, true);
     if (app.page >= 3) ensure_fm(app, true);   // 收音/云图页直接起音频链
     update_apt_on(app);
@@ -408,6 +426,8 @@ void toggle_rx(App& app) {
 // 应用中心频率（工具栏「应用频率」）：读当前页频率框（频谱页/收音机页）
 void apply_center_freq(App& app) {
     wchar_t buf[32] = {};
+    hackrftool::log::log_telemetry(hackrftool::log::Level::info, "UI",
+                                   "applyfreq", {{"page", std::to_string(app.page)}});
     if (app.page == 3) {
         // 收音机页：调谐 FM 广播段（87.5–108），监测 bin 语义不适用
         GetWindowTextW(app.edit_radio, buf, 32);
@@ -602,9 +622,17 @@ void ensure_fm(App& app, bool on) {
         const bool ok = app.waveout.start(app.audio_dev);
         if (!ok) app.status = L"音频设备打开失败（检查扬声器/默认设备）";
         app.fm_on.store(true);
+        hackrftool::log::log_telemetry(
+            hackrftool::log::Level::info, "AUDIO", "fm.on",
+            {{"rate_msps", std::to_string(kRatesMsps[size_t(app.rate_index)])},
+             {"bw_idx", std::to_string(app.fm_bw)},
+             {"stereo", app.stereo_opt ? "1" : "0"},
+             {"dev", std::to_string(app.audio_dev)}});
         std::thread(fm_loop, std::ref(app)).detach();
     } else {
         app.fm_on.store(false);
+        hackrftool::log::log_telemetry(hackrftool::log::Level::info, "AUDIO",
+                                       "fm.off", {});
         app.waveout.stop();
         Sleep(30);   // 等线程退出读环
         app.fm_rx.reset();
@@ -1391,6 +1419,10 @@ void tune_to(App& app, double mhz) {
     else SetWindowTextW(app.edit_freq, buf);
     app.status = std::wstring(L"已调谐 ") + buf + L" MHz（" + band_of(mhz).name +
                  L"）";
+    hackrftool::log::log_telemetry(hackrftool::log::Level::info, "RADIO",
+                                   "tune",
+                                   {{"mhz", std::to_string(mhz)},
+                                    {"band", std::to_string(int(cat))}});
 }
 
 // 进入页面时若中心不在该页频段 → 落到场景默认值（#55：不同场景默认中心）
@@ -2247,6 +2279,13 @@ void sync_chrome(App& app) {
 // ---- 命令路由 ----------------------------------------------------------------
 
 void on_command(App& app, int id, int code, HWND from) {
+    // 全量点击/命令事件（#59）：入口统一记录。code 白名单防编辑框通知
+    // 刷屏——EN_CHANGE/EN_UPDATE 由程序自身写控件触发（AFC 每 tick 写
+    // 频率框），不是用户操作；0=按钮/菜单/工具栏，1=CBN_SELCHANGE
+    if (code == 0 || code == 1)
+        hackrftool::log::log_telemetry(
+            hackrftool::log::Level::info, "UI", "cmd",
+            {{"id", std::to_string(id)}, {"code", std::to_string(code)}});
     switch (id) {
     case IDC_STARTSTOP: toggle_rx(app); break;
     case IDC_PAGE0:
@@ -2423,6 +2462,9 @@ void on_command(App& app, int id, int code, HWND from) {
 }
 
 void on_hscroll(App& app, HWND ctl) {
+    const int ctl_id = ctl != nullptr ? GetDlgCtrlID(ctl) : 0;
+    hackrftool::log::log_telemetry(hackrftool::log::Level::info, "UI",
+                                   "scroll", {{"ctl", std::to_string(ctl_id)}});
     if (ctl == app.track_lna) {
         int v = int(SendMessageW(ctl, TBM_GETPOS, 0, 0));
         v = std::clamp((v + 4) / 8 * 8, 8, 40);
@@ -2552,6 +2594,11 @@ LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (app != nullptr && !app->settings_hold)   // 设置缓存（#57）：退出兜底落盘
             write_text_file(exe_dir_path("settings.tsv"),
                             hackrftool::app::serialize(capture_settings(*app)));
+        hackrftool::log::log_telemetry(
+            hackrftool::log::Level::info, "LIFE", "app.stop",
+            {{"events", std::to_string(
+                           hackrftool::log::Logger::instance().count())}});
+        hackrftool::log::Logger::instance().close();
         PostQuitMessage(0);
         return 0;
     default: break;
@@ -2563,6 +2610,12 @@ LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     SetUnhandledExceptionFilter(write_crash_dump);   // 崩溃自动落 dump
+
+    // 遥测日志（#59）：全量 UI/事件/数据记录——脚本断言与问题分析用
+    hackrftool::log::Logger::instance().open(
+        exe_dir_path("hackrftool.jsonl"));
+    hackrftool::log::log_telemetry(hackrftool::log::Level::info, "LIFE",
+                                   "app.start", {{"build", __DATE__ " " __TIME__}});
 
     // 单实例守卫：HackRF 是独占设备，第二个实例只会得到 "HackRF not found"，
     // 且多实例互踢会把 USB 流状态搞 wedge。已有实例时把它的窗口带到前台、
@@ -2704,11 +2757,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             if (app.radio.start_rx(&rx_trampoline_ui, &app, &err)) {
                 app.running = true;
                 device_ok = true;
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::info, "LIFE", "rx.start",
+                    {{"center_mhz", std::to_string(app.center_mhz)},
+                     {"rate_msps", std::to_string(kRatesMsps[size_t(app.rate_index)])},
+                     {"lna", std::to_string(app.lna)},
+                     {"vga", std::to_string(app.vga)}});
                 if (app.sweep_on == 1) set_sweep_live(app, true);
                 if (app.page >= 3) ensure_fm(app, true);
                 update_apt_on(app);
             } else {
                 app.status = L"启动接收失败: " + widen(err);
+                hackrftool::log::log_telemetry(hackrftool::log::Level::error,
+                                               "LIFE", "rx.start.fail",
+                                               {{"err", err}});
             }
         }
     }

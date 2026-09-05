@@ -9,6 +9,7 @@
 
 #include "dsp/analyzer.hpp"
 #include "app/settings.hpp"
+#include "app/telemetry.hpp"
 #include "dsp/burst_detector.hpp"
 #include "dsp/channel_monitor.hpp"
 #include "dsp/fft.hpp"
@@ -1017,6 +1018,38 @@ static void test_voice_level() {
 }
 
 // 设置持久化（#57）：往返一致 + 单行损坏不拖垮整体 + 越界值拒绝
+// 遥测日志（#59）：JSON 转义/序列化/环形缓冲/计数——验收走日志不走截图
+static void test_telemetry() {
+    using hackrftool::log::Event;
+    using hackrftool::log::Level;
+    using hackrftool::log::json_escape;
+    using hackrftool::log::to_jsonl;
+    check(json_escape("a\"b\\c") == "a\\\"b\\\\c", "JSON 引号反斜杠转义");
+    check(json_escape(std::string("x\ny\tz")) == "x\\ny\\tz", "控制字符转义");
+    Event e;
+    e.ts = 123;
+    e.level = Level::warn;
+    e.cat = "UI";
+    e.event = "click";
+    e.kv = {{"id", "104"}, {"note", "页签:收音"}};
+    const std::string j = to_jsonl(e);
+    check(j.find("\"ts\":123") != std::string::npos, "jsonl 含 ts");
+    check(j.find("\"level\":\"warn\"") != std::string::npos, "jsonl 含 level");
+    check(j.find("\"cat\":\"UI\"") != std::string::npos, "jsonl 含 cat");
+    check(j.find("\"id\":\"104\"") != std::string::npos, "jsonl 含 kv");
+    check(j.find("页签:收音") != std::string::npos, "jsonl 中文值原样（UTF-8）");
+    check(j.back() == '\n', "jsonl 行尾换行");
+    auto& lg = hackrftool::log::Logger::instance();
+    const std::size_t before = lg.count();
+    lg.write(Level::info, "TEST", "ev.a", {{"k", "1"}});
+    lg.write(Level::info, "TEST", "ev.b", {});
+    lg.write(Level::info, "TEST", "ev.a", {{"k", "2"}});
+    check(lg.count() == before + 3, "计数器累计（不进文件也计数）");
+    check(lg.count_event("TEST", "ev.a") >= 2, "按 cat/event 过滤计数");
+    const auto tail = lg.tail(3);
+    check(tail.size() == 3 && tail[2].kv[0].second == "2", "tail 时序与内容");
+}
+
 static void test_settings_roundtrip() {
     using hackrftool::app::Settings;
     Settings s;
@@ -1324,6 +1357,7 @@ int main() {
     test_peak_snap();
     test_voice_level();
     test_settings_roundtrip();
+    test_telemetry();
     test_audio_spectrum();
     test_fm_decimator_stopband();
     test_apt_decode();
