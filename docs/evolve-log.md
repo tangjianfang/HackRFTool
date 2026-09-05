@@ -1,13 +1,13 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #77（epic 候选评估：Meteor 解压缩 EP 提案——触发标准 d）
-- rounds done: 31（#50–#76 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #78（回顾轮：重放审计+经验库+总结报告——本 run 末轮）
+- rounds done: 32（#50–#77 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
 - checkpoint（#65 后，会话压缩预防）: 本 run=日志替代视觉识别（#59 核心+#60 数据面+#61 APT/扫描+#62 信号库弹窗+#63 Y轴档+#64 日志查看器+#65 云图状态卡，全部 green+progress）；下一目标 #66=数据面覆盖缺口（非 fm 页 DSP frame 1Hz/ESB 命中沿/SETTINGS restore/apply 失败路径）；末轮 #78=回顾（重放审计+经验库+报告）。工作树 clean
-- epics pending: none
+- epics pending: EP-1（Meteor LRPT 解压缩，proposed——待用户决策）
 
 ## Target pool
 
@@ -58,6 +58,7 @@
 #74 | T4.6 README 功能补全（#53-#71 新功能入需求文档） | findings(0) | actions(1) | result(green+no-progress（文档轮）, 5 ctest/235 断言) | diff(+~8) | 扩展功能行：收音机/云图/Meteor/信号库/持久化/缩放/遥测
 #75 | 遥测体积测量（measured）：117B/行实测，全开 2 行/s → 1MB 轮转 89 分钟、3 份 4.4 小时 | findings(0) | actions(0) | result(green+no-progress（测量轮，结论：容量充足不做降采样——避免过度工程）, 5 ctest/235 断言) | diff(0) | 体积评估闭环
 #76 | 验收报告终态（B6 排查就绪/B7 完成/Meteor 交付） | findings(0) | actions(1) | result(green+no-progress（文档）, 5 ctest/235 断言) | diff(+~6) | 报告与实际状态对齐
+#77 | epic(EP-1 proposed)：Meteor LRPT 解压缩升级提案（触发标准 d——~1200 行紧耦合不可切片） | findings(0) | actions(1) | result(green+no-progress（提案轮）, 5 ctest/235 断言) | diff(+~30) | docs/epics.md 首条；物理层已绿（#70/#71），剩维特比/去交错/MCW/成像——待用户决策
 
 ## 运行总结（#1–#4，用户指令停止）
 
