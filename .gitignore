@@ -34,3 +34,5 @@ m4-hop.log
 selftest-report-*.txt
 dumps/
 cdb-crash.log
+selfclick.log
+dumps/

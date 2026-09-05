@@ -106,6 +106,7 @@ struct App {
     // M6：自测指标（selftest 模式汇总断言用）
     std::atomic<unsigned> build_count{0};
     std::atomic<unsigned> esb_hits{0};
+    bool selfclick = false;   // 崩溃复现模式：点击「模式→全频段」
 };
 
 constexpr double kSweepLoMhz = 2400.0;
@@ -163,12 +164,29 @@ void set_sweep_live(App& app, bool on) {
     }
 }
 
-void apply_radio(App& app) {
+// 从当前 State 读出完整配置（调用方保证在 set 之前调用）
+hackrftool::radio::RadioConfig current_radio_cfg(App& app) {
     hackrftool::radio::RadioConfig cfg;
     cfg.center_hz = app.center_mhz.get() * 1e6;
     cfg.sample_rate_hz = kRatesMsps[size_t(app.rate_index.get())] * 1e6;
     cfg.lna_gain_db = unsigned(app.lna.get());
     cfg.vga_gain_db = unsigned(app.vga.get());
+    return cfg;
+}
+
+// 点击处理器专用：纯执行、不写任何 State——set() 会同步重建 UI 树并释放
+// 正在执行的 lambda 存储，其后处理器内不得再访问 app（含普通成员）
+bool radio_apply_now(App& app, const hackrftool::radio::RadioConfig& cfg) {
+    std::string err;
+    if (!app.radio.apply(cfg, &err)) {
+        app.status.set(L"配置失败: " + widen(err));   // 错误路径即终止，可接受
+        return false;
+    }
+    return true;
+}
+
+void apply_radio(App& app) {
+    hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
     std::string err;
     if (!app.radio.apply(cfg, &err)) {
         app.status.set(L"配置失败: " + widen(err));
@@ -199,6 +217,20 @@ void toggle_rx(App& app) {
     }
     app.running.set(true);
     if (app.sweep_on.get() == 1) set_sweep_live(app, true);
+}
+
+// 自由函数（App& 经参数传递）：lambda 捕获在 set 重建后失效，正文须在此
+void monitor_lock(App& app) {
+    const double mhz =
+        clamp_center(std::wcstod(app.mon_text.get().c_str(), nullptr));
+    app.mon_lock_mhz = mhz;   // 记住目标频率，中心变化时重算 bin（M6）
+    app.monitor.set_fixed_bin(mhz_to_bin(mhz, app.center_mhz.get()));
+    app.monitor.set_mode(hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
+    const std::wstring msg =
+        L"监测已锁定 " + wd1(mhz) + L" MHz（bin " +
+        std::to_wstring(app.monitor.tracked_bin()) + L"）";
+    app.auto_track.set(false);
+    app.status.set(msg);   // 最后一句
 }
 
 void export_csv_dialog(App& app) {
@@ -255,8 +287,11 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
     controls->children.push_back(flux::ui::field(
         pal, L"模式",
         flux::ui::segmented(pal, {L"单窗", L"全频段"}, app.sweep_on.get(), [&app](int i) {
+            // 铁律：set() 同步重建 UI 树会释放本 lambda 的存储，其后不得再
+            // 访问 app——副作用必须全部在 set 之前完成，set 永远是最后一句
+            const bool live = (i == 1) && app.running.get();
+            set_sweep_live(app, live);
             app.sweep_on.set(i);
-            set_sweep_live(app, i == 1 && app.running.get());
         })));
     if (app.sweep_on.get() == 0) {
         controls->children.push_back(flux::ui::field(
@@ -272,33 +307,54 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
     btn_secondary.border_width = 1.0f;
     if (app.sweep_on.get() == 0) {
         controls->children.push_back(flux::button(L"应用频率", [&app] {
-            app.center_mhz.set(
-                clamp_center(std::wcstod(app.freq_text.get().c_str(), nullptr)));
-            // M6：手动锁定监测时按新中心重算 bin
-            if (app.mon_lock_mhz > 0.0 && !app.auto_track.get())
-                app.monitor.set_fixed_bin(
-                    mhz_to_bin(app.mon_lock_mhz, app.center_mhz.get()));
-            if (app.running.get()) apply_radio(app);
+            // 副作用在前，set 收尾（set 后 lambda 存储已被重建释放）
+            const double mhz =
+                clamp_center(std::wcstod(app.freq_text.get().c_str(), nullptr));
+            const bool running = app.running.get();
+            const bool relock = app.mon_lock_mhz > 0.0 && !app.auto_track.get();
+            if (running) {
+                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                cfg.center_hz = mhz * 1e6;
+                (void)radio_apply_now(app, cfg);
+            }
+            if (relock)
+                app.monitor.set_fixed_bin(mhz_to_bin(app.mon_lock_mhz, mhz));
+            app.center_mhz.set(mhz);   // 最后一句
         }, std::move(btn_secondary)));
     }
     controls->children.push_back(flux::ui::field(
         pal, L"LNA " + std::to_wstring(unsigned(app.lna.get())) + L" dB",
         flux::slider(float(app.lna.get()), 8.0f, 40.0f, [&app](float v) {
-            app.lna.set(double(unsigned(v / 8.0f + 0.5f) * 8));
-            if (app.running.get()) apply_radio(app);
+            const unsigned gain = unsigned(v / 8.0f + 0.5f) * 8;
+            if (app.running.get()) {
+                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                cfg.lna_gain_db = gain;
+                (void)radio_apply_now(app, cfg);
+            }
+            app.lna.set(double(gain));   // 最后一句
         })));
     controls->children.push_back(flux::ui::field(
         pal, L"VGA " + std::to_wstring(unsigned(app.vga.get())) + L" dB",
         flux::slider(float(app.vga.get()), 2.0f, 62.0f, [&app](float v) {
-            app.vga.set(double(unsigned(v / 2.0f + 0.5f) * 2));
-            if (app.running.get()) apply_radio(app);
+            const unsigned gain = unsigned(v / 2.0f + 0.5f) * 2;
+            if (app.running.get()) {
+                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                cfg.vga_gain_db = gain;
+                (void)radio_apply_now(app, cfg);
+            }
+            app.vga.set(double(gain));   // 最后一句
         })));
     controls->children.push_back(flux::ui::field(
         pal, L"采样率 Msps",
         flux::ui::segmented(pal, {L"8", L"10", L"16", L"20"}, app.rate_index.get(),
                             [&app](int i) {
-                                app.rate_index.set(i);
-                                if (app.running.get()) apply_radio(app);
+                                if (app.running.get()) {
+                                    hackrftool::radio::RadioConfig cfg =
+                                        current_radio_cfg(app);
+                                    cfg.sample_rate_hz = kRatesMsps[size_t(i)] * 1e6;
+                                    (void)radio_apply_now(app, cfg);
+                                }
+                                app.rate_index.set(i);   // 最后一句
                             })));
 
     flux::Props page_p;
@@ -360,16 +416,8 @@ flux::ElementPtr monitor_page(App& app, const flux::Palette& pal) {
     btn_lock.text_color = pal.text;
     btn_lock.border_color = pal.border;
     btn_lock.border_width = 1.0f;
-    sel->children.push_back(flux::button(L"锁定该频率", [&app] {
-        const double mhz =
-            clamp_center(std::wcstod(app.mon_text.get().c_str(), nullptr));
-        app.mon_lock_mhz = mhz;   // 记住目标频率，中心变化时重算 bin（M6）
-        app.monitor.set_fixed_bin(mhz_to_bin(mhz, app.center_mhz.get()));
-        app.monitor.set_mode(hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
-        app.auto_track.set(false);
-        app.status.set(L"监测已锁定 " + wd1(mhz) + L" MHz（bin " +
-                       std::to_wstring(app.monitor.tracked_bin()) + L"）");
-    }, std::move(btn_lock)));
+    sel->children.push_back(flux::button(L"锁定该频率", [&app] { monitor_lock(app); },
+                                         std::move(btn_lock)));
     flux::Props btn_reset;
     btn_reset.background = pal.surface;
     btn_reset.hover_background = pal.surface_hover;
@@ -731,6 +779,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             app.sweep_on.set(1);
             app.page.set(2);
         }
+        if (wcscmp(cmd_line, L"selfclick") == 0) {
+            // 崩溃复现：接收后 1.5s 用 SendInput 点击「模式→全频段」分段
+            // （与用户操作路径完全一致：点击触发 on_change 内同步重建）
+            auto_start = true;
+            app.selfclick = true;
+        }
         if (wcscmp(cmd_line, L"selftest") == 0) {
             auto_start = true;
             selftest = true;
@@ -814,6 +868,105 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                 std::fclose(rp);
             }
             PostThreadMessage(ui_tid, WM_QUIT, 0, 0);
+        }).detach();
+    }
+
+    // 崩溃复现：1.5s 后模拟真实点击「模式→全频段」（与用户路径一致）
+    if (app.selfclick) {
+        std::thread([&app] {
+            const auto mark = [](const char* s) {
+                if (std::FILE* lp = std::fopen("selfclick.log", "a")) {
+                    std::fprintf(lp, "%s\n", s);
+                    std::fclose(lp);
+                }
+            };
+            mark("thread-start");
+            Sleep(1500);
+            mark("pre-findwindow");
+            if (HWND h = FindWindowW(nullptr, L"HackRFTool")) {
+                mark("found-window");
+                keybd_event(VK_MENU, 0, 0, 0);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                ShowWindow(h, SW_RESTORE);
+                SetForegroundWindow(h);
+                Sleep(400);
+                mark("pre-click");
+                // 自动定位：PrintWindow 截窗口 → 找橙色选中分段（初始=单窗）→
+                // 「全频段」= 其右侧等宽段 → 点击其中心
+                RECT r;
+                GetWindowRect(h, &r);
+                const int ww = int(r.right - r.left), wh = int(r.bottom - r.top);
+                HDC scr = GetDC(nullptr);
+                HDC mem = CreateCompatibleDC(scr);
+                HBITMAP bmp =
+                    CreateCompatibleBitmap(scr, ww, wh);
+                SelectObject(mem, bmp);
+                PrintWindow(h, mem, PW_RENDERFULLCONTENT);
+                LONG hit_x = 0, hit_y = 0;
+                // 逐行找橙像素，按主行（橙最多的 y）取该行的橙色连通段
+                int best_row = -1, best_count = 0;
+                std::vector<std::pair<int, int>> runs;   // [start,end) 橙连通段
+                for (int y = 30; y < wh / 3; ++y) {
+                    std::vector<std::pair<int, int>> row_runs;
+                    int in_run = -1;
+                    for (int x = 0; x <= ww; ++x) {
+                        bool orange = false;
+                        if (x < ww) {
+                            const COLORREF c = GetPixel(mem, x, y);
+                            const int rr = GetRValue(c), gg = GetGValue(c),
+                                      bb = GetBValue(c);
+                            orange = rr > 200 && gg > 80 && gg < 180 && bb < 110;
+                        }
+                        if (orange && in_run < 0) in_run = x;
+                        if (!orange && in_run >= 0) {
+                            if (x - in_run > 20) row_runs.emplace_back(in_run, x);
+                            in_run = -1;
+                        }
+                    }
+                    const int cnt = int(row_runs.size());
+                    if (cnt > best_count) {
+                        best_count = cnt;
+                        best_row = y;
+                        runs = row_runs;
+                    }
+                }
+                if (best_count >= 2) {
+                    // 第 1 个橙块 = 开始按钮，第 2 个 = 单窗（选中态）→ 点其右侧
+                    const auto& seg = runs[1];
+                    hit_y = best_row;
+                    hit_x = seg.second + (seg.second - seg.first) / 2;
+                    if (std::FILE* lp = std::fopen("selfclick.log", "a")) {
+                        std::fprintf(lp,
+                                     "row=%d runs=%zu seg2=[%d,%d) -> click(%ld,%ld)\n",
+                                     best_row, runs.size(), seg.first, seg.second,
+                                     hit_x, hit_y);
+                        std::fclose(lp);
+                    }
+                    SetCursorPos(r.left + hit_x, r.top + hit_y);
+                    Sleep(150);
+                    INPUT down{};
+                    down.type = INPUT_MOUSE;
+                    down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+                    INPUT up = down;
+                    up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+                    SendInput(1, &down, sizeof(INPUT));
+                    Sleep(50);
+                    SendInput(1, &up, sizeof(INPUT));
+                    Sleep(800);
+                    mark(app.sweep_on.get() == 1 ? "HIT-sweep-on" : "MISS");
+                } else {
+                    mark("no-orange-found");
+                }
+                DeleteObject(bmp);
+                DeleteDC(mem);
+                ReleaseDC(nullptr, scr);
+                Sleep(2000);
+                if (std::FILE* lp = std::fopen("selfclick.log", "a")) {
+                    std::fprintf(lp, "clicked sweep_on=%d running=%d\n",
+                                 app.sweep_on.get(), app.running.get());
+                    std::fclose(lp);
+                }
+            }
         }).detach();
     }
 
