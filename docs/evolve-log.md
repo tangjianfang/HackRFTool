@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #66（池刷新 + 冗余降噪：遥测分类复核/UI 噪音复扫）
-- rounds done: 20（#50–#65 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #67（lessons 补遥测条目 L14 + tools/README 日志工作流文档）
+- rounds done: 21（#50–#66 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - checkpoint（#65 后，会话压缩预防）: 本 run=日志替代视觉识别（#59 核心+#60 数据面+#61 APT/扫描+#62 信号库弹窗+#63 Y轴档+#64 日志查看器+#65 云图状态卡，全部 green+progress）；下一目标 #66=数据面覆盖缺口（非 fm 页 DSP frame 1Hz/ESB 命中沿/SETTINGS restore/apply 失败路径）；末轮 #78=回顾（重放审计+经验库+报告）。工作树 clean
@@ -50,6 +50,7 @@
 #63 | 频谱 Y 轴动态档 100/60/40dB（用户建议 3b 收尾） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~60) | spectrum_view 尾参 y_floor（默认行为不变）；缩放条 Y 轴 segmented 三档（40dB 细节档看弱信号）与 X 缩放正交组合；spec_y_idx 入持久化
 #64 | 应用内遥测日志查看器（日志替代视觉 #5；云图排查工作流收尾） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~130) | 工具栏「日志」→原生 ListView tail 200（时间/级别/分类事件/kv，新在上、总数戳增量刷新）；云图页+日志窗并排读 APT diag——应用内日志分析闭环（用户"根据日志推算分析"指令的 UI 落点）
 #65 | 云图页链路状态卡（B6 用户惑点：没法用不知道哪错） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~70) | 顶部 46px 状态卡：信号灯三态（成像/有信号未同步/等待过境）+sub/sync/lines 实时值+过境频次提示；weather_strip_px 纯函数共用；APT diag 与 UI 同源判读
+#66 | 数据面覆盖缺口（DSP frame 非 fm 页/ESB 沿/restore/apply.fail×5） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~70) | UI/点击/事件/数据四类全覆盖达成：DSP frame 与 DSP fm 互补（页无关 1Hz 峰值）、ESB 计数沿、SETTINGS restore、radio.apply 失败 err
 
 ## 运行总结（#1–#4，用户指令停止）
 
