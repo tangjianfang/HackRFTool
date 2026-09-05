@@ -209,6 +209,14 @@ void apply_radio(App& app) {
     app.status.set(L"接收中");
 }
 
+// 设备打开失败的统一提示：两大最常见原因直接给用户（多实例占用 / 固件已知
+// bug 需软复位——README 2.1）。set 为处理器最后一句，铁律合规。
+void device_open_failed(App& app, const std::string& err) {
+    app.status.set(L"打开失败: " + widen(err) +
+                   L" ｜ 排查：① 是否已有 HackRFTool 在运行（独占设备）"
+                   L"② 设备重插后先 hackrf_spiflash -R 软复位");
+}
+
 void toggle_rx(App& app) {
     if (app.running.get()) {
         set_sweep_live(app, false);
@@ -220,7 +228,7 @@ void toggle_rx(App& app) {
     }
     std::string err;
     if (!app.radio.open(&err)) {
-        app.status.set(L"打开失败: " + widen(err));
+        device_open_failed(app, err);
         return;
     }
     apply_radio(app);
@@ -877,6 +885,32 @@ flux::ElementPtr build(App& app) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     SetUnhandledExceptionFilter(write_crash_dump);   // 崩溃自动落 dump
+
+    // 单实例守卫：HackRF 是独占设备，第二个实例只会得到 "HackRF not found"，
+    // 且多实例互踢会把 USB 流状态搞 wedge（2026-09-05 七个残留实例实锤）。
+    // 已有实例时把它的窗口带到前台、提示后退出。
+    const HANDLE single = CreateMutexW(nullptr, TRUE, L"HackRFTool-SingleInstance");
+    struct MutexGuard {
+        HANDLE h;
+        ~MutexGuard() {
+            if (h != nullptr) {
+                ReleaseMutex(h);
+                CloseHandle(h);
+            }
+        }
+    } mutex_guard{single};
+    if (single != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (HWND prev = FindWindowW(nullptr, L"HackRFTool")) {
+            ShowWindow(prev, SW_RESTORE);
+            SetForegroundWindow(prev);
+        }
+        MessageBoxW(nullptr,
+                    L"HackRFTool 已在运行（已为您切换到该窗口）。\n"
+                    L"HackRF 为独占设备，请勿重复启动。",
+                    L"HackRFTool", MB_OK | MB_ICONINFORMATION);
+        return 0;
+    }
+
     flux::enable_per_monitor_dpi_v2();
     App app;
     app.running = app.host.make_state<bool>(false);
@@ -940,7 +974,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     if (auto_start) {
         std::string err;
         if (!app.radio.open(&err)) {
-            app.status.set(L"打开失败: " + widen(err));
+            device_open_failed(app, err);
         } else {
             apply_radio(app);
             if (app.radio.start_rx(&rx_trampoline_ui, &app, &err)) {
