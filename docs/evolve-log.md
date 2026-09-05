@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #73（池刷新：Tier1-4 重核+Tier3 模块轮转表更新）
-- rounds done: 27（#50–#72 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #74（T4.6 README 功能补全——收音机/云图/信号库/遥测）
+- rounds done: 28（#50–#73 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
@@ -11,23 +11,19 @@
 
 ## Target pool
 
-- Tier 1 (known defects, grep 已核):
-  - T1.1 tools/iq_capture.cpp "期望字节数" 表达式残留死代码 `double(bytes?bytes:1)*0.0 + ...`（M3 遗留，能跑但丑）
-  - T1.2 selftest 报告写进程 CWD（CTest 下落 build 目录）——应落 exe 旁（M6 已知）
-  - T1.3 monitor_page 在扫描模式下"跟踪当前驻留段"的说明文字缺失（M2 遗留）
+- Tier 1 (known defects, 池刷新 #73 重核):
   - T1.4 WinFlux tabs 三枚汉字间距挤——上游组件问题，仓库内不可修（blocked-upstream，仅记录）
+  - T1.5 真机导频 PLL 偶锁不到位（STEREO 徽章偶亮但分离未定量验证——单声不影响收听，待过境/强台定量）
+  - T1.6 云图/真机过境验证（B6：APT/Meteor 链路合成全绿+诊断遥测就位，待实际过境出图）
 - Tier 2 (coverage gaps):
-  - T2.1 IqRecorder 丢块路径（队列满丢最旧+计数）无单测
-  - T2.2 detect_bursts 全饱和/全静默边界无单测
   - T2.3 esb_scan 大输入性能无基准（2M 比特 O(n·30)）
-  - T2.4 LiveBursts 环回绕（written ≥ ring）后 refresh/read_slice 无测试（e2e 只测了未回绕）
-- Tier 3 (module rotation): src/app/main.cpp（UI 组装，1200+ 行最大）→ src/radio/{hackrf,iq_recorder} → src/dsp/{esb,gfsk,burst_detector,live_bursts,analyzer,channel_monitor,panorama,waterfall,fft} → src/ui/{views,monitor_view} → tools/{gfsk_analyze,iq_capture,hackrf_smoke}
+  - T2.5 遥测 Logger 并发压测无基准（多线程写计数一致性）
+- Tier 3 (module rotation, #73 重列): src/app/main.cpp（3000+ 行最大）→ src/app/{settings,telemetry} → src/radio/{hackrf,iq_recorder} → src/dsp/{esb,gfsk,burst_detector,live_bursts,analyzer,channel_monitor,panorama,waterfall,fft,fm,apt,meteor,sigdb} → src/ui/{views,monitor_view,apt_view,status_text} → src/audio/waveout → tools/{gfsk_analyze,iq_capture,hackrf_smoke,rx_check,log-assert.py}
 - Tier 4 (backlog, 单轮可完成):
-  - T4.1 IQ 录制写参数 sidecar（.cs8 同名 .txt：频率/采样率/增益/时间）
   - T4.2 gfsk_analyze 支持 --csv 输出突发表
-  - T4.3 瀑布对比度拉伸（M1 已知：[-100,-40] 映射下蓝档永不触发）
   - T4.4 README 运行指引统一为 Release 路径
-  - T4.5 采样率低档 2/4 Msps（窄带驻留更久）
+  - T4.6 README 功能章节补收音机/云图/信号库/遥测说明（#53-#71 全新功能未入 README）
+  - T4.7 Meteor LRPT 图像解压缩（维特比+去交错+压缩重组）——epic 候选（>300 行/轮，触发标准 d）
 
 ## Rounds
 
@@ -58,6 +54,7 @@
 #70 | Meteor QPSK 解调器纯函数（Costas+Gardner+ASM，#55 顺延项启动） | findings(1) | actions(1) | result(green+progress, 5 ctest/235 断言) | diff(+~290) | 四象限 Costas+Gardner sps 自适应+眼图诊断；合成 4000 符号加噪频偏实测 >95% 判决/ASM 精确命中。断言余量教训：符号产出 = 总数−收敛期−末端半符号（首轮 400 余量不够）
 #71 | Meteor 接线（云图页 QPSK 直解诊断，三部曲 #3 交付） | findings(1) | actions(1) | result(green+progress, 5 ctest/235 断言) | diff(+~120) | 预设 Meteor 137.900→QpskDemod(sps=率/72k)+数据线程喂 IQ+16k 滑窗 ASM；状态卡眼图/频偏/命中+METEOR diag 遥测；真机日志验收 ALL PASS。坑：跨进程 CBN_SELCHANGE 伪造 wparam=MAKEWPARAM(id,1)（id 单发走不进 handler）
 #72 | Meteor 眼图假阳性治理（finding：APT 载波假眼 0.91 实测） | findings(1) | actions(1) | result(green+no-progress（判定修正无新断言）, 5 ctest/235 断言) | diff(+~5) | Costas 在连续波/调频信号也自聚——判定以 ASM 命中为准
+#73 | pool-refresh：Tier1-4 全量重核（T1.1/T1.2/T1.3 已修出池；新增 T1.5/T1.6/T4.6/T4.7；Tier3 按当前 src 重列——action pool-refresh） | findings(0) | actions(0) | result(green+no-progress（池维护轮）, 5 ctest/235 断言) | diff(+~40) | 池与代码对齐（D7 反向：代码已超前池）
 
 ## 运行总结（#1–#4，用户指令停止）
 
