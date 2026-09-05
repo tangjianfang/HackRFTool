@@ -49,6 +49,25 @@ private:
     std::size_t head_ = 0;  // 历史写头
 };
 
+// 人声强度检测（#55g）：300–3400Hz 话音频带（RBJ 带通双二阶）+ 块 RMS，
+// dBFS 输出。人声越强值越高——兼作"信号越好"的直观指示。
+class VoiceLevelMeter {
+public:
+    // 喂一个音频块，返回该块的频带能量 dBFS（fm 线程调用）
+    float feed(const float* x, std::size_t n) noexcept;
+    [[nodiscard]] float last_db() const noexcept { return last_db_; }
+
+private:
+    // 两节级联（4 阶）：单节双二阶带通在 fs/2 附近有 bilinear 频翘翘尾
+    //（实测 8k 仅 -10dB），级联后阻带翻倍
+    struct Biquad {
+        double b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+        double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    } bq_[2];
+    float last_db_ = -120.0f;
+    bool init_ = false;
+};
+
 // FM 广播接收机（立体声，导频丢失自动回退单声道）
 class FmReceiver {
 public:

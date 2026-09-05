@@ -66,6 +66,43 @@ double peak_snap(const std::vector<float>& db, double bw_mhz,
     return t * bw_mhz;
 }
 
+float VoiceLevelMeter::feed(const float* x, std::size_t n) noexcept {
+    // RBJ 带通（恒定 0dB 峰增益）：f0 = √(0.3k×3.4k) ≈ 1010 Hz，
+    // Q = f0/(3400-300) ≈ 0.34（覆盖话音频带，中心增益 1）
+    if (!init_) {
+        init_ = true;
+        constexpr double f0 = 1010.0, fs = 48000.0, q = 0.34;
+        const double w0 = 2.0 * kPi * f0 / fs;
+        const double alpha = std::sin(w0) / (2.0 * q);
+        const double a0 = 1.0 + alpha;
+        for (auto& b : bq_) {
+            b.b0 = alpha / a0;
+            b.b1 = 0.0;
+            b.b2 = -alpha / a0;
+            b.a1 = -2.0 * std::cos(w0) / a0;
+            b.a2 = (1.0 - alpha) / a0;
+        }
+    }
+    double sumsq = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        double v = x[i];
+        for (auto& b : bq_) {
+            const double y = b.b0 * v + b.b1 * b.x1 + b.b2 * b.x2 - b.a1 * b.y1 -
+                             b.a2 * b.y2;
+            b.x2 = b.x1;
+            b.x1 = v;
+            b.y2 = b.y1;
+            b.y1 = y;
+            v = y;
+        }
+        sumsq += v * v;
+    }
+    last_db_ = n > 0 ? float(10.0 * std::log10(std::max(sumsq / double(n),
+                                                        1e-12)))
+                     : -120.0f;
+    return last_db_;
+}
+
 namespace {
 
 // hamming 窗 sinc 低通系数（截止 fc，采样 fs，系数和归一为 1）

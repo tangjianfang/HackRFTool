@@ -990,6 +990,31 @@ static void test_peak_snap() {
     check(peak_snap(far, 2.0, 0.5, 0.15, 8.0f) == 0.5, "窗外峰不打扰");
 }
 
+// 人声强度：话音频带能量检测（1k 强、带外弱、静音极低）
+static void test_voice_level() {
+    using hackrftool::dsp::VoiceLevelMeter;
+    auto gen = [](double f, double amp) {
+        std::vector<float> v(4800);
+        for (std::size_t i = 0; i < v.size(); ++i)
+            v[i] = float(amp * std::sin(2 * hackrftool::dsp::kPi * f *
+                                        double(i) / 48000.0));
+        return v;
+    };
+    VoiceLevelMeter m;
+    const auto s1k = gen(1000.0, 0.5);
+    float db_1k = 0;
+    for (int r = 0; r < 3; ++r) db_1k = m.feed(s1k.data(), s1k.size());  // 稳态
+    check(db_1k > -20.0f && db_1k < -3.0f, "1kHz 0.5 幅度 ≈ -9dB 带内");
+    const auto s8k = gen(8000.0, 0.5);
+    float db_8k = 0;
+    for (int r = 0; r < 3; ++r) db_8k = m.feed(s8k.data(), s8k.size());
+    check(db_1k - db_8k > 10.0f, "8kHz 带外比 1kHz 低 >10dB");
+    const std::vector<float> silence(4800, 0.0f);
+    (void)m.feed(silence.data(), silence.size());   // 首块消化上块状态尾巴
+    const float db_sil = m.feed(silence.data(), silence.size());
+    check(db_sil < -100.0f, "静音 ≈ -120dB（第二块）");
+}
+
 static void test_fm_decimator_stopband() {
     using hackrftool::dsp::Decimator;
     // 2 Msps → 250 kHz：带内 40 kHz 通过，带外 400 kHz 显著衰减
@@ -1201,6 +1226,7 @@ int main() {
     test_fm_dc_offset_survives();
     test_afc_correction();
     test_peak_snap();
+    test_voice_level();
     test_fm_decimator_stopband();
     test_apt_decode();
     test_sigdb();

@@ -130,6 +130,13 @@ struct App {
     std::atomic<float> fm_pilot{0.0f};     // 导频相关（立体声判定，UI 读）
     std::atomic<float> fm_peak{0.0f};      // 音频峰值表
     std::atomic<bool> squelch_open{false}; // 静噪门（峰均差判据，UI 心跳写）
+    // 人声强度（#55g）：fm 线程算（300-3.4k 带通 RMS），UI 心跳拷贝绘制
+    hackrftool::dsp::VoiceLevelMeter voice_meter;
+    std::mutex voice_mtx;
+    std::vector<float> voice_hist;        // dBFS，20Hz 推送，600 点=30s
+    unsigned voice_seq = 0;
+    float voice_cur = -120.0f;
+    int voice_dec = 0;                    // 10ms 块 ÷5 = 20Hz
     bool afc_on = true;                    // AFC 自动频率微调（收音页）
     HWND check_afc = nullptr;
     int fm_bw = 0;                         // 收听带宽：0=±120k 1=±80k 2=±50k
@@ -468,6 +475,16 @@ void fm_audio_cb(const float* l, const float* r, std::size_t n, void* ctx) {
     }
     app->waveout.write(gl, gr, m);
     if (n > m) app->waveout.write(l + m, r + m, n - m);   // n 恒为 480，保险
+    // 人声强度：对实际输出（静噪后）检测，每 5 块（50ms）入史
+    const float db = app->voice_meter.feed(gl, m);
+    if (++app->voice_dec >= 5) {
+        app->voice_dec = 0;
+        std::lock_guard<std::mutex> g(app->voice_mtx);
+        app->voice_hist.push_back(db);
+        if (app->voice_hist.size() > 600) app->voice_hist.erase(app->voice_hist.begin());
+        app->voice_cur = db;
+        ++app->voice_seq;
+    }
     if (app->apt_on.load()) app->apt.feed(l, n);   // APT：单声道取 L
     app->fm_pilot.store(app->fm_rx ? app->fm_rx->pilot_level() : 0.0f);
     app->fm_peak.store(app->fm_rx ? app->fm_rx->audio_peak() : 0.0f);
@@ -1029,6 +1046,13 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
                                 : flux::ui::BadgeKind::neutral,
         app.squelch_open.load() ? L"● 有台" : L"○ 空频点"));
     page_el->children.push_back(std::move(head));
+
+    // 人声强度滚动波形（30s 历史，人声越强越高=信号越好）
+    {
+        std::lock_guard<std::mutex> g(app.voice_mtx);
+        page_el->children.push_back(hackrftool::ui::audio_level_strip(
+            pal, app.voice_hist, app.voice_cur, app.voice_seq));
+    }
 
     // 信号库列表（按筛选条件）：点击行=调谐（#55 零手动输入）
     using hackrftool::dsp::SigCat;
