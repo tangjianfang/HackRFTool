@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #65（池刷新+Tier1 复核：云图 B6 真机排查/Meteor #55 顺延项重估）
-- rounds done: 19（#50–#64 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #66（池刷新 + 冗余降噪：遥测分类复核/UI 噪音复扫）
+- rounds done: 20（#50–#65 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - epics pending: none
@@ -48,6 +48,7 @@
 #62 | 信号库非模态弹窗（用户建议 3a；日志替代视觉 #4） | findings(2) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~160) | 工具栏「信号库」按钮→原生非模态 ListView（双击=调谐，任意页可用）；库版本戳增量刷新防闪；SIGDB open/close/pick 入日志——日志驱动验收 ALL PASS 零截图。坑：filter_signals 返回下标集；匿名 ns 内定义与前向声明=两个函数（C2668）
 #63 | 频谱 Y 轴动态档 100/60/40dB（用户建议 3b 收尾） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~60) | spectrum_view 尾参 y_floor（默认行为不变）；缩放条 Y 轴 segmented 三档（40dB 细节档看弱信号）与 X 缩放正交组合；spec_y_idx 入持久化
 #64 | 应用内遥测日志查看器（日志替代视觉 #5；云图排查工作流收尾） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~130) | 工具栏「日志」→原生 ListView tail 200（时间/级别/分类事件/kv，新在上、总数戳增量刷新）；云图页+日志窗并排读 APT diag——应用内日志分析闭环（用户"根据日志推算分析"指令的 UI 落点）
+#65 | 云图页链路状态卡（B6 用户惑点：没法用不知道哪错） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~70) | 顶部 46px 状态卡：信号灯三态（成像/有信号未同步/等待过境）+sub/sync/lines 实时值+过境频次提示；weather_strip_px 纯函数共用；APT diag 与 UI 同源判读
 
 ## 运行总结（#1–#4，用户指令停止）
 
