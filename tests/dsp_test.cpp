@@ -833,7 +833,8 @@ static double goertzel(const std::vector<float>& x, double fs, double f) {
 static std::vector<std::int8_t> synth_fm_stereo(std::size_t n_samples, double fs,
                                                 bool with_pilot,
                                                 std::vector<float>* ref_l,
-                                                std::vector<float>* ref_r) {
+                                                std::vector<float>* ref_r,
+                                                double dc = 0.0) {
     std::vector<float> l(n_samples), r(n_samples);
     for (std::size_t i = 0; i < n_samples; ++i) {
         const double t = double(i) / fs;
@@ -852,8 +853,8 @@ static std::vector<std::int8_t> synth_fm_stereo(std::size_t n_samples, double fs
                    std::sin(2 * 2 * hackrftool::dsp::kPi * 19e3 * t);      // L−R DSBSC
         }
         phase += 2 * hackrftool::dsp::kPi * 75e3 * mpx / fs;
-        const float re = 0.8f * float(std::cos(phase));
-        const float im = 0.8f * float(std::sin(phase));
+        const float re = 0.8f * float(std::cos(phase)) + float(dc);
+        const float im = 0.8f * float(std::sin(phase)) + float(dc);
         iq[i * 2] = std::int8_t(re * 127.0f);
         iq[i * 2 + 1] = std::int8_t(im * 127.0f);
     }
@@ -929,6 +930,25 @@ static void test_fm_receiver_mono_fallback() {
     const double r_1k = goertzel(rr, 48e3, 1000.0);
     check(l_1k > 0.05 && r_1k > 0.05, "单声道 L=R 都含 1 kHz");
     check(std::abs(l_1k - r_1k) < 0.02, "单声道双声道幅度一致");
+}
+
+// HackRF 本振泄漏（DC）恰落在中心调谐的电台信号上——无直流阻塞时
+// 鉴频相位被污染，输出只剩噪声（用户实测"全是噪音"的根因假设）
+static void test_fm_dc_offset_survives() {
+    using hackrftool::dsp::FmReceiver;
+    const double fs = 2e6;
+    const std::size_t n = std::size_t(0.4 * fs);
+    const std::vector<std::int8_t> iq = synth_fm_stereo(n, fs, false, nullptr,
+                                                        nullptr, 0.35);
+    FmCollect out;
+    FmReceiver rx(fs, 300.0);
+    rx.set_audio_callback(&FmCollect::cb, &out);
+    rx.feed(iq.data(), iq.size());
+    check(out.l.size() > 15000, "强 DC 下仍有音频产出");
+    const std::size_t skip = 4800;
+    std::vector<float> ll(out.l.begin() + skip, out.l.end());
+    const double l_1k = goertzel(ll, 48e3, 1000.0);
+    check(l_1k > 0.05, "强 DC 下 1 kHz 音频可恢复（直流阻塞有效）");
 }
 
 static void test_fm_decimator_stopband() {
@@ -1139,6 +1159,7 @@ int main() {
     test_fm_discriminator_unit();
     test_fm_receiver_stereo();
     test_fm_receiver_mono_fallback();
+    test_fm_dc_offset_survives();
     test_fm_decimator_stopband();
     test_apt_decode();
     test_sigdb();
