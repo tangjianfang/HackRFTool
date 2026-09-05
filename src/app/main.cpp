@@ -148,8 +148,13 @@ struct App {
     DWORD last_sb_ms = 0;     // 状态栏上次文本刷新时刻（4Hz 节流）
     // 拖拽拉伸进行中（WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE）：内容区冻结旧尺寸，
     // 松手一次性重铺——WinFlux DComp 每次收到 WM_SIZE 都销毁重建渲染表面，
-    // 拖拽中每步重建=持续闪白（上游行为，本仓库侧绕开）
+    // 拖拽中每步重建=持续闪白（上游行为，本仓库侧绕开）。
+    // sizing_enter_ms/last_size_ms：EXITSIZEMOVE 可能丢失（拖拽被打断时），
+    // 冻结态会永久卡死（用户实测）——窗口尺寸停变 500ms 即解冻（见看门狗），
+    // 连续拖动仍冻结防闪，停顿/丢消息一帧内自愈铺满。
     bool live_sizing = false;
+    unsigned long long sizing_enter_ms = 0;
+    unsigned long long last_size_ms = 0;
 };
 
 constexpr double kSweepLoMhz = 2400.0;
@@ -584,6 +589,8 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
 // ---- 内容区根（WinFlux，每帧重建） -----------------------------------------
 
 void sync_chrome(App& app);   // 定义在原生骨架节（工具栏态 + 状态栏文本）
+void layout(App& app);        // 定义在原生骨架节（几何摆放；看门狗共用）
+bool host_target(App& app, RECT* out);   // 内容区目标矩形
 
 flux::ElementPtr build(App& app) {
     // 心跳续期：每次 build 续 400ms——首帧冷启动（D2D/字体初始化）可能超
@@ -626,6 +633,25 @@ flux::ElementPtr build(App& app) {
 
     // 原生骨架状态同步（工具栏按钮态 + 状态栏分段文本；心跳驱动，零定时器）
     sync_chrome(app);
+
+    // 几何看门狗：不信任任何消息配对（EXITSIZEMOVE/WM_SIZE 均可能丢失——
+    // 用户实测拖拽后卡死在小尺寸），每心跳核对内容区实际/目标矩形，
+    // 漂移立即 layout 校正，一帧内自愈。拖拽停顿 500ms 亦在此解冻。
+    if (app.live_sizing) {
+        if (GetTickCount64() - app.last_size_ms >= 500) app.live_sizing = false;
+    }
+    if (!app.live_sizing) {
+        RECT want, have;
+        if (host_target(app, &want)) {
+            GetWindowRect(app.host.hwnd(), &have);
+            POINT tl{have.left, have.top};
+            ScreenToClient(app.main_wnd, &tl);
+            if (tl.x != want.left || tl.y != want.top ||
+                (have.right - have.left) != (want.right - want.left) ||
+                (have.bottom - have.top) != (want.bottom - want.top))
+                layout(app);
+        }
+    }
 
     flux::Props content_p;
     content_p.direction = flux::Direction::column;
@@ -1013,14 +1039,35 @@ void create_statusbar(App& app) {
                                     GetModuleHandleW(nullptr), nullptr);
 }
 
+// 内容区目标矩形（layout 与几何看门狗共用——判定与摆放必须同一算法）
+bool host_target(App& app, RECT* out) {
+    if (app.main_wnd == nullptr || app.toolbar == nullptr ||
+        app.statusbar == nullptr || app.host.hwnd() == nullptr)
+        return false;
+    RECT rc, tb, sb;
+    GetClientRect(app.main_wnd, &rc);
+    GetWindowRect(app.toolbar, &tb);
+    GetWindowRect(app.statusbar, &sb);
+    const int s = int(GetDpiForWindow(app.main_wnd)) / 96;
+    const int row_h = 34 * s;
+    out->left = 0;
+    out->top = (tb.bottom - tb.top) + row_h;
+    out->right = rc.right;
+    out->bottom = std::max(rc.bottom - (sb.bottom - sb.top), out->top);
+    return true;
+}
+
 // 摆放工具栏/设置行/状态栏/内容区（WM_SIZE、WM_DPICHANGED、页切换共用）。
-// 拖拽进行中（live_sizing）直接返回：冻结全部子控件几何——任何 MoveWindow/
-// SB_SETPARTS 都会引发该子窗一步"擦除+重画"，拖拽中每步执行=持续闪烁。
-// 新暴露区域由主窗 WM_PAINT 直绘填充（无擦除，构造性零闪烁），
-// WM_EXITSIZEMOVE 做一次性精确重铺。
+// 拖拽进行中（live_sizing）冻结全部子控件几何（防闪烁，见 App 注释），
+// 但超过 10s 视为 EXITSIZEMOVE 丢失，强制解冻——卡死比闪烁更不可接受。
 void layout(App& app) {
     if (app.main_wnd == nullptr || app.toolbar == nullptr) return;
-    if (app.live_sizing) return;
+    if (app.live_sizing) {
+        // 拖拽中窗口尺寸停变 500ms（停手未松或 EXITSIZEMOVE 丢失）即解冻：
+        // 卡死不可接受，停顿铺满一次也无闪（一次性重绘）
+        if (GetTickCount64() - app.last_size_ms < 500) return;
+        app.live_sizing = false;
+    }
     const int scale = app.main_wnd != nullptr ? GetDpiForWindow(app.main_wnd) : 96;
     const int s = scale / 96;   // 整数倍缩放足够（100%/125%→1，150%→1 近似；
                                 // 控件尺寸不追求逐 DPI 精确，布局稳定优先）
@@ -1056,7 +1103,6 @@ void layout(App& app) {
         ShowWindow(c.h, cap ? SW_SHOW : SW_HIDE);
     if (mon) place(app.row_monitor);
     if (cap) place(app.row_capture);
-    const int row_h = 34 * s;
 
     // 状态栏（先自适应高，再贴底 + 分段右缘）
     SendMessageW(app.statusbar, WM_SIZE, 0, 0);
@@ -1079,12 +1125,11 @@ void layout(App& app) {
         if (edges[i] <= edges[i - 1]) edges[i] = edges[i - 1] + 4;
     SendMessageW(app.statusbar, SB_SETPARTS, 6, LPARAM(edges));
 
-    // 内容区（WinFlux 子窗口）填满剩余。拖拽进行中冻结（live_sizing）：
-    // DComp 表面重建是闪烁源，拖拽中不重铺、松手 WM_EXITSIZEMOVE 精确补一
-    // 次；Host 的 WM_SIZE 处理器本身做同步直绘，bRepaint=FALSE 即可
-    if (app.host.hwnd() != nullptr && !app.live_sizing)
-        MoveWindow(app.host.hwnd(), 0, tb_h + row_h, w,
-                   h - tb_h - row_h - sb_h, FALSE);
+    // 内容区（WinFlux 子窗口）填满剩余（目标矩形与看门狗共用同一算法）
+    RECT ht;
+    if (host_target(app, &ht))
+        MoveWindow(app.host.hwnd(), ht.left, ht.top, ht.right - ht.left,
+                   ht.bottom - ht.top, FALSE);
 }
 
 // 工具栏按钮态 + 状态栏文本（build 心跳驱动；缓存避免每帧消息风暴）。
@@ -1291,7 +1336,10 @@ LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_ENTERSIZEMOVE:
-        if (app != nullptr) app->live_sizing = true;
+        if (app != nullptr) {
+            app->live_sizing = true;
+            app->sizing_enter_ms = GetTickCount64();
+        }
         return 0;
     case WM_EXITSIZEMOVE:
         if (app != nullptr) {
@@ -1302,7 +1350,10 @@ LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_SIZE:
-        if (app != nullptr) layout(*app);
+        if (app != nullptr) {
+            app->last_size_ms = GetTickCount64();
+            layout(*app);
+        }
         return 0;
     case WM_DPICHANGED: {
         const auto* r = reinterpret_cast<RECT*>(lp);
