@@ -55,7 +55,27 @@ double goertzel_db(const std::vector<float>& x, double fs, double f) {
 
 } // namespace
 
+static int run_analysis(const std::int8_t* cap_iq, std::size_t got, double mhz);
+
 int main(int argc, char** argv) {
+    // 文件模式：rx_check file <path.cs8> —— 离线分析落盘 IQ（按 2 Msps 假设）
+    if (argc > 2 && std::strcmp(argv[1], "file") == 0) {
+        const double fmhz = argc > 3 ? std::atof(argv[3]) : 98.0;
+        std::FILE* f = std::fopen(argv[2], "rb");
+        if (f == nullptr) {
+            std::printf("open file fail\n");
+            return 1;
+        }
+        Cap cap;
+        cap.cap = 8 << 20;
+        cap.iq.assign(cap.cap, 0);
+        const std::size_t got = std::fread(cap.iq.data(), 1, cap.cap, f);
+        std::fclose(f);
+        std::printf("file %s: %zu bytes, center %.1f MHz (assume 2 Msps)\n",
+                    argv[2], got, fmhz);
+        (void)got;
+        return run_analysis(cap.iq.data(), got, fmhz);
+    }
     const double mhz = argc > 1 ? std::atof(argv[1]) : 98.0;
     const unsigned lna = argc > 2 ? unsigned(std::atoi(argv[2])) : 40;
     const unsigned vga = argc > 3 ? unsigned(std::atoi(argv[3])) : 32;
@@ -100,8 +120,11 @@ int main(int argc, char** argv) {
                 int(amp));
     std::this_thread::sleep_for(std::chrono::seconds(2));
     radio.stop_rx();
+    return run_analysis(cap.iq.data(), cap.got.load(), mhz);
+}
 
-    const std::size_t got = cap.got.load();
+// 时域/频谱/离线解调三段定量分析（live 与 file 模式共用）
+static int run_analysis(const std::int8_t* cap_iq, std::size_t got, double mhz) {
     const std::size_t n = got / 2;
     std::printf("captured %zu samples\n", n);
     if (n < 100000) {
@@ -113,7 +136,7 @@ int main(int argc, char** argv) {
     long sat_i = 0, sat_q = 0;
     double sum_i = 0, sum_q = 0, sumsq = 0;
     for (std::size_t k = 0; k < n; ++k) {
-        const int i = cap.iq[k * 2], q = cap.iq[k * 2 + 1];
+        const int i = cap_iq[k * 2], q = cap_iq[k * 2 + 1];
         if (i >= 126 || i <= -126) ++sat_i;
         if (q >= 126 || q <= -126) ++sat_q;
         sum_i += i;
@@ -127,7 +150,7 @@ int main(int argc, char** argv) {
 
     // ---- 频谱峰（analyzer：512 FFT，裁边后取前 8 峰）----
     hackrftool::dsp::SpectrumAnalyzer an(512, 64, 256);
-    an.feed(cap.iq.data(), got);
+    an.feed(cap_iq, got);
     const auto f = an.snapshot();
     if (!f.db.empty()) {
         std::vector<std::pair<float, int>> pk;
@@ -151,9 +174,10 @@ int main(int argc, char** argv) {
     AudioCap ac;
     hackrftool::dsp::FmReceiver rx(2e6, 300.0);
     rx.set_audio_callback(&AudioCap::cb, &ac);
-    rx.feed(cap.iq.data(), got);
-    if (ac.l.size() > 24000) {
-        const std::vector<float> mid(ac.l.begin() + 4800, ac.l.end());
+    rx.feed(cap_iq, got);
+    if (ac.l.size() > 8000) {
+        const std::size_t sk = std::min<std::size_t>(4800, ac.l.size() / 4);
+        const std::vector<float> mid(ac.l.begin() + sk, ac.l.end());
         double sum = 0, mx = 0;
         for (const float v : mid) {
             sum += double(v) * v;

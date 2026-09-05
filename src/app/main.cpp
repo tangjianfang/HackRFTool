@@ -458,14 +458,35 @@ void fm_audio_cb(const float* l, const float* r, std::size_t n, void* ctx) {
 
 void fm_loop(App& app) {
     std::vector<std::int8_t> tmp(65536);
+    // 诊断（#55d 临时）：HACKRFTOOL_FMDUMP=1 时把 fm 线程实收的前 8MB 落盘
+    char dump_env[8] = {};
+    bool dumping = GetEnvironmentVariableA("HACKRFTOOL_FMDUMP", dump_env,
+                                           sizeof dump_env) > 0 &&
+                   dump_env[0] == '1';
+    std::FILE* dump = nullptr;
+    std::size_t dumped = 0;
+    if (dumping) {
+        dump = _wfopen(exe_dir_path("fm-ring-dump.cs8").c_str(), L"wb");
+        app.status = L"FM 环形数据采集中（8MB）…";
+    }
     while (app.fm_on.load()) {
         const std::size_t n = app.iq_ring.read(tmp.data(), tmp.size());
         if (n == 0) {
             Sleep(4);
             continue;
         }
+        if (dump != nullptr) {
+            std::fwrite(tmp.data(), 1, n, dump);
+            dumped += n;
+            if (dumped >= 8 << 20) {   // 滚动覆盖：始终保留最近 8MB
+                std::fclose(dump);
+                dump = _wfopen(exe_dir_path("fm-ring-dump.cs8").c_str(), L"wb");
+                dumped = 0;
+            }
+        }
         if (app.fm_rx) app.fm_rx->feed(tmp.data(), n);
     }
+    if (dump != nullptr) std::fclose(dump);
 }
 
 // 开/关收音机音频链（进入收音页 + 接收中 → 开；离开/停止 → 关）。
@@ -536,12 +557,22 @@ void scan_stations_loop(App& app, int cat, double return_mhz) {
     // 该段旧条目全部离线（保留待验证），命中重新置在线
     for (auto& e : app.signals)
         if (hackrftool::dsp::band_of(e.mhz).cat == band_cat) e.online = false;
-    double best = 0.0;
-    float best_db = -999.0f;
+    // 本次命中先局部收集，扫完后聚类（相邻 <0.15MHz 同台取最强）再入库
+    // ——直接大容差 merge 会链式漂移（98.1→98.2→98.3 被滚动合并）
+    std::vector<std::pair<double, float>> hits;
     for (double f = lo; f <= hi && app.fm_scan.load(); f += step) {
         (void)app.radio.set_center_hz(f * 1e6);
         app.iq_ring.clear();
-        Sleep(80);
+        // 丢弃旧频残帧：analyzer 帧与跳频不同步，驻留首帧可能仍是上一频点
+        // 的视场（真机实测：台被记到 +0.1MHz 名下、点开全是噪）。等两帧
+        // 新频帧（帧率 ~25fps）再取样
+        unsigned last_seq = app.analyzer.snapshot().seq;
+        for (int w = 0; w < 2; ++w) {
+            for (int t = 0; t < 20 && app.analyzer.snapshot().seq == last_seq;
+                 ++t)
+                Sleep(10);
+            last_seq = app.analyzer.snapshot().seq;
+        }
         const auto frame = app.analyzer.snapshot();
         if (frame.db.empty()) continue;
         float sum = 0.0f, mx = -999.0f;
@@ -550,12 +581,23 @@ void scan_stations_loop(App& app, int cat, double return_mhz) {
             mx = std::max(mx, v);
         }
         const float avg = sum / float(frame.db.size());
-        if (mx > -45.0f && mx - avg > 6.0f) {
-            hackrftool::dsp::merge_scan(app.signals, f, mx);
-            if (band_cat == SigCat::radio && mx > best_db) {
-                best_db = mx;
-                best = f;
-            }
+        // 阈值收紧：峰均差 >10dB 才算台（6dB 时高增益下噪声包大量误报）
+        if (mx > -42.0f && mx - avg > 10.0f) hits.emplace_back(f, mx);
+    }
+    std::sort(hits.begin(), hits.end());
+    double best = 0.0;
+    float best_db = -999.0f;
+    for (std::size_t i = 0; i < hits.size(); ++i) {
+        const double f = hits[i].first;
+        const float db = hits[i].second;
+        // 跳过与前一命中同簇的弱频点（0.15MHz 内取最强）
+        if (i > 0 && f - hits[i - 1].first < 0.15) {
+            if (db <= hits[i - 1].second) continue;
+        }
+        hackrftool::dsp::merge_scan(app.signals, f, db, 0.05);
+        if (band_cat == SigCat::radio && db > best_db) {
+            best_db = db;
+            best = f;
         }
     }
     (void)hackrftool::dsp::save_signals(
