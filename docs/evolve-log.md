@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #68（selftest 报告日志增强：断言事件链而非仅计数）
-- rounds done: 22（#50–#67 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #69（遥测环回单测：Logger ring 覆盖 round-trip 断言强化）
+- rounds done: 23（#50–#68 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - checkpoint（#65 后，会话压缩预防）: 本 run=日志替代视觉识别（#59 核心+#60 数据面+#61 APT/扫描+#62 信号库弹窗+#63 Y轴档+#64 日志查看器+#65 云图状态卡，全部 green+progress）；下一目标 #66=数据面覆盖缺口（非 fm 页 DSP frame 1Hz/ESB 命中沿/SETTINGS restore/apply 失败路径）；末轮 #78=回顾（重放审计+经验库+报告）。工作树 clean
@@ -52,6 +52,7 @@
 #65 | 云图页链路状态卡（B6 用户惑点：没法用不知道哪错） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~70) | 顶部 46px 状态卡：信号灯三态（成像/有信号未同步/等待过境）+sub/sync/lines 实时值+过境频次提示；weather_strip_px 纯函数共用；APT diag 与 UI 同源判读
 #66 | 数据面覆盖缺口（DSP frame 非 fm 页/ESB 沿/restore/apply.fail×5） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~70) | UI/点击/事件/数据四类全覆盖达成：DSP frame 与 DSP fm 互补（页无关 1Hz 峰值）、ESB 计数沿、SETTINGS restore、radio.apply 失败 err
 #67 | 日志验收制度化（lessons L14+AGENTS 契约+--order 顺序断言） | findings(0) | actions(1) | result(green+no-progress→顺序断言实测 PASS, 5 ctest/228 断言) | diff(+~60) | 视觉幻觉两次实证人档；遥测分类速查进 AGENTS；--order 断言顺序实测
+#68 | selftest 报告事件链断言（真机实测 app.start→rx.start PASS） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~25) | 报告行为证据：tail 顺序校验+设备失败退化存在性检查；AGENTS 反引号 bash 命令替换坑补修（含反引号文本经 bash 内联写文件=执行——第八次转义坑变体）
 
 ## 运行总结（#1–#4，用户指令停止）
 
