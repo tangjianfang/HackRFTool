@@ -14,7 +14,7 @@ Entry template: `| id | one-sentence lesson | how to apply (an executable action
 | L2 | 手算期望值易错（7.5 截断写成 6）——断言值用脚本算，不要心算 | 写数值断言前用一行 python/echo 核算；测试失败先验期望值再查实现 | evolve#4 waterfall_level 中点 | 1 |
 | L6 | PrintWindow(PW_RENDERFULLCONTENT) 抓 DComp 窗口会漏画普通子控件（工具栏/状态栏在、EDIT/滑条不在）——截图"控件不见了"≠UI 真不见 | 验证原生控件用前台 BitBlt（tools/screenshot-fg.ps1）或 EnumChildWindows 列 rect/vis 取证，再下结论；PrintWindow 只用于纯 D2D 内容 | evolve#52 设置行"消失"误判全程 | 1 |
 | L7 | 整文件重写最容易丢的是一行式初始化调用（#52 误删 enable_per_monitor_dpi_v2 → 整窗 DWM 模糊） | 重写后 diff 逐行核对被删除的调用清单（DPI/异常过滤器/单实例守卫这类 init 类单行者），对抗检查员必审 | evolve#52 检查员实锤（exe 内 0 处 dpiAware） | 1 |
-| L8 | 原生骨架拉伸闪烁三源：CS_HREDRAW/CS_VREDRAW 全窗失效 + 每步 WM_SIZE 带重画 MoveWindow 全部子控件 + 高频同文本 SB_SETTEXT | 类样式不用 H/VREDRAW；主窗 WS_EX_COMPOSITED + WM_ERASEBKGND 返 1 + WM_PAINT 只填 ps.rcPaint；子控件/内容区 MoveWindow 用 bRepaint=FALSE；状态栏文本缓存未变不发；验证=连续 40 步改尺寸中抓帧查黑块（非目测） | evolve#52 用户实测"严重闪烁"三连修 | 1 |
+| L8 | 原生骨架拉伸闪烁多源叠加：CS_HREDRAW/CS_VREDRAW 全窗失效、每步 WM_SIZE 带重画 MoveWindow 子控件、高频同文本 SB_SETTEXT、**DComp 子窗每次 WM_SIZE 销毁重建渲染表面（拖拽=持续闪白，上游行为）**；而 WS_EX_COMPOSITED 与 DComp 子窗冲突会把工具栏搞黑（MSDN 明令禁用） | 类样式不用 H/VREDRAW；**禁用 WS_EX_COMPOSITED（含 D3D/DComp 子窗时）**；WM_ERASEBKGND 返 1 + WM_PAINT 只填 ps.rcPaint；子控件/内容区 MoveWindow 用 bRepaint=FALSE；状态栏文本缓存；**DComp 内容区用"拖拽冻结+松手重铺"**（WM_ENTERSIZEMOVE 置 live_sizing 跳过 host 重铺、WM_EXITSIZEMOVE 一次精确 layout，host 沉 Z 序底部防溢出遮状态栏）；验证=SendMessage 模拟 ENTERSIZEMOVE→连续 SetWindowPos→EXITSIZEMOVE 抓帧（拖拽中 letterbox=冻结生效、松手占满=重铺生效） | evolve#52 用户实测两轮闪烁+黑工具栏三连修 | 1 |
 | L5 | PowerShell `Start-Process -ArgumentList` 传参会吞/改坏 GUI 程序的模式参数（三次截图全同、自动模式从未生效，状态栏仍显示"未开始"） | 自动化驱动 GUI 用直接 exec（bash 后台 / CTest）而非 Start-Process 包装；截图前先核对页内状态（页签高亮/状态栏文本）与预期模式一致再采 | evolve#50 复截图三次全同 | 1 |
 
 ## 进程与协作

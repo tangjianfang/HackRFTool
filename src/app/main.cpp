@@ -145,6 +145,10 @@ struct App {
     // 工具栏状态同步缓存（避免每帧重复 TB_SETSTATE 消息）
     int sync_run = -1, sync_page = -1, sync_sweep = -1, sync_rec = -1;
     std::wstring sync_sb[6];   // 状态栏分段文本缓存（相同文本不重发 SB_SETTEXT）
+    // 拖拽拉伸进行中（WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE）：内容区冻结旧尺寸，
+    // 松手一次性重铺——WinFlux DComp 每次收到 WM_SIZE 都销毁重建渲染表面，
+    // 拖拽中每步重建=持续闪白（上游行为，本仓库侧绕开）
+    bool live_sizing = false;
 };
 
 constexpr double kSweepLoMhz = 2400.0;
@@ -1069,10 +1073,10 @@ void layout(App& app) {
         if (edges[i] <= edges[i - 1]) edges[i] = edges[i - 1] + 4;
     SendMessageW(app.statusbar, SB_SETPARTS, 6, LPARAM(edges));
 
-    // 内容区（WinFlux 子窗口）填满剩余。bRepaint=FALSE：Host 的 WM_SIZE
-    // 处理器本身做同步直绘（request_render 不走 InvalidateRect），额外
-    // 失效只会叠加一遍擦除-重画造成拖拽闪烁
-    if (app.host.hwnd() != nullptr)
+    // 内容区（WinFlux 子窗口）填满剩余。拖拽进行中冻结（live_sizing）：
+    // DComp 表面重建是闪烁源，拖拽中不重铺、松手 WM_EXITSIZEMOVE 精确补一
+    // 次；Host 的 WM_SIZE 处理器本身做同步直绘，bRepaint=FALSE 即可
+    if (app.host.hwnd() != nullptr && !app.live_sizing)
         MoveWindow(app.host.hwnd(), 0, tb_h + row_h, w,
                    h - tb_h - row_h - sb_h, FALSE);
 }
@@ -1274,6 +1278,15 @@ LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_ENTERSIZEMOVE:
+        if (app != nullptr) app->live_sizing = true;
+        return 0;
+    case WM_EXITSIZEMOVE:
+        if (app != nullptr) {
+            app->live_sizing = false;
+            layout(*app);   // 拖拽期间内容区冻结，此处一次性精确重铺
+        }
+        return 0;
     case WM_SIZE:
         if (app != nullptr) layout(*app);
         return 0;
@@ -1378,8 +1391,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
 
     // 主窗口（原生骨架）+ 工具栏 + 设置行 + 状态栏。
     // 类样式禁用 CS_HREDRAW/CS_VREDRAW（拉伸时全窗失效重画=闪烁元凶），
-    // 背景改由 WM_PAINT 只填无效区；WS_EX_COMPOSITED 让 GDI 子控件
-    //（工具栏/设置行/状态栏）双缓冲合成，消除拖拽残闪。
+    // 背景改由 WM_PAINT 只填无效区。禁用 WS_EX_COMPOSITED：与 DComp
+    // 子窗口冲突（MSDN：不可用于含 D3D 子窗口的窗口），实测把工具栏
+    // 背景搞成黑色。
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = &main_wndproc;
@@ -1390,7 +1404,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     RegisterClassExW(&wc);
     const UINT dpi = GetDpiForSystem();
     app.main_wnd = CreateWindowExW(
-        WS_EX_COMPOSITED, L"HackRFToolMain", L"HackRFTool",
+        0, L"HackRFToolMain", L"HackRFTool",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
         MulDiv(1200, dpi, 96), MulDiv(860, dpi, 96), nullptr, nullptr, instance,
         &app);
@@ -1433,6 +1447,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                           WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS);
     SetWindowLongPtrW(app.host.hwnd(), GWL_EXSTYLE, 0);
     SetParent(app.host.hwnd(), app.main_wnd);
+    // 内容区沉到兄弟 Z 序底部：拖拽冻结期间旧尺寸可能溢出内容带，
+    // 工具栏/状态栏须能盖在它上面（否则溢出部分遮住状态栏）
+    SetWindowPos(app.host.hwnd(), HWND_BOTTOM, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
     layout(app);
     sync_chrome(app);   // 命令行预设页/模式 → 工具栏态立即就位（缓存初始化）

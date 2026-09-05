@@ -30,7 +30,7 @@ cmake --build --preset x64-release && ctest --preset x64-release
 - 中间内容区 = WinFlux Host **重父化子窗口**（`Host::create` 后清 WS_POPUP 家族、加 WS_CHILD，SetParent 进主窗）：只渲染图表（D2D/DComp 管线不变），控件值是 App 普通字段（每帧重建，无 flux::State——set-收尾铁律随之退役，见 lessons L4 注记）
 - 外层 GetMessage 泵（非 `host.run()`）；WM_QUIT 来自主窗销毁或 selftest 线程；`sync_chrome` 在 build 心跳里同步工具栏态（有缓存去重）与状态栏分段
 - comctl32 v6 清单内嵌于 `src/app/app.rc`（CMake 已设 `/MANIFEST:NO` 防重复）；DPI 感知靠 `flux::enable_per_monitor_dpi_v2()`（**wWinMain 里、任何窗口创建前**——重写 main.cpp 时误删过一次，整窗模糊，L7）
-- **反闪烁铁律（L8）**：主窗口类样式禁用 CS_HREDRAW/CS_VREDRAW + WS_EX_COMPOSITED；WM_ERASEBKGND 返 1、WM_PAINT 只填 `ps.rcPaint`（WS_CLIPCHILDREN 裁掉子控件区）；WM_SIZE 里子控件与内容区 MoveWindow 一律 bRepaint=FALSE（内容区靠 Host 的 WM_SIZE 同步直绘）；状态栏文本缓存未变不重发 SB_SETTEXT
+- **反闪烁铁律（L8）**：主窗口类样式禁用 CS_HREDRAW/CS_VREDRAW；**禁用 WS_EX_COMPOSITED（与 DComp 子窗冲突，工具栏会变黑）**；WM_ERASEBKGND 返 1、WM_PAINT 只填 `ps.rcPaint`（WS_CLIPCHILDREN 裁掉子控件区）；WM_SIZE 里子控件与内容区 MoveWindow 一律 bRepaint=FALSE；状态栏文本缓存未变不重发 SB_SETTEXT；**内容区拖拽冻结**：WM_ENTERSIZEMOVE 置 live_sizing（layout 跳过 host 重铺）、WM_EXITSIZEMOVE 一次精确重铺——WinFlux DComp 每次 WM_SIZE 重建渲染表面，拖拽中每步重建=持续闪白（上游行为，仓库侧绕开；host 须沉 Z 序底部防冻结期溢出遮状态栏）
 - 已知上游限制：WinFlux `Host::create` 硬编码 SW_SHOW → 启动时顶层窗闪现一帧后才重父化（wontfix-upstream，建议上游加 Config.visible）；PrintWindow 截图会漏画原生子控件 → 验证 UI 用 `tools/screenshot-fg.ps1`（前台 BitBlt）
 - 工程规范：C++20 / 仅 x64（CMake 强制）/ `/W4` 零告警（`flux_apply_compiler_options` 统一施加）；WinFlux 仓库经 `add_subdirectory` 引入（`WINFLUX_ROOT` 默认 `C:/tjf/github/WinFlux`），上游组件问题本仓库不可修，只记录
 
