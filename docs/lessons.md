@@ -27,6 +27,7 @@ Entry template: `| id | one-sentence lesson | how to apply (an executable action
 |---|---|---|---|---|
 | L3 | 并行会话在同一工作树会互相踩（增量构建竞速、文件被改、Edit 锚点失配） | 开工前 ListAgents 查邻居；发现文件被外部修改立即重读再改；构建"成功"但 mtime 未变即 touch 强制重链；会话压缩/中断恢复先 `git diff` + todo 对账在制工作，勿盲目重做或回滚 | 2026-09-05 与 evolve-07 会话碰撞全程；evolve#50 压缩恢复对账 | 2 |
 | L13 | 跨进程 UI 驱动验证三坑：① PS pinvoke 字符串参数（string 入/字符串出）marshalling 静默失败——SetWindowText 返 True 但没写入、WM_GETTEXT 读回陈旧值；② 应用内周期写控件的逻辑（AFC 每 tick 写回频率框）会覆盖外部写入；③ BM_CLICK 是 toggle，不查 BM_GETCHECK 直接点会反向切换 | 跨进程只信数值消息（WM_COMMAND/BM_GETCHECK）；写控件前先关掉周期写回的自动逻辑（AFC 等）再写；状态判定以截图/二进制字符串为准绳（写盘前 grep 二进制确认新代码在产物里） | 2026-09-05 人声波形真机验证排障（调谐一度“不生效”實为假读假写+陈旧 exe 叠加） | 2 |
+| L14 | 视觉识别验收不可靠（本 run 两次实证：LNA 40 幻觉、未开接收报"波形有数据"），日志断言确定性 100%；但埋点有三个坑：程序性通知刷屏（AFC 每帧写频率框触发 EN_CHANGE——code 白名单 0/1 滤掉）、kv 键与 JSON 顶层字段撞名（cat 键覆盖分类——语义化键名）、埋点插在变量声明前（C2065 连锁） | UI 行为验证走 hackrftool.jsonl+tools/log-assert.py（--order 断言顺序）；截图仅核对布局；新埋点检查：键名不撞 ts/level/cat/event、位置在变量声明后 | 2026-09-06 evolve #59-#66 全程 | 1 |
 
 ## WinFlux UI
 

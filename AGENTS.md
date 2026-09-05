@@ -10,6 +10,8 @@ cmake --build --preset x64-release && ctest --preset x64-release
 
 - 一键构建脚本：`build.bat`（任意 CWD 调用均可，自动定位仓库根：配置 + 构建 x64-release 全部 target；只构建不跑测试；ASCII/CRLF——cmd 按 ANSI 码页解析批处理）
 
+- UI 行为验证走日志：exe 旁 （结构化遥测：UI/点击/DSP/APT/扫描/生命周期）+ ——截图仅核对布局（视觉识别有幻觉，lessons L14）
+- 遥测分类速查：LIFE 起停 / UI cmd·state / RADIO tune·reconfig·sweep·apply.fail / AUDIO fm.on·off / DSP frame(非fm页)·fm(1Hz) / APT diag / SCAN start·done / SIGDB / SETTINGS / ESB hit
 - 唯一验收命令，应 5/5 通过（217 断言单测 + 端到端合成管线 + WinFlux 测试；两个真机整机自测无设备时退出码 42 → CTest 记 SKIP）
 - **跑 ctest 前先确认构建零 error**：构建失败后 ctest 跑的是陈旧二进制，"全绿"是假象（docs/lessons.md L1，已两次踩中）
 - 整机自测必须 Release：Debug 下全量 FFT 会 CPU 饥饿
