@@ -148,6 +148,10 @@ struct App {
     // 设置持久化（#57）：序列化比对变化才写盘，3s 节流
     std::string last_settings;
     unsigned long long last_set_ms = 0;
+    // 信号库非模态弹窗（#62）：任意页快速选台
+    HWND sigdb_wnd = nullptr;
+    HWND sigdb_list = nullptr;
+    unsigned sigdb_stamp = 0;   // 上次刷新的库版本（signals 大小+首条频率）
     // 数据面遥测（#60）：UI 状态变更快照 + DSP 1Hz 节流
     std::string last_ui_state;
     unsigned long long last_dsp_ms = 0;
@@ -1257,6 +1261,7 @@ flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
 
 void sync_chrome(App& app);   // 定义在原生骨架节（工具栏态 + 状态栏文本）
 void save_settings_tick(App& app);   // 设置缓存心跳保存（#57，定义见设置节）
+void sigdb_refresh(App& app);   // 信号库弹窗刷新（#62，定义见弹窗节）
 void layout(App& app);        // 定义在原生骨架节（几何摆放；看门狗共用）
 bool host_target(App& app, RECT* out);   // 内容区目标矩形
 
@@ -1302,6 +1307,7 @@ flux::ElementPtr build(App& app) {
     // 原生骨架状态同步（工具栏按钮态 + 状态栏分段文本；心跳驱动，零定时器）
     sync_chrome(app);
     save_settings_tick(app);   // 设置缓存（#57）：3s 节流、变化才写盘
+    if (app.sigdb_wnd != nullptr) sigdb_refresh(app);   // 弹窗 2Hz 刷新
     // 遥测（#60）：UI 状态变更即记（非周期轮询——变化才是事件）；
     // DSP 数据 1Hz 快照（峰值/静噪/导频/人声/在线台——分析信号质量用）
     {
@@ -1479,6 +1485,7 @@ enum : int {
     IDC_CHECK_AFC,
     IDC_COMBO_BW,
     IDC_CHECK_STEREO,
+    IDC_SIGDB,
 };
 
 // ---- 统一调谐与页面默认频率（#55） ------------------------------------------
@@ -1981,6 +1988,7 @@ void create_toolbar(App& app) {
         tb_btn(ICON_APPLY, IDC_APPLYFREQ, BTNS_AUTOSIZE, L"应用频率"),
         tb_btn(ICON_SAT, IDC_SCAN, BTNS_AUTOSIZE, L"扫描信号"),
         tb_btn(ICON_DICE, IDC_RANDOM, BTNS_AUTOSIZE, L"随机收听"),
+        tb_btn(ICON_SAT, IDC_SIGDB, BTNS_CHECK | BTNS_AUTOSIZE, L"信号库"),
     };
     SendMessageW(app.toolbar, TB_ADDBUTTONS, WPARAM(sizeof(btns) / sizeof(btns[0])),
                  LPARAM(btns));
@@ -2280,6 +2288,146 @@ void layout(App& app) {
     }
 }
 
+// ---- 信号库非模态弹窗（#62）：任意页快速选台，双击行=调谐 -------------
+// 数据源=app.signals + 当前筛选（收音页下拉的同一组条件）；2Hz 心跳刷新，
+// 库内容变化（扫描落库）才重建行。非模态：主窗与弹窗可同时操作。
+// （不进匿名 namespace：build 心跳的前向声明需同一函数）
+
+void sigdb_refresh(App& app) {
+    if (app.sigdb_list == nullptr) return;
+    using hackrftool::dsp::SigCat;
+    const SigCat cat = app.sig_cat == 0   ? SigCat::radio
+                       : app.sig_cat == 1 ? SigCat::sat
+                       : app.sig_cat == 2 ? SigCat::ism
+                                          : SigCat::other;
+    const auto rows = hackrftool::dsp::filter_signals(   // 返回下标集
+        app.signals, cat, app.sig_online != 0, app.sig_sort == 1);
+    const unsigned stamp =
+        unsigned(rows.size() * 31 +
+                 (rows.empty() ? 0
+                               : unsigned(app.signals[rows[0]].mhz * 7)));
+    if (stamp == app.sigdb_stamp) return;   // 无变化不重建（防闪+省 CPU）
+    app.sigdb_stamp = stamp;
+    SendMessageW(app.sigdb_list, LVM_DELETEALLITEMS, 0, 0);
+    wchar_t buf[64];
+    int shown = 0;
+    for (const std::size_t ri : rows) {
+        if (shown++ >= 500) break;
+        const auto& e = app.signals[ri];
+        LVITEMW it{};
+        it.mask = LVIF_TEXT;
+        swprintf(buf, 64, L"%.4g", e.mhz);
+        it.pszText = buf;
+        it.iItem = shown - 1;
+        const int idx = int(SendMessageW(app.sigdb_list, LVM_INSERTITEMW, 0,
+                                         LPARAM(&it)));
+        swprintf(buf, 64, L"%.1f dB", e.db);
+        it.iItem = idx; it.iSubItem = 1; it.pszText = buf;
+        SendMessageW(app.sigdb_list, LVM_SETITEMW, 0, LPARAM(&it));
+        wcscpy(buf, e.online ? L"● 在线" : L"○ 离线");
+        it.iSubItem = 2;
+        SendMessageW(app.sigdb_list, LVM_SETITEMW, 0, LPARAM(&it));
+        wcscpy(buf, hackrftool::dsp::band_of(e.mhz).name);
+        it.iSubItem = 3;
+        SendMessageW(app.sigdb_list, LVM_SETITEMW, 0, LPARAM(&it));
+    }
+}
+
+LRESULT CALLBACK sigdb_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_NOTIFY: {
+        const auto* nm = reinterpret_cast<NMHDR*>(lp);
+        if (nm->idFrom == 5001 && nm->code == NM_DBLCLK) {
+            const auto* di =
+                reinterpret_cast<const NMITEMACTIVATE*>(nm);
+            wchar_t f[32];
+            LVITEMW it{};
+            it.mask = LVIF_TEXT;
+            it.iItem = di->iItem;
+            it.pszText = f;
+            it.cchTextMax = 32;
+            if (SendMessageW(app->sigdb_list, LVM_GETITEMTEXTW,
+                             WPARAM(di->iItem), LPARAM(&it)) > 0) {
+                const double mhz = std::wcstod(f, nullptr);
+                tune_to(*app, mhz);
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::info, "SIGDB", "pick",
+                    {{"mhz", std::to_string(mhz)}});
+            }
+        }
+        return 0;
+    }
+    case WM_SIZE:
+        if (app != nullptr && app->sigdb_list != nullptr)
+            MoveWindow(app->sigdb_list, 0, 0, LOWORD(lp), HIWORD(lp), TRUE);
+        return 0;
+    case WM_DESTROY:
+        if (app != nullptr) {
+            app->sigdb_wnd = nullptr;
+            app->sigdb_list = nullptr;
+        }
+        return 0;
+    default:
+        return DefWindowProcW(wnd, msg, wp, lp);
+    }
+}
+
+void sigdb_toggle(App& app) {
+    if (app.sigdb_wnd != nullptr) {   // 已开 → 关
+        DestroyWindow(app.sigdb_wnd);
+        hackrftool::log::log_telemetry(hackrftool::log::Level::info, "SIGDB",
+                                       "close", {});
+        return;
+    }
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = sigdb_wndproc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"HackRFSigdb";
+        RegisterClassW(&wc);
+        registered = true;
+    }
+    HWND wnd = CreateWindowW(L"HackRFSigdb", L"信号库（双击=调谐）",
+                             WS_OVERLAPPEDWINDOW, 80, 120, 420, 420,
+                             app.main_wnd, nullptr, GetModuleHandleW(nullptr),
+                             nullptr);
+    if (wnd == nullptr) return;
+    SetWindowLongPtrW(wnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&app));
+    HWND lv = CreateWindowExW(0, WC_LISTVIEWW, nullptr,
+                              WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
+                              0, 0, 400, 400, wnd,
+                              reinterpret_cast<HMENU>(5001),
+                              GetModuleHandleW(nullptr), nullptr);
+    ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT |
+                                              LVS_EX_DOUBLEBUFFER);
+    LVCOLUMNW col{};
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.pszText = const_cast<LPWSTR>(L"频率 MHz");
+    col.cx = 90;
+    SendMessageW(lv, LVM_INSERTCOLUMNW, 0, LPARAM(&col));
+    col.pszText = const_cast<LPWSTR>(L"强度");
+    col.cx = 70;
+    SendMessageW(lv, LVM_INSERTCOLUMNW, 1, LPARAM(&col));
+    col.pszText = const_cast<LPWSTR>(L"在线");
+    col.cx = 70;
+    SendMessageW(lv, LVM_INSERTCOLUMNW, 2, LPARAM(&col));
+    col.pszText = const_cast<LPWSTR>(L"频段");
+    col.cx = 120;
+    SendMessageW(lv, LVM_INSERTCOLUMNW, 3, LPARAM(&col));
+    app.sigdb_wnd = wnd;
+    app.sigdb_list = lv;
+    app.sigdb_stamp = 0;
+    ShowWindow(wnd, SW_SHOW);
+    hackrftool::log::log_telemetry(hackrftool::log::Level::info, "SIGDB",
+                                   "open", {{"entries",
+                                             std::to_string(app.signals.size())}});
+    sigdb_refresh(app);
+}
+
 // 工具栏按钮态 + 状态栏文本（build 心跳驱动；缓存避免每帧消息风暴）。
 // 状态栏文本 4Hz 节流（帧号每帧都变，40Hz 重绘无意义且是拖拽外的高频
 // 重绘源）；拖拽进行中整体跳过（与 layout 冻结配套，拖拽期零子窗重绘）。
@@ -2406,6 +2554,7 @@ void on_command(App& app, int id, int code, HWND from) {
     case IDC_APPLYFREQ: apply_center_freq(app); break;
     case IDC_SCAN: start_scan(app); break;
     case IDC_RANDOM: random_listen(app); break;
+    case IDC_SIGDB: sigdb_toggle(app); break;
     case IDC_COMBO_SIGCAT:
         if (code == CBN_SELCHANGE) {
             const int i = int(SendMessageW(app.combo_sigcat, CB_GETCURSEL, 0, 0));
