@@ -18,6 +18,7 @@
 #include "dsp/panorama.hpp"
 #include "dsp/waterfall.hpp"
 #include "radio/iq_recorder.hpp"
+#include "ui/status_text.hpp"
 
 static int failures = 0;
 
@@ -742,6 +743,55 @@ static void test_waterfall_runs() {
                 100.0 * double(merged.size()) / double(wf.size()));
 }
 
+static void test_status_dynamic() {
+    using hackrftool::ui::StatusInfo;
+    using hackrftool::ui::status_dynamic;
+
+    // 已停止且无帧 → 空动态段（基础文本由调用方拼）
+    check(status_dynamic(StatusInfo{}).empty(), "停止+无帧 → 空串");
+
+    // 已停止但有帧 → 仅帧号后缀
+    StatusInfo stopped;
+    stopped.has_frame = true;
+    stopped.frame_seq = 42;
+    check(status_dynamic(stopped) == L" · 帧 42", "停止+帧 → 仅帧号后缀");
+
+    // 单窗接收：中心/采样率/增益逐段出现
+    StatusInfo rx;
+    rx.running = true;
+    rx.has_frame = true;
+    rx.center_mhz = 2450.0;
+    rx.rate_msps = 20;
+    rx.lna_db = 16;
+    rx.vga_db = 16;
+    rx.frame_seq = 1000;
+    const std::wstring single = status_dynamic(rx);
+    check(single == L"接收中 · 中心 2450.0 MHz · 20 Msps · LNA 16/VGA 16 · 帧 1000",
+          "单窗接收完整动态段");
+
+    // 全频段扫描：段号 +1 显示、段中心一位小数
+    StatusInfo sw = rx;
+    sw.sweep = true;
+    sw.seg_idx = 1;
+    sw.seg_center_mhz = 2417.5;
+    check(status_dynamic(sw) ==
+              L"接收中 · 扫描 段 2/5 @ 2417.5 MHz · 20 Msps · LNA 16/VGA 16 · 帧 1000",
+          "扫描段动态段");
+
+    // 录制中：MB 后缀（3 MiB + 5 字节 → 3MB，向下取整）
+    StatusInfo rec = rx;
+    rec.recording = true;
+    rec.rec_bytes = 3ull * 1024 * 1024 + 5;
+    check(status_dynamic(rec).find(L" · ●录制 3MB") != std::wstring::npos,
+          "录制 MB 后缀");
+
+    // 无帧时不显示帧号
+    StatusInfo noframe = rx;
+    noframe.has_frame = false;
+    check(status_dynamic(noframe).find(L"帧") == std::wstring::npos,
+          "无帧不显示帧号");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -772,6 +822,7 @@ int main() {
     test_waterfall_level_map();
     test_esb_hex_dump();
     test_waterfall_runs();
+    test_status_dynamic();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }

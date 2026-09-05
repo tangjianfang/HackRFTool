@@ -1,10 +1,10 @@
 # evolve log — HackRFTool
 
-- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 132 断言
-- pointer: #51（用户续作时从此开始）
-- rounds done: 5（#50 为用户指定轮号，#5–#49 未运行）
-- status: stopped-by-user（完成用户指定 #50 后停止）
-- metrics: findings 9 | fixes 12 | regressions 0（E4 重算：按轮次行累加）
+- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 138 断言
+- pointer: #52（N=50 运行进行中；上下文吃紧即在此checkpoint，新会话从 #52 续作）
+- rounds done: 6（#50–#51 为用户指定轮号/主题，#5–#49 未运行）
+- status: active（用户 N=50 主题运行：UI 性能与数据显示；主题耗尽或池清空按收敛规则提前终止）
+- metrics: findings 16 | fixes 19 | regressions 0（E4 按轮次行累加）
 - epics pending: none
 
 ## Target pool
@@ -34,6 +34,7 @@
 #3 | T4.1 sidecar | findings(0) | actions(1) | result(green+progress, 5 ctest / 112 断言) | diff(+78) | IQ 参数侧车 red→green；接线 iq_capture+UI 录制；105→112 断言
 #4 | T4.3 色阶映射 | findings(0) | actions(1) | result(green+progress, 5 ctest / 119 断言) | diff(+52) | waterfall_level 纯函数+扩窗 [-110,-30]，深蓝档恢复可见；112→119 断言
 #50 | 用户指定：UI 性能与数据显示（顶部工具栏/底部状态栏布局、丝滑拉伸、关键信号标识、解析数据实时显示；皮肤库引入被否——红线禁新三方依赖，纯 Win32 重写属 epic 级且无性能收益） | findings(6) | actions(6) | result(green+progress, 5 ctest/132 断言) | diff(+172/-15) | 瀑布 fill_rect 16384→503（3.1%，waterfall_runs 纯函数+覆盖等价断言）；频谱补 0/-50 dB 刻度；频谱页控件拆两行（窄窗不裁切）；ESB 关键信号横幅+行绿粗+清空全复位；解调预算 2/build（风暴不掉帧，预算行不写缓存后续补全）；hex_dump 纯函数。检查员 6/6 成立；重放审计 #1/#50 通过；真机自测单窗 builds=259 frames=1059 / 全频段 builds=331 frames=1373 均 PASS；会话压缩中断后以 git diff+todo 对账续作（L3 verified+1，新立 L5）
+#51 | 用户主题（N=50 首轮）：统一顶栏/中间纯内容区/底部状态栏 | findings(7) | actions(7) | result(green+progress, 5 ctest/138 断言) | diff(+388/-262) | 布局契约落地：toolbar=页签+全局徽章（含 ESB N 帧任何页可见、●录制 NMB）+全局设备两行+页上下文行，三页改纯显示，状态栏独立成条；status_dynamic 抽纯函数 red→green（132→138 断言）；概览拆加粗计数+次级提示；删冗余「恢复自动」；瀑布空态占位；刻度底衬（检查员驳回频谱页绘制顺序：底衬画在波形前无效→已修：ylab 移波形后）。wontfix 记录：-100 刻度避让（#50 有据）、tabs/segmented 汉字间距与滑块手柄尺寸（上游组件）；LNK1104 残留进程锁 exe 被"构建零告警"前置检查拦住（L1 verified+1）
 
 ## 运行总结（#1–#4，用户指令停止）
 

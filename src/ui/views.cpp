@@ -65,16 +65,20 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
                         pal.text_secondary, false, flux::Align::center);
         }
         // 纵轴 dB 刻度（与监测页 RSSI 图一致；-100 即图底界，该处空间留给
-        // 底部频率刻度，标注会重叠故跳过）
+        // 底部频率刻度，标注会重叠故跳过）。注意：必须在波形折线之后调用——
+        // 渲染器顺序绘制无分层，先画会被后画的波形盖住（检查员 F4 驳回点）
         const auto ylab = [&](float db) {
+            // 底衬防止网格/波形穿越刻度文字
+            r.fill_rect(flux::Rect{x, db_to_y(db, y, h) - 8.0f, 40.0f, 16.0f},
+                        pal.surface);
             r.draw_text(flux::Rect{x + 2.0f, db_to_y(db, y, h) - 7.0f, 34.0f, 14.0f},
                         std::to_wstring(int(db)), 10.0f, pal.text_secondary, false,
                         flux::Align::start, 0.7f);
         };
-        ylab(0.0f);
-        ylab(-50.0f);
 
         if (db.empty()) {
+            ylab(0.0f);
+            ylab(-50.0f);
             r.draw_text(flux::Rect{x, y, w, h}, L"等待数据…", 14.0f, pal.text_secondary,
                         false, flux::Align::center);
             return;
@@ -91,6 +95,8 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
             r.draw_polyline(pk, pal.text_secondary, 1.0f, 0.55f);
         }
         r.draw_polyline(cur, pal.accent, 2.0f, 1.0f);
+        ylab(0.0f);   // 刻度最后画：底衬才盖得住波形（顺序绘制无分层）
+        ylab(-50.0f);
     };
     return flux::view(std::move(p));
 }
@@ -103,8 +109,13 @@ flux::ElementPtr waterfall_view(const flux::Palette& pal,
     p.background = pal.surface;
     p.radius = 10.0f;
     p.paint_id = seq;
-    p.paint = [pal, &wf](flux::D2DRenderer& r, float x, float y, float w, float h,
-                         bool, float, float) {
+    p.paint = [pal, &wf, seq](flux::D2DRenderer& r, float x, float y, float w, float h,
+                              bool, float, float) {
+        if (seq == 0) {   // 尚无数据：占位提示，避免空黑面板
+            r.draw_text(flux::Rect{x, y, w, h}, L"等待数据…", 14.0f,
+                        pal.text_secondary, false, flux::Align::center);
+            return;
+        }
         const auto snap = wf.snapshot();
         const std::size_t cols = wf.cols(), rows = wf.rows();
         const float cw = w / float(cols), rh = (h - 4.0f) / float(rows);

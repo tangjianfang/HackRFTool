@@ -29,6 +29,7 @@
 #include "radio/hackrf.hpp"
 #include "radio/iq_recorder.hpp"
 #include "ui/monitor_view.hpp"
+#include "ui/status_text.hpp"
 #include "ui/views.hpp"
 
 namespace {
@@ -259,131 +260,15 @@ void export_csv_dialog(App& app) {
                                                 : L"导出失败（无法写文件）");
 }
 
-// ---- 频谱页（M1） ----------------------------------------------------------
+// ---- 频谱页（M1）：纯显示（全部控制已收进顶部工具栏） ----------------------
 
-flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
-    const bool running = app.running.get();
-
-    flux::Props header_p;
-    header_p.direction = flux::Direction::row;
-    header_p.align = flux::Align::center;
-    header_p.gap = 12.0f;
-    auto header = flux::view(std::move(header_p));
-    flux::Props title_p;
-    title_p.bold = true;
-    title_p.text_align = flux::Align::start;
-    title_p.flex_grow = 1.0f;
-    header->children.push_back(
-        flux::label(L"HackRFTool · 2.4G 频谱检测", std::move(title_p)));
-    header->children.push_back(flux::ui::badge(
-        pal, running ? flux::ui::BadgeKind::success : flux::ui::BadgeKind::neutral,
-        running ? L"接收中" : L"已停止"));
-    header->children.push_back(flux::ui::badge(pal, flux::ui::BadgeKind::info, L"仅接收"));
-    if (app.sweep_on.get() == 1)
-        header->children.push_back(
-            flux::ui::badge(pal, flux::ui::BadgeKind::warning, L"全频段"));
-
-    // 控制行 1：启停 + 模式 + 中心频率（窄窗口不溢出——单行 6 控件 700px 被裁切）
-    flux::Props controls_p;
-    controls_p.direction = flux::Direction::row;
-    controls_p.align = flux::Align::center;
-    controls_p.gap = 12.0f;
-    auto controls = flux::view(std::move(controls_p));
-    // 控制行 2：增益 + 采样率
-    flux::Props controls2_p;
-    controls2_p.direction = flux::Direction::row;
-    controls2_p.align = flux::Align::center;
-    controls2_p.gap = 12.0f;
-    auto controls2 = flux::view(std::move(controls2_p));
-    flux::Props btn_primary;
-    btn_primary.background = pal.accent;
-    btn_primary.hover_background = pal.accent_hover;
-    btn_primary.text_color = pal.on_accent;
-    controls->children.push_back(flux::button(running ? L"停止" : L"开始",
-                                              [&app] { toggle_rx(app); },
-                                              std::move(btn_primary)));
-    controls->children.push_back(flux::ui::field(
-        pal, L"模式",
-        flux::ui::segmented(pal, {L"单窗", L"全频段"}, app.sweep_on.get(), [&app](int i) {
-            // 铁律：set() 同步重建 UI 树会释放本 lambda 的存储，其后不得再
-            // 访问 app——副作用必须全部在 set 之前完成，set 永远是最后一句
-            const bool live = (i == 1) && app.running.get();
-            set_sweep_live(app, live);
-            app.sweep_on.set(i);
-        })));
-    if (app.sweep_on.get() == 0) {
-        controls->children.push_back(flux::ui::field(
-            pal, L"中心频率 MHz",
-            flux::text_input(app.freq_text.get(),
-                             [&app](std::wstring v) { app.freq_text.set(v); })));
-    }
-    flux::Props btn_secondary;
-    btn_secondary.background = pal.surface;
-    btn_secondary.hover_background = pal.surface_hover;
-    btn_secondary.text_color = pal.text;
-    btn_secondary.border_color = pal.border;
-    btn_secondary.border_width = 1.0f;
-    if (app.sweep_on.get() == 0) {
-        controls->children.push_back(flux::button(L"应用频率", [&app] {
-            // 副作用在前，set 收尾（set 后 lambda 存储已被重建释放）
-            const double mhz =
-                clamp_center(std::wcstod(app.freq_text.get().c_str(), nullptr));
-            const bool running = app.running.get();
-            const bool relock = app.mon_lock_mhz > 0.0 && !app.auto_track.get();
-            if (running) {
-                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
-                cfg.center_hz = mhz * 1e6;
-                (void)radio_apply_now(app, cfg);
-            }
-            if (relock)
-                app.monitor.set_fixed_bin(mhz_to_bin(app.mon_lock_mhz, mhz));
-            app.center_mhz.set(mhz);   // 最后一句
-        }, std::move(btn_secondary)));
-    }
-    controls2->children.push_back(flux::ui::field(
-        pal, L"LNA " + std::to_wstring(unsigned(app.lna.get())) + L" dB",
-        flux::slider(float(app.lna.get()), 8.0f, 40.0f, [&app](float v) {
-            const unsigned gain = unsigned(v / 8.0f + 0.5f) * 8;
-            if (app.running.get()) {
-                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
-                cfg.lna_gain_db = gain;
-                (void)radio_apply_now(app, cfg);
-            }
-            app.lna.set(double(gain));   // 最后一句
-        })));
-    controls2->children.push_back(flux::ui::field(
-        pal, L"VGA " + std::to_wstring(unsigned(app.vga.get())) + L" dB",
-        flux::slider(float(app.vga.get()), 2.0f, 62.0f, [&app](float v) {
-            const unsigned gain = unsigned(v / 2.0f + 0.5f) * 2;
-            if (app.running.get()) {
-                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
-                cfg.vga_gain_db = gain;
-                (void)radio_apply_now(app, cfg);
-            }
-            app.vga.set(double(gain));   // 最后一句
-        })));
-    controls2->children.push_back(flux::ui::field(
-        pal, L"采样率 Msps",
-        flux::ui::segmented(pal, {L"8", L"10", L"16", L"20"}, app.rate_index.get(),
-                            [&app](int i) {
-                                if (app.running.get()) {
-                                    hackrftool::radio::RadioConfig cfg =
-                                        current_radio_cfg(app);
-                                    cfg.sample_rate_hz = kRatesMsps[size_t(i)] * 1e6;
-                                    (void)radio_apply_now(app, cfg);
-                                }
-                                app.rate_index.set(i);   // 最后一句
-                            })));
-
+flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
     flux::Props page_p;
     page_p.direction = flux::Direction::column;
     page_p.align = flux::Align::stretch;
     page_p.gap = 8.0f;
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
-    page_el->children.push_back(std::move(header));
-    page_el->children.push_back(std::move(controls));
-    page_el->children.push_back(std::move(controls2));
     if (app.sweep_on.get() == 0) {
         const std::vector<hackrftool::ui::SpectrumTick> ticks = {
             {app.center_mhz.get() - 10.0, L"-10M"},
@@ -409,64 +294,9 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
     return page_el;
 }
 
-// ---- 监测页（M2） ----------------------------------------------------------
+// ---- 监测页（M2）：纯显示（目标选择/阈值/导出已收进顶部工具栏） ------------
 
-flux::ElementPtr monitor_page(App& app, const flux::Palette& pal) {
-    // 目标选择行
-    flux::Props sel_p;
-    sel_p.direction = flux::Direction::row;
-    sel_p.align = flux::Align::center;
-    sel_p.gap = 12.0f;
-    auto sel = flux::view(std::move(sel_p));
-    sel->children.push_back(flux::ui::field(
-        pal, L"自动跟踪最强信号",
-        flux::toggle_switch(app.auto_track.get(), [&app](bool on) {
-            app.monitor.set_mode(on ? hackrftool::dsp::ChannelMonitor::Mode::auto_peak
-                                    : hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
-            app.auto_track.set(on);
-        })));
-    sel->children.push_back(flux::ui::field(
-        pal, L"目标频率 MHz",
-        flux::text_input(app.mon_text.get(),
-                         [&app](std::wstring v) { app.mon_text.set(v); })));
-    flux::Props btn_lock;
-    btn_lock.background = pal.surface;
-    btn_lock.hover_background = pal.surface_hover;
-    btn_lock.text_color = pal.text;
-    btn_lock.border_color = pal.border;
-    btn_lock.border_width = 1.0f;
-    sel->children.push_back(flux::button(L"锁定该频率", [&app] { monitor_lock(app); },
-                                         std::move(btn_lock)));
-    flux::Props btn_reset;
-    btn_reset.background = pal.surface;
-    btn_reset.hover_background = pal.surface_hover;
-    btn_reset.text_color = pal.text;
-    btn_reset.border_color = pal.border;
-    btn_reset.border_width = 1.0f;
-    sel->children.push_back(flux::button(L"恢复自动", [&app] {
-        app.monitor.set_mode(hackrftool::dsp::ChannelMonitor::Mode::auto_peak);
-        app.auto_track.set(true);
-    }, std::move(btn_reset)));
-
-    // 阈值行 + 导出
-    flux::Props tools_p;
-    tools_p.direction = flux::Direction::row;
-    tools_p.align = flux::Align::center;
-    tools_p.gap = 12.0f;
-    auto tools = flux::view(std::move(tools_p));
-    tools->children.push_back(flux::ui::field(
-        pal, L"活动阈值 " + wd1(app.threshold.get()) + L" dB",
-        flux::slider(float(app.threshold.get()), -100.0f, -40.0f, [&app](float v) {
-            app.threshold.set(double(int(v)));
-        })));
-    flux::Props btn_export;
-    btn_export.background = pal.accent;
-    btn_export.hover_background = pal.accent_hover;
-    btn_export.text_color = pal.on_accent;
-    tools->children.push_back(
-        flux::button(L"导出 CSV", [&app] { export_csv_dialog(app); },
-                     std::move(btn_export)));
-
+flux::ElementPtr monitor_display(App& app, const flux::Palette& pal) {
     // 统计行
     const auto st = app.monitor.stats(float(app.threshold.get()));
     const std::wstring stats_text =
@@ -487,10 +317,8 @@ flux::ElementPtr monitor_page(App& app, const flux::Palette& pal) {
     page_p.gap = 8.0f;
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
-    page_el->children.push_back(std::move(sel));
     page_el->children.push_back(hackrftool::ui::rssi_strip(
         pal, app.monitor.series(), float(app.threshold.get()), app.frame.seq));
-    page_el->children.push_back(std::move(tools));
     page_el->children.push_back(std::move(stats_el));
     if (app.sweep_on.get() == 1) {
         // T1.3：扫描模式下监测语义说明（M2 遗留）
@@ -503,7 +331,7 @@ flux::ElementPtr monitor_page(App& app, const flux::Palette& pal) {
     return page_el;
 }
 
-// ---- 实时抓包页（M5） -------------------------------------------------------
+// ---- 实时抓包页（M5）：纯显示（工具行已收进顶部工具栏） ---------------------
 
 void record_toggle(App& app) {
     if (app.recorder.recording()) {
@@ -620,43 +448,8 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
     return text;
 }
 
-flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
+flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
     const double fs_hz = kRatesMsps[size_t(app.rate_index.get())] * 1e6;
-
-    // 工具行
-    flux::Props tools_p;
-    tools_p.direction = flux::Direction::row;
-    tools_p.align = flux::Align::center;
-    tools_p.gap = 12.0f;
-    auto tools = flux::view(std::move(tools_p));
-    tools->children.push_back(flux::ui::field(
-        pal, L"突发阈值 " + wd1(app.burst_thr.get()) + L" dB",
-        flux::slider(float(app.burst_thr.get()), -60.0f, -20.0f, [&app](float v) {
-            app.burst_thr.set(double(int(v)));
-        })));
-    tools->children.push_back(flux::ui::field(
-        pal, L"解调符号率",
-        flux::ui::segmented(pal, {L"1 Mbps", L"2 Mbps"}, app.symrate_idx.get(),
-                            [&app](int i) { app.symrate_idx.set(i); })));
-    flux::Props btn_clear;
-    btn_clear.background = pal.surface;
-    btn_clear.hover_background = pal.surface_hover;
-    btn_clear.text_color = pal.text;
-    btn_clear.border_color = pal.border;
-    btn_clear.border_width = 1.0f;
-    tools->children.push_back(flux::button(L"清空", [&app] {
-        app.live.clear();
-        app.row_cache.clear();
-        app.esb_hits.store(0);
-        app.last_esb.clear();
-    }, std::move(btn_clear)));
-    flux::Props btn_rec;
-    btn_rec.background = app.recorder.recording() ? pal.danger : pal.accent;
-    btn_rec.hover_background = pal.accent_hover;
-    btn_rec.text_color = pal.on_accent;
-    tools->children.push_back(
-        flux::button(app.recorder.recording() ? L"■ 停止录制" : L"● 录制 IQ",
-                     [&app] { record_toggle(app); }, std::move(btn_rec)));
 
     // 关键信号横幅：ESB 帧计数 + 最新解出帧的地址/载荷实时显示（M5 教训：
     // ESB✓ 埋在 60 行文本里无法一眼识别关键信号）
@@ -683,14 +476,18 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
             pal, L"检测到 nRF24 兼容帧时在此实时显示地址与载荷", std::move(key_text_p)));
     }
 
-    // 概览行
-    flux::Props sum_p;
-    sum_p.text_align = flux::Align::start;
-    auto summary = flux::ui::caption(
-        pal, L"突发总数 " + std::to_wstring(app.live.bursts().size()) +
-                 L"（新在上；GFSK 比特按 1 Msps 解调；ESB✓ = 识别出 nRF24 兼容帧；"
-                 L"若时长都接近 100ms，说明增益过高整段连片，请下调 LNA/VGA）",
-        std::move(sum_p));
+    // 概览：计数加粗独立成段，操作提示弱化为次级说明（关键信息不再埋没）
+    flux::Props count_p;
+    count_p.text_align = flux::Align::start;
+    count_p.bold = true;
+    auto count_el = flux::label(
+        L"突发总数 " + std::to_wstring(app.live.bursts().size()), std::move(count_p));
+    flux::Props hint_p;
+    hint_p.text_align = flux::Align::start;
+    auto hint_el = flux::ui::caption(
+        pal, L"新在上；ESB✓ = 识别出 nRF24 兼容帧；若时长都接近 100ms，说明增益过高"
+             L"整段连片，请下调 LNA/VGA",
+        std::move(hint_p));
 
     // 列表（最新 60 条）：视口必须 flex_grow 占满剩余高度，否则塌 0 不渲染
     flux::Props list_p;
@@ -717,14 +514,263 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
     page_p.gap = 8.0f;
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
-    page_el->children.push_back(std::move(tools));
     page_el->children.push_back(std::move(key));
-    page_el->children.push_back(std::move(summary));
+    page_el->children.push_back(std::move(count_el));
+    page_el->children.push_back(std::move(hint_el));
     // 视口 flex_grow 占满剩余高度，否则列内视口高度塌 0 导致列表不渲染
     flux::Props scroll_p;
     scroll_p.flex_grow = 1.0f;
     page_el->children.push_back(flux::scroll_view(std::move(list), std::move(scroll_p)));
     return page_el;
+}
+
+// ---- 顶部工具栏 -------------------------------------------------------------
+// 布局契约（用户要求）：全部按钮/设置/图标状态集中在窗口顶部一个工具栏；
+// 中间内容区只放数据显示；其他状态落底部状态栏。
+
+// 行 1 右侧图标状态徽章：运行/模式/录制/ESB 关键信号（任何页都可见）
+std::vector<flux::ElementPtr> toolbar_badges(App& app, const flux::Palette& pal) {
+    std::vector<flux::ElementPtr> out;
+    const bool running = app.running.get();
+    out.push_back(flux::ui::badge(
+        pal, running ? flux::ui::BadgeKind::success : flux::ui::BadgeKind::info,
+        running ? L"接收中" : L"已停止"));
+    out.push_back(flux::ui::badge(pal, flux::ui::BadgeKind::info, L"仅接收"));
+    if (app.sweep_on.get() == 1)
+        out.push_back(
+            flux::ui::badge(pal, flux::ui::BadgeKind::warning, L"全频段"));
+    if (app.recorder.recording())
+        out.push_back(flux::ui::badge(
+            pal, flux::ui::BadgeKind::danger,
+            L"● 录制 " +
+                std::to_wstring(app.recorder.bytes_written() / (1024 * 1024)) +
+                L"MB"));
+    const unsigned esb = app.esb_hits.load();
+    if (esb > 0)
+        out.push_back(flux::ui::badge(pal, flux::ui::BadgeKind::success,
+                                      L"ESB " + std::to_wstring(esb) + L" 帧"));
+    return out;
+}
+
+// 行 2/3：全局设备控制（启停+模式+频率 / 增益+采样率）
+flux::ElementPtr device_rows(App& app, const flux::Palette& pal) {
+    const bool running = app.running.get();
+
+    flux::Props row1_p;
+    row1_p.direction = flux::Direction::row;
+    row1_p.align = flux::Align::center;
+    row1_p.gap = 12.0f;
+    auto row1 = flux::view(std::move(row1_p));
+    flux::Props row2_p;
+    row2_p.direction = flux::Direction::row;
+    row2_p.align = flux::Align::center;
+    row2_p.gap = 12.0f;
+    auto row2 = flux::view(std::move(row2_p));
+
+    flux::Props btn_primary;
+    btn_primary.background = pal.accent;
+    btn_primary.hover_background = pal.accent_hover;
+    btn_primary.text_color = pal.on_accent;
+    row1->children.push_back(flux::button(running ? L"停止" : L"开始",
+                                          [&app] { toggle_rx(app); },
+                                          std::move(btn_primary)));
+    row1->children.push_back(flux::ui::field(
+        pal, L"模式",
+        flux::ui::segmented(pal, {L"单窗", L"全频段"}, app.sweep_on.get(), [&app](int i) {
+            // 铁律：set() 同步重建 UI 树会释放本 lambda 的存储，其后不得再
+            // 访问 app——副作用必须全部在 set 之前完成，set 永远是最后一句
+            const bool live = (i == 1) && app.running.get();
+            set_sweep_live(app, live);
+            app.sweep_on.set(i);
+        })));
+    if (app.sweep_on.get() == 0) {
+        row1->children.push_back(flux::ui::field(
+            pal, L"中心频率 MHz",
+            flux::text_input(app.freq_text.get(),
+                             [&app](std::wstring v) { app.freq_text.set(v); })));
+    }
+    flux::Props btn_secondary;
+    btn_secondary.background = pal.surface;
+    btn_secondary.hover_background = pal.surface_hover;
+    btn_secondary.text_color = pal.text;
+    btn_secondary.border_color = pal.border;
+    btn_secondary.border_width = 1.0f;
+    if (app.sweep_on.get() == 0) {
+        row1->children.push_back(flux::button(L"应用频率", [&app] {
+            // 副作用在前，set 收尾（set 后 lambda 存储已被重建释放）
+            const double mhz =
+                clamp_center(std::wcstod(app.freq_text.get().c_str(), nullptr));
+            const bool running = app.running.get();
+            const bool relock = app.mon_lock_mhz > 0.0 && !app.auto_track.get();
+            if (running) {
+                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                cfg.center_hz = mhz * 1e6;
+                (void)radio_apply_now(app, cfg);
+            }
+            if (relock)
+                app.monitor.set_fixed_bin(mhz_to_bin(app.mon_lock_mhz, mhz));
+            app.center_mhz.set(mhz);   // 最后一句
+        }, std::move(btn_secondary)));
+    }
+    row2->children.push_back(flux::ui::field(
+        pal, L"LNA " + std::to_wstring(unsigned(app.lna.get())) + L" dB",
+        flux::slider(float(app.lna.get()), 8.0f, 40.0f, [&app](float v) {
+            const unsigned gain = unsigned(v / 8.0f + 0.5f) * 8;
+            if (app.running.get()) {
+                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                cfg.lna_gain_db = gain;
+                (void)radio_apply_now(app, cfg);
+            }
+            app.lna.set(double(gain));   // 最后一句
+        })));
+    row2->children.push_back(flux::ui::field(
+        pal, L"VGA " + std::to_wstring(unsigned(app.vga.get())) + L" dB",
+        flux::slider(float(app.vga.get()), 2.0f, 62.0f, [&app](float v) {
+            const unsigned gain = unsigned(v / 2.0f + 0.5f) * 2;
+            if (app.running.get()) {
+                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                cfg.vga_gain_db = gain;
+                (void)radio_apply_now(app, cfg);
+            }
+            app.vga.set(double(gain));   // 最后一句
+        })));
+    row2->children.push_back(flux::ui::field(
+        pal, L"采样率 Msps",
+        flux::ui::segmented(pal, {L"8", L"10", L"16", L"20"}, app.rate_index.get(),
+                            [&app](int i) {
+                                if (app.running.get()) {
+                                    hackrftool::radio::RadioConfig cfg =
+                                        current_radio_cfg(app);
+                                    cfg.sample_rate_hz = kRatesMsps[size_t(i)] * 1e6;
+                                    (void)radio_apply_now(app, cfg);
+                                }
+                                app.rate_index.set(i);   // 最后一句
+                            })));
+
+    flux::Props col_p;
+    col_p.direction = flux::Direction::column;
+    col_p.align = flux::Align::stretch;
+    col_p.gap = 8.0f;
+    auto col = flux::view(std::move(col_p));
+    col->children.push_back(std::move(row1));
+    col->children.push_back(std::move(row2));
+    return col;
+}
+
+// 行 4：页上下文控制（监测/抓包页的页内设置；频谱页无 → 空行不占位）
+flux::ElementPtr context_row(App& app, const flux::Palette& pal) {
+    flux::Props row_p;
+    row_p.direction = flux::Direction::row;
+    row_p.align = flux::Align::center;
+    row_p.gap = 12.0f;
+    auto row = flux::view(std::move(row_p));
+    switch (app.page.get()) {
+    case 1:
+        row->children.push_back(flux::ui::field(
+            pal, L"自动跟踪最强信号",
+            flux::toggle_switch(app.auto_track.get(), [&app](bool on) {
+                app.monitor.set_mode(on
+                                         ? hackrftool::dsp::ChannelMonitor::Mode::auto_peak
+                                         : hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
+                app.auto_track.set(on);
+            })));
+        row->children.push_back(flux::ui::field(
+            pal, L"目标频率 MHz",
+            flux::text_input(app.mon_text.get(),
+                             [&app](std::wstring v) { app.mon_text.set(v); })));
+        {
+            flux::Props btn_lock;
+            btn_lock.background = pal.surface;
+            btn_lock.hover_background = pal.surface_hover;
+            btn_lock.text_color = pal.text;
+            btn_lock.border_color = pal.border;
+            btn_lock.border_width = 1.0f;
+            row->children.push_back(
+                flux::button(L"锁定该频率", [&app] { monitor_lock(app); },
+                             std::move(btn_lock)));
+        }
+        row->children.push_back(flux::ui::field(
+            pal, L"活动阈值 " + wd1(app.threshold.get()) + L" dB",
+            flux::slider(float(app.threshold.get()), -100.0f, -40.0f, [&app](float v) {
+                app.threshold.set(double(int(v)));
+            })));
+        {
+            flux::Props btn_export;
+            btn_export.background = pal.accent;
+            btn_export.hover_background = pal.accent_hover;
+            btn_export.text_color = pal.on_accent;
+            row->children.push_back(
+                flux::button(L"导出 CSV", [&app] { export_csv_dialog(app); },
+                             std::move(btn_export)));
+        }
+        break;
+    case 2:
+        row->children.push_back(flux::ui::field(
+            pal, L"突发阈值 " + wd1(app.burst_thr.get()) + L" dB",
+            flux::slider(float(app.burst_thr.get()), -60.0f, -20.0f, [&app](float v) {
+                app.burst_thr.set(double(int(v)));
+            })));
+        row->children.push_back(flux::ui::field(
+            pal, L"解调符号率",
+            flux::ui::segmented(pal, {L"1 Mbps", L"2 Mbps"}, app.symrate_idx.get(),
+                                [&app](int i) { app.symrate_idx.set(i); })));
+        {
+            flux::Props btn_clear;
+            btn_clear.background = pal.surface;
+            btn_clear.hover_background = pal.surface_hover;
+            btn_clear.text_color = pal.text;
+            btn_clear.border_color = pal.border;
+            btn_clear.border_width = 1.0f;
+            row->children.push_back(flux::button(L"清空", [&app] {
+                app.live.clear();
+                app.row_cache.clear();
+                app.esb_hits.store(0);
+                app.last_esb.clear();
+            }, std::move(btn_clear)));
+        }
+        {
+            flux::Props btn_rec;
+            btn_rec.background = app.recorder.recording() ? pal.danger : pal.accent;
+            btn_rec.hover_background = pal.accent_hover;
+            btn_rec.text_color = pal.on_accent;
+            row->children.push_back(
+                flux::button(app.recorder.recording() ? L"■ 停止录制" : L"● 录制 IQ",
+                             [&app] { record_toggle(app); }, std::move(btn_rec)));
+        }
+        break;
+    default:
+        break;
+    }
+    return row;
+}
+
+flux::ElementPtr toolbar(App& app, const flux::Palette& pal) {
+    flux::Props bar_p;
+    bar_p.direction = flux::Direction::column;
+    bar_p.align = flux::Align::stretch;
+    bar_p.gap = 8.0f;
+    bar_p.background = pal.surface;
+    bar_p.padding = flux::EdgeInsets{10.0f, 12.0f, 8.0f, 12.0f};
+    auto bar = flux::view(std::move(bar_p));
+
+    flux::Props row1_p;
+    row1_p.direction = flux::Direction::row;
+    row1_p.align = flux::Align::center;
+    row1_p.gap = 12.0f;
+    auto row1 = flux::view(std::move(row1_p));
+    row1->children.push_back(flux::ui::tabs(
+        pal, {L"频谱", L"信道监测", L"实时抓包"}, app.page.get(),
+        [&app](int i) { app.page.set(i); }));
+    flux::Props spacer_p;
+    spacer_p.flex_grow = 1.0f;
+    row1->children.push_back(flux::view(std::move(spacer_p)));
+    for (auto& b : toolbar_badges(app, pal)) row1->children.push_back(std::move(b));
+    bar->children.push_back(std::move(row1));
+
+    bar->children.push_back(device_rows(app, pal));
+    auto ctx = context_row(app, pal);
+    if (!ctx->children.empty()) bar->children.push_back(std::move(ctx));
+    return bar;
 }
 
 // ---- 根 -------------------------------------------------------------------
@@ -768,49 +814,62 @@ flux::ElementPtr build(App& app) {
 
     const flux::Palette& pal = app.host.palette();
 
+    // 状态栏动态段（纯函数契约见 tests/dsp_test.cpp test_status_dynamic）
+    hackrftool::ui::StatusInfo si;
+    si.running = app.running.get();
+    si.sweep = app.sweep_on.get() == 1;
+    si.recording = app.recorder.recording();
+    si.seg_idx = int(app.seg_idx.load());
+    si.seg_center_mhz = seg_center_mhz(app.seg_idx.load());
+    si.center_mhz = app.center_mhz.get();
+    si.rate_msps = unsigned(kRatesMsps[size_t(app.rate_index.get())]);
+    si.lna_db = unsigned(app.lna.get());
+    si.vga_db = unsigned(app.vga.get());
+    si.has_frame = !app.frame.db.empty();
+    si.frame_seq = app.frame.seq;
+    si.rec_bytes = app.recorder.bytes_written();
+    // 接收中时基础文本（"接收中"）与动态段前缀重复，直接用动态段
+    std::wstring status_text =
+        si.running ? hackrftool::ui::status_dynamic(si)
+                   : app.status.get() + hackrftool::ui::status_dynamic(si);
+
     flux::Props root_p;
     root_p.direction = flux::Direction::column;
     root_p.align = flux::Align::stretch;   // 子元素横向撑满（否则纯 paint 卡片宽度塌 0）
-    root_p.gap = 8.0f;
     root_p.flex_grow = 1.0f;
     root_p.background = pal.background;
-    root_p.padding = flux::EdgeInsets{16.0f, 16.0f, 16.0f, 16.0f};
     auto root = flux::view(std::move(root_p));
-    root->children.push_back(flux::ui::tabs(
-        pal, {L"频谱", L"信道监测", L"实时抓包"}, app.page.get(),
-        [&app](int i) { app.page.set(i); }));
-    switch (app.page.get()) {
-    case 1: root->children.push_back(monitor_page(app, pal)); break;
-    case 2: root->children.push_back(capture_page(app, pal)); break;
-    default: root->children.push_back(spectrum_page(app, pal)); break;
-    }
 
-    // 状态栏（M5：按模式动态拼接，实时信息不再固化在 status 文本里）
+    // 顶部工具栏：页签 + 图标状态 + 全部按钮/设置
+    root->children.push_back(toolbar(app, pal));
+
+    // 中间内容区：纯数据显示，flex_grow 吃掉剩余高度
+    flux::Props content_p;
+    content_p.direction = flux::Direction::column;
+    content_p.align = flux::Align::stretch;
+    content_p.gap = 8.0f;
+    content_p.flex_grow = 1.0f;
+    content_p.padding = flux::EdgeInsets{12.0f, 12.0f, 12.0f, 12.0f};
+    auto content = flux::view(std::move(content_p));
+    switch (app.page.get()) {
+    case 1: content->children.push_back(monitor_display(app, pal)); break;
+    case 2: content->children.push_back(capture_display(app, pal)); break;
+    default: content->children.push_back(spectrum_display(app, pal)); break;
+    }
+    root->children.push_back(std::move(content));
+
+    // 底部状态栏：其他状态（surface 底与内容区分层）
+    flux::Props statusbar_p;
+    statusbar_p.direction = flux::Direction::row;
+    statusbar_p.align = flux::Align::center;
+    statusbar_p.background = pal.surface;
+    statusbar_p.padding = flux::EdgeInsets{6.0f, 12.0f, 6.0f, 12.0f};
+    auto statusbar = flux::view(std::move(statusbar_p));
     flux::Props cap_p;
     cap_p.text_align = flux::Align::start;
-    std::wstring status_text = app.status.get();
-    if (app.running.get()) {
-        status_text = L"接收中 · ";
-        status_text += (app.sweep_on.get() == 1)
-                           ? L"扫描 段 " + std::to_wstring(app.seg_idx.load() + 1) +
-                                 L"/5 @ " + wd1(seg_center_mhz(app.seg_idx.load())) +
-                                 L" MHz"
-                           : L"中心 " + wd1(app.center_mhz.get()) + L" MHz";
-        status_text += L" · " +
-                       std::to_wstring(
-                           unsigned(kRatesMsps[size_t(app.rate_index.get())])) +
-                       L" Msps · LNA " + std::to_wstring(unsigned(app.lna.get())) +
-                       L"/VGA " + std::to_wstring(unsigned(app.vga.get()));
-        if (!app.frame.db.empty())
-            status_text += L" · 帧 " + std::to_wstring(app.frame.seq);
-        if (app.recorder.recording())
-            status_text += L" · ●录制 " +
-                           std::to_wstring(app.recorder.bytes_written() / (1024 * 1024)) +
-                           L"MB";
-    } else if (!app.frame.db.empty()) {
-        status_text += L"  ·  帧 " + std::to_wstring(app.frame.seq);
-    }
-    root->children.push_back(flux::ui::caption(pal, status_text, std::move(cap_p)));
+    statusbar->children.push_back(
+        flux::ui::caption(pal, status_text, std::move(cap_p)));
+    root->children.push_back(std::move(statusbar));
     return root;
 }
 

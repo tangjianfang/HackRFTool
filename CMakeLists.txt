@@ -32,6 +32,7 @@ add_executable(HackRFTool WIN32
     src/radio/hackrf.cpp
     src/radio/iq_recorder.cpp
     src/ui/monitor_view.cpp
+    src/ui/status_text.cpp
     src/ui/views.cpp)
 target_include_directories(HackRFTool PRIVATE src ${MSYS2_UCRT64_INCLUDE})
 target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32 Dbghelp)
@@ -74,7 +75,8 @@ add_executable(HackRFToolTest tests/dsp_test.cpp src/dsp/analyzer.cpp
                               src/dsp/burst_detector.cpp src/dsp/channel_monitor.cpp
                               src/dsp/esb.cpp src/dsp/fft.cpp src/dsp/gfsk.cpp
                               src/dsp/live_bursts.cpp src/dsp/panorama.cpp
-                              src/dsp/waterfall.cpp src/radio/iq_recorder.cpp)
+                              src/dsp/waterfall.cpp src/radio/iq_recorder.cpp
+                              src/ui/status_text.cpp)
 target_include_directories(HackRFToolTest PRIVATE src)
 flux_apply_compiler_options(HackRFToolTest)
 add_test(NAME HackRFToolTest COMMAND HackRFToolTest)

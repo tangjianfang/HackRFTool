@@ -48,6 +48,9 @@ flux::ElementPtr rssi_strip(const flux::Palette& pal,
 
         // 左侧刻度
         const auto ylab = [&](float db) {
+            // 底衬防止波形穿越刻度文字
+            r.fill_rect(flux::Rect{x, db_to_y(db, y, h) - 8.0f, 40.0f, 16.0f},
+                        pal.surface);
             r.draw_text(flux::Rect{x, db_to_y(db, y, h) - 7.0f, 34.0f, 14.0f},
                         std::to_wstring(int(db)), 10.0f, pal.text_secondary, false,
                         flux::Align::start, 0.7f);

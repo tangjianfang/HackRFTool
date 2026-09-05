@@ -8,7 +8,7 @@
 cmake --build --preset x64-release && ctest --preset x64-release
 ```
 
-- 唯一验收命令，应 5/5 通过（132 断言单测 + 端到端合成管线 + WinFlux 测试；两个真机整机自测无设备时退出码 42 → CTest 记 SKIP）
+- 唯一验收命令，应 5/5 通过（138 断言单测 + 端到端合成管线 + WinFlux 测试；两个真机整机自测无设备时退出码 42 → CTest 记 SKIP）
 - **跑 ctest 前先确认构建零 error**：构建失败后 ctest 跑的是陈旧二进制，"全绿"是假象（docs/lessons.md L1，已两次踩中）
 - 整机自测必须 Release：Debug 下全量 FFT 会 CPU 饥饿
 - Preset：`x64-debug` / `x64-release`（VS2022 生成器），产物在 `out/build/<preset>/`；libhackrf 等三个 DLL 由构建后步骤从 `C:/msys64/ucrt64/bin` 复制到 exe 旁
