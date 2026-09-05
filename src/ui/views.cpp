@@ -64,6 +64,15 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
             r.draw_text(flux::Rect{lx, y + h - 18.0f, 56.0f, 14.0f}, tick.label, 10.0f,
                         pal.text_secondary, false, flux::Align::center);
         }
+        // 纵轴 dB 刻度（与监测页 RSSI 图一致；-100 即图底界，该处空间留给
+        // 底部频率刻度，标注会重叠故跳过）
+        const auto ylab = [&](float db) {
+            r.draw_text(flux::Rect{x + 2.0f, db_to_y(db, y, h) - 7.0f, 34.0f, 14.0f},
+                        std::to_wstring(int(db)), 10.0f, pal.text_secondary, false,
+                        flux::Align::start, 0.7f);
+        };
+        ylab(0.0f);
+        ylab(-50.0f);
 
         if (db.empty()) {
             r.draw_text(flux::Rect{x, y, w, h}, L"等待数据…", 14.0f, pal.text_secondary,
@@ -99,14 +108,16 @@ flux::ElementPtr waterfall_view(const flux::Palette& pal,
         const auto snap = wf.snapshot();
         const std::size_t cols = wf.cols(), rows = wf.rows();
         const float cw = w / float(cols), rh = (h - 4.0f) / float(rows);
-        for (std::size_t row = 0; row < rows; ++row) {
-            for (std::size_t col = 0; col < cols; ++col) {
-                const int level =
-                    hackrftool::dsp::waterfall_level(snap[row * cols + col]);
-                r.fill_rect(flux::Rect{x + float(col) * cw, y + 2.0f + float(row) * rh,
-                                       cw + 1.0f, rh + 1.0f},
-                            wf_color(level));
-            }
+        std::vector<int> levels(snap.size());
+        for (std::size_t i = 0; i < snap.size(); ++i)
+            levels[i] = hackrftool::dsp::waterfall_level(snap[i]);
+        // 同值横向行程合并：底噪平坦区整行 1 个矩形，fill_rect 数大幅下降
+        //（窗口拉伸时每次 WM_SIZE 全量重绘，收益最直接）
+        for (const auto& run : hackrftool::dsp::waterfall_runs(levels, cols)) {
+            r.fill_rect(flux::Rect{x + float(run.col0) * cw,
+                                   y + 2.0f + float(run.row) * rh,
+                                   float(run.len) * cw + 1.0f, rh + 1.0f},
+                        wf_color(run.level));
         }
     };
     return flux::view(std::move(p));

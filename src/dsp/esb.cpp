@@ -76,4 +76,16 @@ std::vector<EsbFrame> esb_scan(const std::vector<std::uint8_t>& bits) {
     return out;
 }
 
+std::string hex_dump(const std::vector<std::uint8_t>& bytes) {
+    static const char* kHex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(bytes.size() * 3);
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        if (i != 0) out.push_back(' ');
+        out.push_back(kHex[bytes[i] >> 4]);
+        out.push_back(kHex[bytes[i] & 0x0F]);
+    }
+    return out;
+}
+
 } // namespace hackrftool::dsp

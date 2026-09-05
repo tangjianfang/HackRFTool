@@ -685,6 +685,63 @@ static void test_waterfall_level_map() {
     check(hackrftool::dsp::waterfall_level(-95.0f) == 2, "深底噪 -95 → 深蓝可见");
 }
 
+static void test_esb_hex_dump() {
+    // 关键信号横幅用：载荷 hex 文本（大写、空格分隔、补零）
+    check(hackrftool::dsp::hex_dump({}).empty(), "空载荷 → 空串");
+    check(hackrftool::dsp::hex_dump({0xFB}) == "FB", "单字节");
+    check(hackrftool::dsp::hex_dump({0xFB, 0x50, 0x00}) == "FB 50 00",
+          "多字节空格分隔");
+    check(hackrftool::dsp::hex_dump({0x0A, 0xFF}) == "0A FF", "补零大写");
+}
+
+static void test_waterfall_runs() {
+    // 瀑布行程合并：同值横向连续格 → 一个矩形（绘制 fill_rect 数下降）
+    using hackrftool::dsp::waterfall_runs;
+    check(waterfall_runs({}, 0).empty(), "空输入 → 空");
+    check(waterfall_runs({1, 2, 3, 4, 5}, 4).empty(), "非整行 → 空（契约拒绝）");
+
+    const std::vector<int> one_row{2, 2, 2, 5, 5, 1};
+    const auto runs = waterfall_runs(one_row, 6);
+    check(runs.size() == 3, "3 段连续值 → 3 行程");
+    check(runs[0].row == 0 && runs[0].col0 == 0 && runs[0].len == 3 &&
+              runs[0].level == 2,
+          "行程 1 起 0 长 3 值 2");
+    check(runs[1].col0 == 3 && runs[1].len == 2 && runs[1].level == 5,
+          "行程 2 起 3 长 2 值 5");
+    check(runs[2].col0 == 5 && runs[2].len == 1 && runs[2].level == 1,
+          "行程 3 起 5 长 1 值 1");
+
+    std::vector<int> same(2 * 4, 7);
+    const auto r2 = waterfall_runs(same, 4);
+    check(r2.size() == 2 && r2[0].row == 0 && r2[1].row == 1 && r2[0].len == 4,
+          "全同值 → 每行 1 行程，不跨行");
+
+    const std::vector<int> distinct{1, 2, 3};
+    const auto r3 = waterfall_runs(distinct, 3);
+    check(r3.size() == 3 && r3[0].col0 == 0 && r3[1].col0 == 1 && r3[2].col0 == 2,
+          "全异值 → 逐格行程");
+
+    // 覆盖等价：行程总格数 == 输入格数
+    std::vector<int> mix(3 * 8);
+    for (std::size_t i = 0; i < mix.size(); ++i) mix[i] = int(i % 5);
+    std::size_t covered = 0;
+    for (const auto& r : waterfall_runs(mix, 8)) covered += r.len;
+    check(covered == mix.size(), "行程覆盖格数 == 输入格数");
+
+    // 实测压缩率（64×256：底噪平坦 + 突发带随机 → 日志记录合并前后矩形数）
+    std::vector<int> wf(64 * 256, 2);
+    unsigned seed = 42;
+    for (std::size_t row = 8; row < 20; ++row)
+        for (std::size_t col = 100; col < 140; ++col) {
+            seed = seed * 1103515245u + 12345u;
+            wf[row * 256 + col] = 2 + int((seed >> 16) % 12u);
+        }
+    const auto merged = waterfall_runs(wf, 256);
+    std::printf("waterfall_runs: 64x256 原始 %zu 格 → %zu 矩形（%.1f%%）\n",
+                wf.size(), merged.size(),
+                100.0 * double(merged.size()) / double(wf.size()));
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -713,6 +770,8 @@ int main() {
     test_live_bursts_ring_wrap();
     test_capture_sidecar();
     test_waterfall_level_map();
+    test_esb_hex_dump();
+    test_waterfall_runs();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }

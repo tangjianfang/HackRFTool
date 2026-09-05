@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace hackrftool::dsp {
@@ -17,5 +18,8 @@ struct EsbFrame {
 };
 
 [[nodiscard]] std::vector<EsbFrame> esb_scan(const std::vector<std::uint8_t>& bits);
+
+// 字节序列 → 大写 hex 文本，空格分隔（"FB 50 00"）；空输入 → 空串
+[[nodiscard]] std::string hex_dump(const std::vector<std::uint8_t>& bytes);
 
 } // namespace hackrftool::dsp

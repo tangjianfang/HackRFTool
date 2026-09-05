@@ -29,4 +29,16 @@ private:
     unsigned seq_ = 0;
 };
 
+// 同值横向连续格合并为一个行程（绘制矩形数下降：底噪平坦区整行 1 个矩形）。
+// levels 为 rows*cols 行主序；size 非 cols 整数倍视为契约违例返回空。
+struct WfRun {
+    std::size_t row = 0;
+    std::size_t col0 = 0;
+    std::size_t len = 0;
+    int level = 0;
+};
+
+[[nodiscard]] std::vector<WfRun> waterfall_runs(const std::vector<int>& levels,
+                                                std::size_t cols);
+
 } // namespace hackrftool::dsp

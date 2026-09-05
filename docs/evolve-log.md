@@ -1,10 +1,11 @@
 # evolve log — HackRFTool
 
-- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 86 断言
-- pointer: 停止（用户指令：完成 #4 后结束）
-- rounds done: 4
-- status: stopped-by-user（复盘已并入 #4 收尾）
-- metrics: findings 4 | fixes 4 | regressions 0
+- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 132 断言
+- pointer: #51（用户续作时从此开始）
+- rounds done: 5（#50 为用户指定轮号，#5–#49 未运行）
+- status: stopped-by-user（完成用户指定 #50 后停止）
+- metrics: findings 9 | fixes 12 | regressions 0（E4 重算：按轮次行累加）
+- epics pending: none
 
 ## Target pool
 
@@ -32,6 +33,7 @@
 #2 | T1.2+T1.3 | findings(2) | actions(2) | result(green+progress, 5 ctest) | diff(+28) | 报告落 exe 旁（exe_dir_path）；监测页扫描说明；独立检查员双确认（含真机 sweep 自测 PASS）
 #3 | T4.1 sidecar | findings(0) | actions(1) | result(green+progress, 5 ctest / 112 断言) | diff(+78) | IQ 参数侧车 red→green；接线 iq_capture+UI 录制；105→112 断言
 #4 | T4.3 色阶映射 | findings(0) | actions(1) | result(green+progress, 5 ctest / 119 断言) | diff(+52) | waterfall_level 纯函数+扩窗 [-110,-30]，深蓝档恢复可见；112→119 断言
+#50 | 用户指定：UI 性能与数据显示（顶部工具栏/底部状态栏布局、丝滑拉伸、关键信号标识、解析数据实时显示；皮肤库引入被否——红线禁新三方依赖，纯 Win32 重写属 epic 级且无性能收益） | findings(6) | actions(6) | result(green+progress, 5 ctest/132 断言) | diff(+172/-15) | 瀑布 fill_rect 16384→503（3.1%，waterfall_runs 纯函数+覆盖等价断言）；频谱补 0/-50 dB 刻度；频谱页控件拆两行（窄窗不裁切）；ESB 关键信号横幅+行绿粗+清空全复位；解调预算 2/build（风暴不掉帧，预算行不写缓存后续补全）；hex_dump 纯函数。检查员 6/6 成立；重放审计 #1/#50 通过；真机自测单窗 builds=259 frames=1059 / 全频段 builds=331 frames=1373 均 PASS；会话压缩中断后以 git diff+todo 对账续作（L3 verified+1，新立 L5）
 
 ## 运行总结（#1–#4，用户指令停止）
 

@@ -33,4 +33,21 @@ std::vector<float> WaterfallModel::snapshot() const noexcept {
     return out;
 }
 
+std::vector<WfRun> waterfall_runs(const std::vector<int>& levels, std::size_t cols) {
+    std::vector<WfRun> out;
+    if (cols == 0 || levels.size() % cols != 0) return out;
+    const std::size_t rows = levels.size() / cols;
+    out.reserve(levels.size() / 4);
+    for (std::size_t r = 0; r < rows; ++r) {
+        const int* line = levels.data() + r * cols;
+        std::size_t c0 = 0;
+        for (std::size_t c = 1; c <= cols; ++c) {
+            if (c < cols && line[c] == line[c0]) continue;
+            out.push_back(WfRun{r, c0, c - c0, line[c0]});
+            c0 = c;
+        }
+    }
+    return out;
+}
+
 } // namespace hackrftool::dsp

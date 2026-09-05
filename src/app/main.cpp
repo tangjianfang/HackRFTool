@@ -82,6 +82,8 @@ struct App {
     hackrftool::radio::IqRecorder recorder;                    // M5：UI 内 IQ 录制
     std::wstring rec_path;                                     // 当前录制文件（sidecar 用）
     std::map<unsigned long long, std::wstring> row_cache;      // 突发行文本（按 start_sample）
+    std::wstring last_esb;              // 最新 ESB 关键帧描述（地址+载荷 hex，横幅用）
+    unsigned demod_budget = 0;          // 每 build 解调预算（防突发风暴卡帧）
 
     flux::State<bool> running;
     flux::State<std::wstring> status;
@@ -281,12 +283,18 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
         header->children.push_back(
             flux::ui::badge(pal, flux::ui::BadgeKind::warning, L"全频段"));
 
-    // 控制行（WinFlux 的 button() 不带默认底色，须显式配色）
+    // 控制行 1：启停 + 模式 + 中心频率（窄窗口不溢出——单行 6 控件 700px 被裁切）
     flux::Props controls_p;
     controls_p.direction = flux::Direction::row;
     controls_p.align = flux::Align::center;
     controls_p.gap = 12.0f;
     auto controls = flux::view(std::move(controls_p));
+    // 控制行 2：增益 + 采样率
+    flux::Props controls2_p;
+    controls2_p.direction = flux::Direction::row;
+    controls2_p.align = flux::Align::center;
+    controls2_p.gap = 12.0f;
+    auto controls2 = flux::view(std::move(controls2_p));
     flux::Props btn_primary;
     btn_primary.background = pal.accent;
     btn_primary.hover_background = pal.accent_hover;
@@ -332,7 +340,7 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
             app.center_mhz.set(mhz);   // 最后一句
         }, std::move(btn_secondary)));
     }
-    controls->children.push_back(flux::ui::field(
+    controls2->children.push_back(flux::ui::field(
         pal, L"LNA " + std::to_wstring(unsigned(app.lna.get())) + L" dB",
         flux::slider(float(app.lna.get()), 8.0f, 40.0f, [&app](float v) {
             const unsigned gain = unsigned(v / 8.0f + 0.5f) * 8;
@@ -343,7 +351,7 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
             }
             app.lna.set(double(gain));   // 最后一句
         })));
-    controls->children.push_back(flux::ui::field(
+    controls2->children.push_back(flux::ui::field(
         pal, L"VGA " + std::to_wstring(unsigned(app.vga.get())) + L" dB",
         flux::slider(float(app.vga.get()), 2.0f, 62.0f, [&app](float v) {
             const unsigned gain = unsigned(v / 2.0f + 0.5f) * 2;
@@ -354,7 +362,7 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
             }
             app.vga.set(double(gain));   // 最后一句
         })));
-    controls->children.push_back(flux::ui::field(
+    controls2->children.push_back(flux::ui::field(
         pal, L"采样率 Msps",
         flux::ui::segmented(pal, {L"8", L"10", L"16", L"20"}, app.rate_index.get(),
                             [&app](int i) {
@@ -375,6 +383,7 @@ flux::ElementPtr spectrum_page(App& app, const flux::Palette& pal) {
     auto page_el = flux::view(std::move(page_p));
     page_el->children.push_back(std::move(header));
     page_el->children.push_back(std::move(controls));
+    page_el->children.push_back(std::move(controls2));
     if (app.sweep_on.get() == 0) {
         const std::vector<hackrftool::ui::SpectrumTick> ticks = {
             {app.center_mhz.get() - 10.0, L"-10M"},
@@ -542,6 +551,11 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
     std::wstring text = head;
 
     if (b.samples >= 128) {
+        // 每 build 解调预算 2 条：突发风暴时（自测实测每秒数十条）逐帧全量
+        // 解调会让 build 长时间阻塞、动画掉帧；预算耗尽的行先显示头部，
+        // 不写缓存，后续 build 预算恢复后补全 hex/ESB
+        if (app.demod_budget == 0) return text;
+        --app.demod_budget;
         // 解调切片上限 262144 样本（13ms）：增益饱和时"突发"会连成整环
         // （2M 样本），不限长会引发每行 16MB 的分配风暴
         const unsigned long long n_demod =
@@ -582,6 +596,17 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
                     }
                     text += L" len:" + std::to_wstring(fr.payload.size());
                 }
+                // 关键信号横幅：最新帧地址 + 全量载荷 hex（实时解析数据显示）
+                const auto& fr = frames.front();
+                app.last_esb = L"addr:";
+                for (const unsigned char a : fr.address) {
+                    wchar_t ab[8];
+                    swprintf(ab, 8, L"%02X", a);
+                    app.last_esb += ab;
+                }
+                app.last_esb +=
+                    L"  载荷[" + std::to_wstring(fr.payload.size()) + L"] " +
+                    widen(hackrftool::dsp::hex_dump(fr.payload));
             }
         }
     }
@@ -622,6 +647,8 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
     tools->children.push_back(flux::button(L"清空", [&app] {
         app.live.clear();
         app.row_cache.clear();
+        app.esb_hits.store(0);
+        app.last_esb.clear();
     }, std::move(btn_clear)));
     flux::Props btn_rec;
     btn_rec.background = app.recorder.recording() ? pal.danger : pal.accent;
@@ -630,6 +657,31 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
     tools->children.push_back(
         flux::button(app.recorder.recording() ? L"■ 停止录制" : L"● 录制 IQ",
                      [&app] { record_toggle(app); }, std::move(btn_rec)));
+
+    // 关键信号横幅：ESB 帧计数 + 最新解出帧的地址/载荷实时显示（M5 教训：
+    // ESB✓ 埋在 60 行文本里无法一眼识别关键信号）
+    flux::Props key_p;
+    key_p.direction = flux::Direction::row;
+    key_p.align = flux::Align::center;
+    key_p.gap = 8.0f;
+    auto key = flux::view(std::move(key_p));
+    const unsigned esb_total = app.esb_hits.load();
+    if (esb_total > 0) {
+        key->children.push_back(
+            flux::ui::badge(pal, flux::ui::BadgeKind::success, L"ESB 关键信号"));
+        flux::Props key_text_p;
+        key_text_p.text_align = flux::Align::start;
+        key->children.push_back(flux::ui::caption(
+            pal, L"共 " + std::to_wstring(esb_total) + L" 帧 · 最新 " + app.last_esb,
+            std::move(key_text_p)));
+    } else {
+        key->children.push_back(
+            flux::ui::badge(pal, flux::ui::BadgeKind::neutral, L"未检出 ESB"));
+        flux::Props key_text_p;
+        key_text_p.text_align = flux::Align::start;
+        key->children.push_back(flux::ui::caption(
+            pal, L"检测到 nRF24 兼容帧时在此实时显示地址与载荷", std::move(key_text_p)));
+    }
 
     // 概览行
     flux::Props sum_p;
@@ -649,12 +701,15 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
     const std::size_t n_rows = std::min<std::size_t>(bursts.size(), 60);
     for (std::size_t k = 0; k < n_rows; ++k) {
         const auto& b = bursts[bursts.size() - 1 - k];   // 新→旧
+        const std::wstring row_text = burst_row_text(app, b, fs_hz);
         flux::Props row_p;
         row_p.text_align = flux::Align::start;
         row_p.font_size_pt = 12.0f;
-        row_p.text_color = pal.text;
-        list->children.push_back(
-            flux::label(burst_row_text(app, b, fs_hz), std::move(row_p)));
+        // 关键信号行（识别出 ESB 帧）绿色加粗，普通行次级色弱化
+        const bool key_row = row_text.find(L"ESB✓") != std::wstring::npos;
+        row_p.bold = key_row;
+        row_p.text_color = key_row ? pal.success : pal.text_secondary;
+        list->children.push_back(flux::label(row_text, std::move(row_p)));
     }
     flux::Props page_p;
     page_p.direction = flux::Direction::column;
@@ -663,6 +718,7 @@ flux::ElementPtr capture_page(App& app, const flux::Palette& pal) {
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
     page_el->children.push_back(std::move(tools));
+    page_el->children.push_back(std::move(key));
     page_el->children.push_back(std::move(summary));
     // 视口 flex_grow 占满剩余高度，否则列内视口高度塌 0 导致列表不渲染
     flux::Props scroll_p;
@@ -708,6 +764,7 @@ flux::ElementPtr build(App& app) {
     // M5：实时突发检测——必须在页面构建之前跑，否则行文本生成滞后一个
     // 构建周期，突发已被环形缓冲挤出（read_slice 失败 → 永久缓存无 hex）
     if (app.running.get()) app.live.refresh(float(app.burst_thr.get()));
+    app.demod_budget = 2;   // 本帧解调配额（build 内突发行文本生成消耗）
 
     const flux::Palette& pal = app.host.palette();
 
