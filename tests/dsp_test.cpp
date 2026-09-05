@@ -790,6 +790,24 @@ static void test_status_dynamic() {
     noframe.has_frame = false;
     check(status_dynamic(noframe).find(L"帧") == std::wstring::npos,
           "无帧不显示帧号");
+
+    // 状态栏分段（原生状态栏逐格文本；空段留白）
+    std::wstring parts[5];
+    hackrftool::ui::status_parts(sw, parts);
+    check(parts[0] == L"扫描 段 2/5 @ 2417.5 MHz", "分段 0 扫描段");
+    check(parts[1] == L"20 Msps · LNA 16/VGA 16", "分段 1 采样率增益");
+    check(parts[2] == L"帧 1000", "分段 2 帧号");
+    check(parts[3].empty() && parts[4].empty(), "未录制/无 ESB → 空段");
+    std::wstring rec_parts[5];
+    hackrftool::ui::status_parts(rec, rec_parts);
+    check(rec_parts[3] == L"●录制 3MB", "分段 3 录制 MB");
+    StatusInfo esb = rx;
+    esb.esb_hits = 7;
+    std::wstring esb_parts[5];
+    hackrftool::ui::status_parts(esb, esb_parts);
+    check(esb_parts[4] == L"ESB 7", "分段 4 ESB 帧数");
+    check(status_dynamic(esb).find(L"ESB 7") != std::wstring::npos,
+          "动态段含 ESB（>0 时）");
 }
 
 int main() {

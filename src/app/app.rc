@@ -1,0 +1,5 @@
+// comctl32 v6 主题清单：原生 Toolbar/StatusBar/Trackbar 获得现代外观
+//（DPI 感知由运行时 SetProcessDpiAwarenessContext 处理，清单不重复声明避免冲突）
+#include <windows.h>
+
+1 RT_MANIFEST "app.manifest"

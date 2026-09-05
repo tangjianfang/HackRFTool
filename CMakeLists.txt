@@ -20,6 +20,7 @@ include(WinFluxCompilerOptions)
 
 add_executable(HackRFTool WIN32
     src/app/main.cpp
+    src/app/app.rc
     src/dsp/analyzer.cpp
     src/dsp/burst_detector.cpp
     src/dsp/channel_monitor.cpp
@@ -35,7 +36,9 @@ add_executable(HackRFTool WIN32
     src/ui/status_text.cpp
     src/ui/views.cpp)
 target_include_directories(HackRFTool PRIVATE src ${MSYS2_UCRT64_INCLUDE})
-target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32 Dbghelp)
+target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32 Dbghelp Comctl32)
+# 清单由 app.rc 内嵌（RT_MANIFEST），关闭链接器自动生成避免 CVT1100 重复
+set_target_properties(HackRFTool PROPERTIES LINK_FLAGS "/MANIFEST:NO")
 flux_apply_compiler_options(HackRFTool)
 
 foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)

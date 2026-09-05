@@ -8,7 +8,9 @@
 cmake --build --preset x64-release && ctest --preset x64-release
 ```
 
-- 唯一验收命令，应 5/5 通过（138 断言单测 + 端到端合成管线 + WinFlux 测试；两个真机整机自测无设备时退出码 42 → CTest 记 SKIP）
+- 一键构建脚本：`build.bat`（任意 CWD 调用均可，自动定位仓库根：配置 + 构建 x64-release 全部 target；只构建不跑测试；ASCII/CRLF——cmd 按 ANSI 码页解析批处理）
+
+- 唯一验收命令，应 5/5 通过（145 断言单测 + 端到端合成管线 + WinFlux 测试；两个真机整机自测无设备时退出码 42 → CTest 记 SKIP）
 - **跑 ctest 前先确认构建零 error**：构建失败后 ctest 跑的是陈旧二进制，"全绿"是假象（docs/lessons.md L1，已两次踩中）
 - 整机自测必须 Release：Debug 下全量 FFT 会 CPU 饥饿
 - Preset：`x64-debug` / `x64-release`（VS2022 生成器），产物在 `out/build/<preset>/`；libhackrf 等三个 DLL 由构建后步骤从 `C:/msys64/ucrt64/bin` 复制到 exe 旁
@@ -22,11 +24,14 @@ cmake --build --preset x64-release && ctest --preset x64-release
 - `src/app/main.cpp` — UI 组装、线程与状态（仓库最大文件 1200+ 行）
 - `tools/` — 控制台工具（hackrf_smoke / iq_capture / gfsk_analyze）与排障脚本；每个 CMake target 只编译 CMakeLists 里列出的 src 子集，**新增文件须同步加进相关 target**
 
-## WinFlux UI 铁律
+## UI 架构（#52 原生 Win32 骨架）
 
-- **`State::set()` 必须永远是处理器最后一句**：set() 会同步重建元素树、释放正在执行的 lambda，set 之后访问 app 即 UAF（真实崩溃根因，lessons.md L4）。副作用全部前置；多步逻辑包成自由函数、`App&` 走参数
-- 工程规范：C++20 / 仅 x64（CMake 强制）/ `/W4` 零告警（`flux_apply_compiler_options` 统一施加）
-- WinFlux 仓库经 `add_subdirectory` 引入（`WINFLUX_ROOT` 默认 `C:/tjf/github/WinFlux`），上游组件问题本仓库不可修，只记录
+- 骨架 = 原生主窗口（类 `HackRFToolMain`）：顶部 **ToolbarWindow32**（图标按钮：启停/页签×3 单选组/全频段/录制/锁定/导出/清空/应用频率；图标为 GDI 运行时自绘 24px、洋红键转 alpha）+ 设置行原生控件（EDIT/COMBOBOX/TRACKBAR/CHECKBOX，随页签显隐；**组合框 MoveWindow 高度必须含下拉列表**——Win32 契约，ctl_h 只给静态高度会展不开）+ 底部 **msctls_statusbar32** 六分段（文本来自 `status_parts` 纯函数）
+- 中间内容区 = WinFlux Host **重父化子窗口**（`Host::create` 后清 WS_POPUP 家族、加 WS_CHILD，SetParent 进主窗）：只渲染图表（D2D/DComp 管线不变），控件值是 App 普通字段（每帧重建，无 flux::State——set-收尾铁律随之退役，见 lessons L4 注记）
+- 外层 GetMessage 泵（非 `host.run()`）；WM_QUIT 来自主窗销毁或 selftest 线程；`sync_chrome` 在 build 心跳里同步工具栏态（有缓存去重）与状态栏分段
+- comctl32 v6 清单内嵌于 `src/app/app.rc`（CMake 已设 `/MANIFEST:NO` 防重复）；DPI 感知靠 `flux::enable_per_monitor_dpi_v2()`（**wWinMain 里、任何窗口创建前**——重写 main.cpp 时误删过一次，整窗模糊，L7）
+- 已知上游限制：WinFlux `Host::create` 硬编码 SW_SHOW → 启动时顶层窗闪现一帧后才重父化（wontfix-upstream，建议上游加 Config.visible）；PrintWindow 截图会漏画原生子控件 → 验证 UI 用 `tools/screenshot-fg.ps1`（前台 BitBlt）
+- 工程规范：C++20 / 仅 x64（CMake 强制）/ `/W4` 零告警（`flux_apply_compiler_options` 统一施加）；WinFlux 仓库经 `add_subdirectory` 引入（`WINFLUX_ROOT` 默认 `C:/tjf/github/WinFlux`），上游组件问题本仓库不可修，只记录
 
 ## 已知坑
 

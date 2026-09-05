@@ -1,10 +1,10 @@
 # evolve log — HackRFTool
 
-- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 138 断言
-- pointer: #52（N=50 运行进行中；上下文吃紧即在此checkpoint，新会话从 #52 续作）
-- rounds done: 6（#50–#51 为用户指定轮号/主题，#5–#49 未运行）
+- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 145 断言
+- pointer: #53（N=50 运行进行中；上下文吃紧即在此 checkpoint，新会话从 #53 续作）
+- rounds done: 7（#50–#52 为用户指定轮号/主题，#5–#49 未运行）
 - status: active（用户 N=50 主题运行：UI 性能与数据显示；主题耗尽或池清空按收敛规则提前终止）
-- metrics: findings 16 | fixes 19 | regressions 0（E4 按轮次行累加）
+- metrics: findings 19 | fixes 22 | regressions 0（E4 按轮次行累加）
 - epics pending: none
 
 ## Target pool
@@ -35,6 +35,7 @@
 #4 | T4.3 色阶映射 | findings(0) | actions(1) | result(green+progress, 5 ctest / 119 断言) | diff(+52) | waterfall_level 纯函数+扩窗 [-110,-30]，深蓝档恢复可见；112→119 断言
 #50 | 用户指定：UI 性能与数据显示（顶部工具栏/底部状态栏布局、丝滑拉伸、关键信号标识、解析数据实时显示；皮肤库引入被否——红线禁新三方依赖，纯 Win32 重写属 epic 级且无性能收益） | findings(6) | actions(6) | result(green+progress, 5 ctest/132 断言) | diff(+172/-15) | 瀑布 fill_rect 16384→503（3.1%，waterfall_runs 纯函数+覆盖等价断言）；频谱补 0/-50 dB 刻度；频谱页控件拆两行（窄窗不裁切）；ESB 关键信号横幅+行绿粗+清空全复位；解调预算 2/build（风暴不掉帧，预算行不写缓存后续补全）；hex_dump 纯函数。检查员 6/6 成立；重放审计 #1/#50 通过；真机自测单窗 builds=259 frames=1059 / 全频段 builds=331 frames=1373 均 PASS；会话压缩中断后以 git diff+todo 对账续作（L3 verified+1，新立 L5）
 #51 | 用户主题（N=50 首轮）：统一顶栏/中间纯内容区/底部状态栏 | findings(7) | actions(7) | result(green+progress, 5 ctest/138 断言) | diff(+388/-262) | 布局契约落地：toolbar=页签+全局徽章（含 ESB N 帧任何页可见、●录制 NMB）+全局设备两行+页上下文行，三页改纯显示，状态栏独立成条；status_dynamic 抽纯函数 red→green（132→138 断言）；概览拆加粗计数+次级提示；删冗余「恢复自动」；瀑布空态占位；刻度底衬（检查员驳回频谱页绘制顺序：底衬画在波形前无效→已修：ylab 移波形后）。wontfix 记录：-100 刻度避让（#50 有据）、tabs/segmented 汉字间距与滑块手柄尺寸（上游组件）；LNK1104 残留进程锁 exe 被"构建零告警"前置检查拦住（L1 verified+1）
+#52 | 用户指令级 epic：原生 Win32 骨架重构（#51 的 WinFlux 自绘重排被判"布局没变化"，三次下达后经计划模式确认方案） | findings(3) | actions(1) | result(green+progress, 5 ctest/145 断言) | diff(+910/-540) | 原生主窗（HackRFToolMain）+顶部工具栏（ToolbarWindow32：启停/页签×3 单选/全频段/录制/锁定/导出/清空/应用频率，GDI 自绘 24px 图标洋红键透明）+设置行原生控件（EDIT/COMBOBOX/TRACKBAR/CHECKBOX 随页显隐）+底部 msctls_statusbar32 六分段（status_parts 新纯函数，138→145 断言）；WinFlux Host 重父化为内容区子窗（保留 D2D/DComp 管线，图表不迁移——用户选定）；app.manifest（comctl32 v6）+ /MANIFEST:NO 防重复；flux::State 全退场（普通字段+每帧重建），set-收尾铁律随之退役；外层 GetMessage 泵替换 host.run()；selfclick 退役（L4 根因已修）。检查员 4/6：DPI 感知回归（enable_per_monitor_dpi_v2 误删→已修）+组合框下拉高度（MoveWindow 高度须含列表→已修 drop 标志）实锤修复；启动 WinFlux 顶层窗闪现一帧=wontfix-upstream（Host::create 硬编码 SW_SHOW，建议上游加 Config.visible）。验证：真机 ctest 5/5（builds=256/frames=1045 PASS）、三页前台截图+1500x950 拉伸截图全部正常；PrintWindow PW_RENDERFULLCONTENT 漏画普通子控件（L6，新增 screenshot-fg.ps1 BitBlt 前台抓图）
 
 ## 运行总结（#1–#4，用户指令停止）
 

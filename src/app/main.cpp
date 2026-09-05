@@ -1,8 +1,12 @@
-// HackRFTool —— 2.4G 频谱检测工具（M1 频谱 + M2 信道监测）
+// HackRFTool —— 2.4G 频谱检测工具
+// 骨架（#52）：原生 Win32 主窗口 = 顶部工具栏（两行：图标按钮行 + 设置行）
+// + 中间内容区（WinFlux Host 重父化为子窗口，D2D/DComp 渲染图表）
+// + 底部原生状态栏。全部按钮/设置/图标状态在工具栏，内容区纯显示。
 #include <windows.h>
 #include <dbghelp.h>
 #include <minidumpapiset.h>
 
+#include <commctrl.h>
 #include <commdlg.h>
 
 #include <algorithm>
@@ -15,6 +19,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <flux/flux.hpp>
 #include <flux/Components.hpp>
@@ -86,31 +91,59 @@ struct App {
     std::wstring last_esb;              // 最新 ESB 关键帧描述（地址+载荷 hex，横幅用）
     unsigned demod_budget = 0;          // 每 build 解调预算（防突发风暴卡帧）
 
-    flux::State<bool> running;
-    flux::State<std::wstring> status;
-    flux::State<std::wstring> freq_text;   // MHz 文本
-    flux::State<double> center_mhz;
-    flux::State<double> lna;   // 8..40，步进 8
-    flux::State<double> vga;   // 2..62，步进 2
-    flux::State<int> rate_index;
+    // ---- 控件值（#52 起由原生控件持有；内容区每帧重建，普通字段即够） ----
+    bool running = false;
+    int page = 0;                 // 0=频谱 1=信道监测 2=实时抓包
+    int sweep_on = 0;             // 0=单窗 1=全频段
+    int rate_index = 3;           // kRatesMsps 下标
+    double center_mhz = 2450.0;
+    unsigned lna = 16;            // 8..40，步进 8（默认 16/16：32/30 时域饱和，M3 教训）
+    unsigned vga = 16;            // 2..62，步进 2
+    double threshold = -70.0;     // 活动阈值 dB
+    double burst_thr = -40.0;     // 突发检测阈值 dB
+    int symrate_idx = 0;          // 0=1 Mbps 1=2 Mbps
+    bool auto_track = true;
+    double mon_lock_mhz = 0.0;    // 手动锁定频率（中心变化时重算 bin）
+    std::wstring status = L"未开始（点击「开始」）";
+    hackrftool::dsp::SpectrumFrame frame;   // 本帧快照（build 前拉取）
+
     // M4：全频段扫描（跳频在专职后台线程，UI 只读以下原子量）
-    flux::State<int> sweep_on;             // 0=单窗 1=全频段
     std::atomic<int> sweep_live{0};        // 1 = 扫描线程正在跳频
     std::atomic<std::size_t> seg_idx{4};   // 从 4 起步，首次跳频即到段 0
     std::atomic<unsigned long long> hop_ms{0};
-    // M2：监测页
-    flux::State<int> page;                 // 0=频谱 1=信道监测 2=实时抓包
-    flux::State<bool> auto_track;          // 自动跟踪最强峰
-    flux::State<std::wstring> mon_text;    // 监测目标 MHz 文本
-    flux::State<double> threshold;         // 活动阈值 dB
-    flux::State<double> burst_thr;         // M5：突发检测阈值 dB
-    flux::State<int> symrate_idx;          // M6：解调符号率 0=1M 1=2M
-    double mon_lock_mhz = 0.0;             // M6：手动锁定频率（中心变化时重算 bin）
-    hackrftool::dsp::SpectrumFrame frame;   // 本帧快照（build 前拉取）
     // M6：自测指标（selftest 模式汇总断言用）
     std::atomic<unsigned> build_count{0};
     std::atomic<unsigned> esb_hits{0};
-    bool selfclick = false;   // 崩溃复现模式：点击「模式→全频段」
+
+    // ---- 原生骨架 HWND（#52） ----
+    HWND main_wnd = nullptr;
+    HWND toolbar = nullptr;
+    HWND statusbar = nullptr;
+    HWND edit_freq = nullptr;      // 中心频率（频谱页设置行）
+    HWND edit_mon = nullptr;       // 目标频率（监测页设置行）
+    HWND combo_rate = nullptr;     // 采样率
+    HWND combo_symrate = nullptr;  // 解调符号率（抓包页）
+    HWND track_lna = nullptr;
+    HWND track_vga = nullptr;
+    HWND track_threshold = nullptr;
+    HWND track_burst = nullptr;
+    HWND check_autotrack = nullptr;
+    HWND lbl_lna = nullptr, lbl_vga = nullptr, lbl_thr = nullptr, lbl_burst = nullptr;
+    HIMAGELIST images = nullptr;   // 工具栏图标
+    HFONT font = nullptr;          // 原生控件消息字体（DPI 缩放）
+    // 设置行槽位：创建顺序即摆放顺序；w 为逻辑宽度（layout 时按 DPI 缩放）。
+    // drop=true 表示组合框——MoveWindow 高度须含下拉列表（Win32 契约），
+    // 否则 CBS_DROPDOWNLIST 只剩 ~0 行可展开。
+    struct CtlSlot {
+        HWND h;
+        int w;
+        bool drop = false;
+    };
+    std::vector<CtlSlot> row_common;    // 所有页可见
+    std::vector<CtlSlot> row_monitor;   // 仅监测页
+    std::vector<CtlSlot> row_capture;   // 仅抓包页
+    // 工具栏状态同步缓存（避免每帧重复 TB_SETSTATE 消息）
+    int sync_run = -1, sync_page = -1, sync_sweep = -1, sync_rec = -1;
 };
 
 constexpr double kSweepLoMhz = 2400.0;
@@ -177,53 +210,41 @@ void set_sweep_live(App& app, bool on) {
     }
 }
 
-// 从当前 State 读出完整配置（调用方保证在 set 之前调用）
+// 从当前控件值读出完整配置
 hackrftool::radio::RadioConfig current_radio_cfg(App& app) {
     hackrftool::radio::RadioConfig cfg;
-    cfg.center_hz = app.center_mhz.get() * 1e6;
-    cfg.sample_rate_hz = kRatesMsps[size_t(app.rate_index.get())] * 1e6;
-    cfg.lna_gain_db = unsigned(app.lna.get());
-    cfg.vga_gain_db = unsigned(app.vga.get());
+    cfg.center_hz = app.center_mhz * 1e6;
+    cfg.sample_rate_hz = kRatesMsps[size_t(app.rate_index)] * 1e6;
+    cfg.lna_gain_db = app.lna;
+    cfg.vga_gain_db = app.vga;
     return cfg;
-}
-
-// 点击处理器专用：纯执行、不写任何 State——set() 会同步重建 UI 树并释放
-// 正在执行的 lambda 存储，其后处理器内不得再访问 app（含普通成员）
-bool radio_apply_now(App& app, const hackrftool::radio::RadioConfig& cfg) {
-    std::string err;
-    if (!app.radio.apply(cfg, &err)) {
-        app.status.set(L"配置失败: " + widen(err));   // 错误路径即终止，可接受
-        return false;
-    }
-    return true;
 }
 
 void apply_radio(App& app) {
     hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
     std::string err;
     if (!app.radio.apply(cfg, &err)) {
-        app.status.set(L"配置失败: " + widen(err));
+        app.status = L"配置失败: " + widen(err);
         return;
     }
-    // 频率等实时信息由状态栏按模式动态拼接（M5 清理：不再固化在状态文本里）
-    app.status.set(L"接收中");
+    app.status = L"接收中";
 }
 
 // 设备打开失败的统一提示：两大最常见原因直接给用户（多实例占用 / 固件已知
-// bug 需软复位——README 2.1）。set 为处理器最后一句，铁律合规。
+// bug 需软复位——README 2.1）。
 void device_open_failed(App& app, const std::string& err) {
-    app.status.set(L"打开失败: " + widen(err) +
-                   L" ｜ 排查：① 是否已有 HackRFTool 在运行（独占设备）"
-                   L"② 设备重插后先 hackrf_spiflash -R 软复位");
+    app.status = L"打开失败: " + widen(err) +
+                 L" ｜ 排查：① 是否已有 HackRFTool 在运行（独占设备）"
+                 L"② 设备重插后先 hackrf_spiflash -R 软复位";
 }
 
 void toggle_rx(App& app) {
-    if (app.running.get()) {
+    if (app.running) {
         set_sweep_live(app, false);
         if (app.recorder.recording()) app.recorder.stop();
         app.radio.stop_rx();
-        app.running.set(false);
-        app.status.set(L"已停止");
+        app.running = false;
+        app.status = L"已停止";
         return;
     }
     std::string err;
@@ -233,42 +254,67 @@ void toggle_rx(App& app) {
     }
     apply_radio(app);
     if (!app.radio.start_rx(&rx_trampoline_ui, &app, &err)) {
-        app.status.set(L"启动接收失败: " + widen(err));
+        app.status = L"启动接收失败: " + widen(err);
         return;
     }
-    app.running.set(true);
-    if (app.sweep_on.get() == 1) set_sweep_live(app, true);
+    app.running = true;
+    if (app.sweep_on == 1) set_sweep_live(app, true);
 }
 
-// 自由函数（App& 经参数传递）：lambda 捕获在 set 重建后失效，正文须在此
+// 应用中心频率（工具栏「应用频率」）：读取设置行 EDIT，重算监测锁定 bin
+void apply_center_freq(App& app) {
+    wchar_t buf[32] = {};
+    GetWindowTextW(app.edit_freq, buf, 32);
+    const double mhz = clamp_center(std::wcstod(buf, nullptr));
+    const bool relock = app.mon_lock_mhz > 0.0 && !app.auto_track;
+    if (app.running) {
+        hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+        cfg.center_hz = mhz * 1e6;
+        std::string err;
+        if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
+    }
+    if (relock) app.monitor.set_fixed_bin(mhz_to_bin(app.mon_lock_mhz, mhz));
+    app.center_mhz = mhz;
+    SetWindowTextW(app.edit_freq, wd1(mhz).c_str());   // 回写规范化文本
+}
+
 void monitor_lock(App& app) {
-    const double mhz =
-        clamp_center(std::wcstod(app.mon_text.get().c_str(), nullptr));
+    wchar_t buf[32] = {};
+    GetWindowTextW(app.edit_mon, buf, 32);
+    const double mhz = clamp_center(std::wcstod(buf, nullptr));
     app.mon_lock_mhz = mhz;   // 记住目标频率，中心变化时重算 bin（M6）
-    app.monitor.set_fixed_bin(mhz_to_bin(mhz, app.center_mhz.get()));
+    app.monitor.set_fixed_bin(mhz_to_bin(mhz, app.center_mhz));
     app.monitor.set_mode(hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
-    const std::wstring msg =
-        L"监测已锁定 " + wd1(mhz) + L" MHz（bin " +
-        std::to_wstring(app.monitor.tracked_bin()) + L"）";
-    app.auto_track.set(false);
-    app.status.set(msg);   // 最后一句
+    app.status = L"监测已锁定 " + wd1(mhz) + L" MHz（bin " +
+                 std::to_wstring(app.monitor.tracked_bin()) + L"）";
+    app.auto_track = false;
+    if (app.check_autotrack != nullptr)
+        SendMessageW(app.check_autotrack, BM_SETCHECK, BST_UNCHECKED, 0);
 }
 
 void export_csv_dialog(App& app) {
     wchar_t path[MAX_PATH] = L"hackrftool-monitor.csv";
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = app.main_wnd;
     ofn.lpstrFilter = L"CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrDefExt = L"csv";
     ofn.Flags = OFN_OVERWRITEPROMPT;
     if (!GetSaveFileNameW(&ofn)) return;
-    app.status.set(app.monitor.export_csv(path) ? L"已导出: " + std::wstring(path)
-                                                : L"导出失败（无法写文件）");
+    app.status = app.monitor.export_csv(path) ? L"已导出: " + std::wstring(path)
+                                              : L"导出失败（无法写文件）";
 }
 
-// ---- 频谱页（M1）：纯显示（全部控制已收进顶部工具栏） ----------------------
+void clear_bursts(App& app) {
+    app.live.clear();
+    app.row_cache.clear();
+    app.esb_hits.store(0);
+    app.last_esb.clear();
+}
+
+// ---- 内容区三页（纯显示；全部控制在顶部工具栏） ------------------------------
 
 flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
     flux::Props page_p;
@@ -277,15 +323,15 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
     page_p.gap = 8.0f;
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
-    if (app.sweep_on.get() == 0) {
+    if (app.sweep_on == 0) {
         const std::vector<hackrftool::ui::SpectrumTick> ticks = {
-            {app.center_mhz.get() - 10.0, L"-10M"},
-            {app.center_mhz.get(), L"中心"},
-            {app.center_mhz.get() + 10.0, L"+10M"},
+            {app.center_mhz - 10.0, L"-10M"},
+            {app.center_mhz, L"中心"},
+            {app.center_mhz + 10.0, L"+10M"},
         };
         page_el->children.push_back(hackrftool::ui::spectrum_view(
-            pal, app.frame.db, app.frame.peak, app.center_mhz.get() - 10.0,
-            app.center_mhz.get() + 10.0, ticks, app.frame.seq));
+            pal, app.frame.db, app.frame.peak, app.center_mhz - 10.0,
+            app.center_mhz + 10.0, ticks, app.frame.seq));
         page_el->children.push_back(
             hackrftool::ui::waterfall_view(pal, app.waterfall, app.waterfall.seq()));
     } else {
@@ -302,11 +348,9 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
     return page_el;
 }
 
-// ---- 监测页（M2）：纯显示（目标选择/阈值/导出已收进顶部工具栏） ------------
-
 flux::ElementPtr monitor_display(App& app, const flux::Palette& pal) {
     // 统计行
-    const auto st = app.monitor.stats(float(app.threshold.get()));
+    const auto st = app.monitor.stats(float(app.threshold));
     const std::wstring stats_text =
         (st.count == 0)
             ? L"暂无统计（等待数据）"
@@ -326,9 +370,9 @@ flux::ElementPtr monitor_display(App& app, const flux::Palette& pal) {
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
     page_el->children.push_back(hackrftool::ui::rssi_strip(
-        pal, app.monitor.series(), float(app.threshold.get()), app.frame.seq));
+        pal, app.monitor.series(), float(app.threshold), app.frame.seq));
     page_el->children.push_back(std::move(stats_el));
-    if (app.sweep_on.get() == 1) {
+    if (app.sweep_on == 1) {
         // T1.3：扫描模式下监测语义说明（M2 遗留）
         flux::Props note_p;
         note_p.text_align = flux::Align::start;
@@ -339,25 +383,24 @@ flux::ElementPtr monitor_display(App& app, const flux::Palette& pal) {
     return page_el;
 }
 
-// ---- 实时抓包页（M5）：纯显示（工具行已收进顶部工具栏） ---------------------
-
 void record_toggle(App& app) {
     if (app.recorder.recording()) {
         app.recorder.stop();
-        // 参数 sidecar：按停止时配置写 <path>.txt（自由函数读 State 安全）
+        // 参数 sidecar：按停止时配置写 <path>.txt
         hackrftool::radio::SidecarInfo info;
-        info.center_hz = app.center_mhz.get() * 1e6;
-        info.sample_rate_hz = kRatesMsps[size_t(app.rate_index.get())] * 1e6;
-        info.lna_db = unsigned(app.lna.get());
-        info.vga_db = unsigned(app.vga.get());
+        info.center_hz = app.center_mhz * 1e6;
+        info.sample_rate_hz = kRatesMsps[size_t(app.rate_index)] * 1e6;
+        info.lna_db = app.lna;
+        info.vga_db = app.vga;
         (void)hackrftool::radio::write_capture_sidecar(app.rec_path, info);
-        app.status.set(L"录制完成: " + std::to_wstring(app.recorder.bytes_written()) +
-                       L" 字节（参数已写 .txt）");
+        app.status = L"录制完成: " + std::to_wstring(app.recorder.bytes_written()) +
+                     L" 字节（参数已写 .txt）";
         return;
     }
     wchar_t path[MAX_PATH] = L"hackrftool-iq.cs8";
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = app.main_wnd;
     ofn.lpstrFilter = L"IQ 采集 (*.cs8)\0*.cs8\0所有文件 (*.*)\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
@@ -366,10 +409,10 @@ void record_toggle(App& app) {
     if (!GetSaveFileNameW(&ofn)) return;
     app.rec_path = path;
     if (!app.recorder.start(path)) {
-        app.status.set(L"无法创建录制文件");
+        app.status = L"无法创建录制文件";
         return;
     }
-    app.status.set(L"录制中…");
+    app.status = L"录制中…";
 }
 
 // 突发行文本（懒生成 + 缓存）：时间/时长/峰值 + GFSK 前 8 字节 hex + ESB 帧识别
@@ -404,7 +447,7 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
                     float(slice[static_cast<std::size_t>(i) * 2]),
                     float(slice[static_cast<std::size_t>(i) * 2 + 1])};
             const hackrftool::dsp::GfskDemod demod(
-                sample_rate_hz, app.symrate_idx.get() == 1 ? 2e6 : 1e6, 160e3);
+                sample_rate_hz, app.symrate_idx == 1 ? 2e6 : 1e6, 160e3);
             const auto r = demod.demod(cmplx, 0);
             const std::size_t n_bits = std::min<std::size_t>(r.bits.size(), 64);
             wchar_t hex[64];
@@ -457,7 +500,7 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
 }
 
 flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
-    const double fs_hz = kRatesMsps[size_t(app.rate_index.get())] * 1e6;
+    const double fs_hz = kRatesMsps[size_t(app.rate_index)] * 1e6;
 
     // 关键信号横幅：ESB 帧计数 + 最新解出帧的地址/载荷实时显示（M5 教训：
     // ESB✓ 埋在 60 行文本里无法一眼识别关键信号）
@@ -532,256 +575,9 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
     return page_el;
 }
 
-// ---- 顶部工具栏 -------------------------------------------------------------
-// 布局契约（用户要求）：全部按钮/设置/图标状态集中在窗口顶部一个工具栏；
-// 中间内容区只放数据显示；其他状态落底部状态栏。
+// ---- 内容区根（WinFlux，每帧重建） -----------------------------------------
 
-// 行 1 右侧图标状态徽章：运行/模式/录制/ESB 关键信号（任何页都可见）
-std::vector<flux::ElementPtr> toolbar_badges(App& app, const flux::Palette& pal) {
-    std::vector<flux::ElementPtr> out;
-    const bool running = app.running.get();
-    out.push_back(flux::ui::badge(
-        pal, running ? flux::ui::BadgeKind::success : flux::ui::BadgeKind::info,
-        running ? L"接收中" : L"已停止"));
-    out.push_back(flux::ui::badge(pal, flux::ui::BadgeKind::info, L"仅接收"));
-    if (app.sweep_on.get() == 1)
-        out.push_back(
-            flux::ui::badge(pal, flux::ui::BadgeKind::warning, L"全频段"));
-    if (app.recorder.recording())
-        out.push_back(flux::ui::badge(
-            pal, flux::ui::BadgeKind::danger,
-            L"● 录制 " +
-                std::to_wstring(app.recorder.bytes_written() / (1024 * 1024)) +
-                L"MB"));
-    const unsigned esb = app.esb_hits.load();
-    if (esb > 0)
-        out.push_back(flux::ui::badge(pal, flux::ui::BadgeKind::success,
-                                      L"ESB " + std::to_wstring(esb) + L" 帧"));
-    return out;
-}
-
-// 行 2/3：全局设备控制（启停+模式+频率 / 增益+采样率）
-flux::ElementPtr device_rows(App& app, const flux::Palette& pal) {
-    const bool running = app.running.get();
-
-    flux::Props row1_p;
-    row1_p.direction = flux::Direction::row;
-    row1_p.align = flux::Align::center;
-    row1_p.gap = 12.0f;
-    auto row1 = flux::view(std::move(row1_p));
-    flux::Props row2_p;
-    row2_p.direction = flux::Direction::row;
-    row2_p.align = flux::Align::center;
-    row2_p.gap = 12.0f;
-    auto row2 = flux::view(std::move(row2_p));
-
-    flux::Props btn_primary;
-    btn_primary.background = pal.accent;
-    btn_primary.hover_background = pal.accent_hover;
-    btn_primary.text_color = pal.on_accent;
-    row1->children.push_back(flux::button(running ? L"停止" : L"开始",
-                                          [&app] { toggle_rx(app); },
-                                          std::move(btn_primary)));
-    row1->children.push_back(flux::ui::field(
-        pal, L"模式",
-        flux::ui::segmented(pal, {L"单窗", L"全频段"}, app.sweep_on.get(), [&app](int i) {
-            // 铁律：set() 同步重建 UI 树会释放本 lambda 的存储，其后不得再
-            // 访问 app——副作用必须全部在 set 之前完成，set 永远是最后一句
-            const bool live = (i == 1) && app.running.get();
-            set_sweep_live(app, live);
-            app.sweep_on.set(i);
-        })));
-    if (app.sweep_on.get() == 0) {
-        row1->children.push_back(flux::ui::field(
-            pal, L"中心频率 MHz",
-            flux::text_input(app.freq_text.get(),
-                             [&app](std::wstring v) { app.freq_text.set(v); })));
-    }
-    flux::Props btn_secondary;
-    btn_secondary.background = pal.surface;
-    btn_secondary.hover_background = pal.surface_hover;
-    btn_secondary.text_color = pal.text;
-    btn_secondary.border_color = pal.border;
-    btn_secondary.border_width = 1.0f;
-    if (app.sweep_on.get() == 0) {
-        row1->children.push_back(flux::button(L"应用频率", [&app] {
-            // 副作用在前，set 收尾（set 后 lambda 存储已被重建释放）
-            const double mhz =
-                clamp_center(std::wcstod(app.freq_text.get().c_str(), nullptr));
-            const bool running = app.running.get();
-            const bool relock = app.mon_lock_mhz > 0.0 && !app.auto_track.get();
-            if (running) {
-                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
-                cfg.center_hz = mhz * 1e6;
-                (void)radio_apply_now(app, cfg);
-            }
-            if (relock)
-                app.monitor.set_fixed_bin(mhz_to_bin(app.mon_lock_mhz, mhz));
-            app.center_mhz.set(mhz);   // 最后一句
-        }, std::move(btn_secondary)));
-    }
-    row2->children.push_back(flux::ui::field(
-        pal, L"LNA " + std::to_wstring(unsigned(app.lna.get())) + L" dB",
-        flux::slider(float(app.lna.get()), 8.0f, 40.0f, [&app](float v) {
-            const unsigned gain = unsigned(v / 8.0f + 0.5f) * 8;
-            if (app.running.get()) {
-                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
-                cfg.lna_gain_db = gain;
-                (void)radio_apply_now(app, cfg);
-            }
-            app.lna.set(double(gain));   // 最后一句
-        })));
-    row2->children.push_back(flux::ui::field(
-        pal, L"VGA " + std::to_wstring(unsigned(app.vga.get())) + L" dB",
-        flux::slider(float(app.vga.get()), 2.0f, 62.0f, [&app](float v) {
-            const unsigned gain = unsigned(v / 2.0f + 0.5f) * 2;
-            if (app.running.get()) {
-                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
-                cfg.vga_gain_db = gain;
-                (void)radio_apply_now(app, cfg);
-            }
-            app.vga.set(double(gain));   // 最后一句
-        })));
-    row2->children.push_back(flux::ui::field(
-        pal, L"采样率 Msps",
-        flux::ui::segmented(pal, {L"8", L"10", L"16", L"20"}, app.rate_index.get(),
-                            [&app](int i) {
-                                if (app.running.get()) {
-                                    hackrftool::radio::RadioConfig cfg =
-                                        current_radio_cfg(app);
-                                    cfg.sample_rate_hz = kRatesMsps[size_t(i)] * 1e6;
-                                    (void)radio_apply_now(app, cfg);
-                                }
-                                app.rate_index.set(i);   // 最后一句
-                            })));
-
-    flux::Props col_p;
-    col_p.direction = flux::Direction::column;
-    col_p.align = flux::Align::stretch;
-    col_p.gap = 8.0f;
-    auto col = flux::view(std::move(col_p));
-    col->children.push_back(std::move(row1));
-    col->children.push_back(std::move(row2));
-    return col;
-}
-
-// 行 4：页上下文控制（监测/抓包页的页内设置；频谱页无 → 空行不占位）
-flux::ElementPtr context_row(App& app, const flux::Palette& pal) {
-    flux::Props row_p;
-    row_p.direction = flux::Direction::row;
-    row_p.align = flux::Align::center;
-    row_p.gap = 12.0f;
-    auto row = flux::view(std::move(row_p));
-    switch (app.page.get()) {
-    case 1:
-        row->children.push_back(flux::ui::field(
-            pal, L"自动跟踪最强信号",
-            flux::toggle_switch(app.auto_track.get(), [&app](bool on) {
-                app.monitor.set_mode(on
-                                         ? hackrftool::dsp::ChannelMonitor::Mode::auto_peak
-                                         : hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
-                app.auto_track.set(on);
-            })));
-        row->children.push_back(flux::ui::field(
-            pal, L"目标频率 MHz",
-            flux::text_input(app.mon_text.get(),
-                             [&app](std::wstring v) { app.mon_text.set(v); })));
-        {
-            flux::Props btn_lock;
-            btn_lock.background = pal.surface;
-            btn_lock.hover_background = pal.surface_hover;
-            btn_lock.text_color = pal.text;
-            btn_lock.border_color = pal.border;
-            btn_lock.border_width = 1.0f;
-            row->children.push_back(
-                flux::button(L"锁定该频率", [&app] { monitor_lock(app); },
-                             std::move(btn_lock)));
-        }
-        row->children.push_back(flux::ui::field(
-            pal, L"活动阈值 " + wd1(app.threshold.get()) + L" dB",
-            flux::slider(float(app.threshold.get()), -100.0f, -40.0f, [&app](float v) {
-                app.threshold.set(double(int(v)));
-            })));
-        {
-            flux::Props btn_export;
-            btn_export.background = pal.accent;
-            btn_export.hover_background = pal.accent_hover;
-            btn_export.text_color = pal.on_accent;
-            row->children.push_back(
-                flux::button(L"导出 CSV", [&app] { export_csv_dialog(app); },
-                             std::move(btn_export)));
-        }
-        break;
-    case 2:
-        row->children.push_back(flux::ui::field(
-            pal, L"突发阈值 " + wd1(app.burst_thr.get()) + L" dB",
-            flux::slider(float(app.burst_thr.get()), -60.0f, -20.0f, [&app](float v) {
-                app.burst_thr.set(double(int(v)));
-            })));
-        row->children.push_back(flux::ui::field(
-            pal, L"解调符号率",
-            flux::ui::segmented(pal, {L"1 Mbps", L"2 Mbps"}, app.symrate_idx.get(),
-                                [&app](int i) { app.symrate_idx.set(i); })));
-        {
-            flux::Props btn_clear;
-            btn_clear.background = pal.surface;
-            btn_clear.hover_background = pal.surface_hover;
-            btn_clear.text_color = pal.text;
-            btn_clear.border_color = pal.border;
-            btn_clear.border_width = 1.0f;
-            row->children.push_back(flux::button(L"清空", [&app] {
-                app.live.clear();
-                app.row_cache.clear();
-                app.esb_hits.store(0);
-                app.last_esb.clear();
-            }, std::move(btn_clear)));
-        }
-        {
-            flux::Props btn_rec;
-            btn_rec.background = app.recorder.recording() ? pal.danger : pal.accent;
-            btn_rec.hover_background = pal.accent_hover;
-            btn_rec.text_color = pal.on_accent;
-            row->children.push_back(
-                flux::button(app.recorder.recording() ? L"■ 停止录制" : L"● 录制 IQ",
-                             [&app] { record_toggle(app); }, std::move(btn_rec)));
-        }
-        break;
-    default:
-        break;
-    }
-    return row;
-}
-
-flux::ElementPtr toolbar(App& app, const flux::Palette& pal) {
-    flux::Props bar_p;
-    bar_p.direction = flux::Direction::column;
-    bar_p.align = flux::Align::stretch;
-    bar_p.gap = 8.0f;
-    bar_p.background = pal.surface;
-    bar_p.padding = flux::EdgeInsets{10.0f, 12.0f, 8.0f, 12.0f};
-    auto bar = flux::view(std::move(bar_p));
-
-    flux::Props row1_p;
-    row1_p.direction = flux::Direction::row;
-    row1_p.align = flux::Align::center;
-    row1_p.gap = 12.0f;
-    auto row1 = flux::view(std::move(row1_p));
-    row1->children.push_back(flux::ui::tabs(
-        pal, {L"频谱", L"信道监测", L"实时抓包"}, app.page.get(),
-        [&app](int i) { app.page.set(i); }));
-    flux::Props spacer_p;
-    spacer_p.flex_grow = 1.0f;
-    row1->children.push_back(flux::view(std::move(spacer_p)));
-    for (auto& b : toolbar_badges(app, pal)) row1->children.push_back(std::move(b));
-    bar->children.push_back(std::move(row1));
-
-    bar->children.push_back(device_rows(app, pal));
-    auto ctx = context_row(app, pal);
-    if (!ctx->children.empty()) bar->children.push_back(std::move(ctx));
-    return bar;
-}
-
-// ---- 根 -------------------------------------------------------------------
+void sync_chrome(App& app);   // 定义在原生骨架节（工具栏态 + 状态栏文本）
 
 flux::ElementPtr build(App& app) {
     // 心跳续期：每次 build 续 400ms——首帧冷启动（D2D/字体初始化）可能超
@@ -799,7 +595,7 @@ flux::ElementPtr build(App& app) {
     const auto f = app.analyzer.snapshot();
     if (!f.db.empty()) {
         const bool fresh = f.seq != app.frame.seq;
-        if (app.sweep_on.get() == 0) {
+        if (app.sweep_on == 0) {
             if (fresh) {
                 app.waterfall.push(f.db);
                 app.monitor.push(f);
@@ -817,68 +613,671 @@ flux::ElementPtr build(App& app) {
 
     // M5：实时突发检测——必须在页面构建之前跑，否则行文本生成滞后一个
     // 构建周期，突发已被环形缓冲挤出（read_slice 失败 → 永久缓存无 hex）
-    if (app.running.get()) app.live.refresh(float(app.burst_thr.get()));
+    if (app.running) app.live.refresh(float(app.burst_thr));
     app.demod_budget = 2;   // 本帧解调配额（build 内突发行文本生成消耗）
 
     const flux::Palette& pal = app.host.palette();
 
-    // 状态栏动态段（纯函数契约见 tests/dsp_test.cpp test_status_dynamic）
-    hackrftool::ui::StatusInfo si;
-    si.running = app.running.get();
-    si.sweep = app.sweep_on.get() == 1;
-    si.recording = app.recorder.recording();
-    si.seg_idx = int(app.seg_idx.load());
-    si.seg_center_mhz = seg_center_mhz(app.seg_idx.load());
-    si.center_mhz = app.center_mhz.get();
-    si.rate_msps = unsigned(kRatesMsps[size_t(app.rate_index.get())]);
-    si.lna_db = unsigned(app.lna.get());
-    si.vga_db = unsigned(app.vga.get());
-    si.has_frame = !app.frame.db.empty();
-    si.frame_seq = app.frame.seq;
-    si.rec_bytes = app.recorder.bytes_written();
-    // 接收中时基础文本（"接收中"）与动态段前缀重复，直接用动态段
-    std::wstring status_text =
-        si.running ? hackrftool::ui::status_dynamic(si)
-                   : app.status.get() + hackrftool::ui::status_dynamic(si);
+    // 原生骨架状态同步（工具栏按钮态 + 状态栏分段文本；心跳驱动，零定时器）
+    sync_chrome(app);
 
-    flux::Props root_p;
-    root_p.direction = flux::Direction::column;
-    root_p.align = flux::Align::stretch;   // 子元素横向撑满（否则纯 paint 卡片宽度塌 0）
-    root_p.flex_grow = 1.0f;
-    root_p.background = pal.background;
-    auto root = flux::view(std::move(root_p));
-
-    // 顶部工具栏：页签 + 图标状态 + 全部按钮/设置
-    root->children.push_back(toolbar(app, pal));
-
-    // 中间内容区：纯数据显示，flex_grow 吃掉剩余高度
     flux::Props content_p;
     content_p.direction = flux::Direction::column;
-    content_p.align = flux::Align::stretch;
-    content_p.gap = 8.0f;
+    content_p.align = flux::Align::stretch;   // 子元素横向撑满（否则纯 paint 卡片宽度塌 0）
     content_p.flex_grow = 1.0f;
+    content_p.background = pal.background;
     content_p.padding = flux::EdgeInsets{12.0f, 12.0f, 12.0f, 12.0f};
     auto content = flux::view(std::move(content_p));
-    switch (app.page.get()) {
+    switch (app.page) {
     case 1: content->children.push_back(monitor_display(app, pal)); break;
     case 2: content->children.push_back(capture_display(app, pal)); break;
     default: content->children.push_back(spectrum_display(app, pal)); break;
     }
-    root->children.push_back(std::move(content));
+    return content;
+}
 
-    // 底部状态栏：其他状态（surface 底与内容区分层）
-    flux::Props statusbar_p;
-    statusbar_p.direction = flux::Direction::row;
-    statusbar_p.align = flux::Align::center;
-    statusbar_p.background = pal.surface;
-    statusbar_p.padding = flux::EdgeInsets{6.0f, 12.0f, 6.0f, 12.0f};
-    auto statusbar = flux::view(std::move(statusbar_p));
-    flux::Props cap_p;
-    cap_p.text_align = flux::Align::start;
-    statusbar->children.push_back(
-        flux::ui::caption(pal, status_text, std::move(cap_p)));
-    root->children.push_back(std::move(statusbar));
-    return root;
+// ---- 原生 Win32 骨架：工具栏 / 设置行 / 状态栏 -------------------------------
+
+// 命令/控件 ID
+enum : int {
+    IDC_STARTSTOP = 100,
+    IDC_PAGE0,
+    IDC_PAGE1,
+    IDC_PAGE2,
+    IDC_SWEEP,
+    IDC_RECORD,
+    IDC_LOCK,
+    IDC_EXPORT,
+    IDC_CLEAR,
+    IDC_APPLYFREQ,
+    IDC_EDIT_FREQ,
+    IDC_EDIT_MON,
+    IDC_COMBO_RATE,
+    IDC_COMBO_SYM,
+    IDC_TRACK_LNA,
+    IDC_TRACK_VGA,
+    IDC_TRACK_THR,
+    IDC_TRACK_BURST,
+    IDC_CHECK_AUTOTRACK,
+};
+
+constexpr int kIconSize = 24;
+
+// 32bpp DIB 图标：洋红 → 透明（GDI 不写 alpha，逐像素换算）
+HBITMAP make_icon(void (*paint)(HDC)) {
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = kIconSize;
+    bi.bmiHeader.biHeight = -kIconSize;   // 自上而下
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp == nullptr || bits == nullptr) return bmp;
+    HDC dc = CreateCompatibleDC(nullptr);
+    const HGDIOBJ old = SelectObject(dc, bmp);
+    HBRUSH bg = CreateSolidBrush(RGB(255, 0, 255));
+    RECT rc{0, 0, kIconSize, kIconSize};
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
+    paint(dc);
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    auto* px = static_cast<DWORD*>(bits);
+    for (int i = 0; i < kIconSize * kIconSize; ++i) {
+        const COLORREF c = px[i] & 0x00FFFFFF;
+        const bool key = (c & 0x00FFFFFF) == 0x00FF00FF;
+        px[i] = (key ? 0u : 0xFF000000u) | c;
+    }
+    return bmp;
+}
+
+namespace icon {
+
+void play(HDC dc) {
+    HBRUSH b = CreateSolidBrush(RGB(46, 160, 67));
+    POINT pts[3] = {{8, 6}, {8, 18}, {18, 12}};
+    const HGDIOBJ old = SelectObject(dc, b);
+    Polygon(dc, pts, 3);
+    SelectObject(dc, old);
+    DeleteObject(b);
+}
+
+void stop(HDC dc) {
+    HBRUSH b = CreateSolidBrush(RGB(235, 72, 48));
+    RECT rc{7, 7, 17, 17};
+    FillRect(dc, &rc, b);
+    DeleteObject(b);
+}
+
+void page_spectrum(HDC dc) {
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(60, 120, 200));
+    const HGDIOBJ old = SelectObject(dc, p);
+    POINT pts[6] = {{4, 13}, {7, 8}, {10, 15}, {13, 7}, {16, 13}, {20, 10}};
+    Polyline(dc, pts, 6);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
+void page_monitor(HDC dc) {
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(160, 120, 40));
+    const HGDIOBJ old = SelectObject(dc, p);
+    POINT pts[7] = {{4, 16}, {8, 16}, {10, 6}, {13, 19}, {15, 16}, {18, 16}, {20, 16}};
+    Polyline(dc, pts, 7);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
+void page_capture(HDC dc) {
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(120, 90, 170));
+    const HGDIOBJ old = SelectObject(dc, p);
+    MoveToEx(dc, 6, 7, nullptr);
+    LineTo(dc, 6, 17);
+    MoveToEx(dc, 18, 7, nullptr);
+    LineTo(dc, 18, 17);
+    for (int y = 9; y <= 15; y += 3) {
+        MoveToEx(dc, 9, y, nullptr);
+        LineTo(dc, 15, y);
+    }
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
+void sweep(HDC dc) {
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(200, 120, 30));
+    const HGDIOBJ old = SelectObject(dc, p);
+    Ellipse(dc, 5, 5, 19, 19);
+    MoveToEx(dc, 12, 12, nullptr);
+    LineTo(dc, 18, 7);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
+void record(HDC dc) {
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(120, 120, 120));
+    const HGDIOBJ old = SelectObject(dc, p);
+    Ellipse(dc, 7, 7, 17, 17);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
+void record_on(HDC dc) {
+    HBRUSH b = CreateSolidBrush(RGB(220, 40, 40));
+    const HGDIOBJ old = SelectObject(dc, b);
+    Ellipse(dc, 7, 7, 17, 17);
+    SelectObject(dc, old);
+    DeleteObject(b);
+}
+
+void lock(HDC dc) {
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(90, 90, 110));
+    const HGDIOBJ old = SelectObject(dc, p);
+    Arc(dc, 8, 3, 16, 12, 8, 8, 16, 8);
+    SelectObject(dc, old);
+    DeleteObject(p);
+    HBRUSH b = CreateSolidBrush(RGB(90, 90, 110));
+    RECT rc{7, 11, 17, 19};
+    FillRect(dc, &rc, b);
+    DeleteObject(b);
+}
+
+void export_csv(HDC dc) {
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(40, 130, 110));
+    const HGDIOBJ old = SelectObject(dc, p);
+    Rectangle(dc, 5, 10, 14, 19);
+    MoveToEx(dc, 12, 14, nullptr);
+    LineTo(dc, 20, 6);
+    MoveToEx(dc, 20, 6, nullptr);
+    LineTo(dc, 16, 6);
+    MoveToEx(dc, 20, 6, nullptr);
+    LineTo(dc, 20, 10);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
+void clear(HDC dc) {
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(170, 70, 70));
+    const HGDIOBJ old = SelectObject(dc, p);
+    MoveToEx(dc, 7, 7, nullptr);
+    LineTo(dc, 17, 17);
+    MoveToEx(dc, 17, 7, nullptr);
+    LineTo(dc, 7, 17);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
+void apply_freq(HDC dc) {
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(46, 160, 67));
+    const HGDIOBJ old = SelectObject(dc, p);
+    POINT pts[3] = {{6, 13}, {10, 17}, {18, 7}};
+    Polyline(dc, pts, 3);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
+} // namespace icon
+
+// 图标索引表（工具栏位图号 = 此处顺序）
+enum : int {
+    ICON_PLAY = 0,
+    ICON_STOP,
+    ICON_PAGE0,
+    ICON_PAGE1,
+    ICON_PAGE2,
+    ICON_SWEEP,
+    ICON_REC,
+    ICON_REC_ON,
+    ICON_LOCK,
+    ICON_EXPORT,
+    ICON_CLEAR,
+    ICON_APPLY,
+    ICON_COUNT,
+};
+
+void create_native_font(App& app) {
+    const UINT dpi = app.main_wnd != nullptr ? GetDpiForWindow(app.main_wnd)
+                                             : GetDpiForSystem();
+    NONCLIENTMETRICSW nm{};
+    nm.cbSize = sizeof(nm);
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(nm), &nm, 0);
+    nm.lfMessageFont.lfHeight =
+        -MulDiv(9, int(dpi), 96);   // 9pt 消息字体，DPI 缩放
+    if (app.font != nullptr) DeleteObject(app.font);
+    app.font = CreateFontIndirectW(&nm.lfMessageFont);
+}
+
+HWND make_ctl(App& app, const wchar_t* cls, const wchar_t* text, DWORD style,
+              DWORD ex_style, int id) {
+    // WS_VISIBLE 缺省打开：通用行控件恒显，页上下文控件由 layout 显隐
+    HWND h = CreateWindowExW(ex_style, cls, text,
+                             WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10,
+                             app.main_wnd, reinterpret_cast<HMENU>(INT_PTR(id)),
+                             GetModuleHandleW(nullptr), nullptr);
+    if (h != nullptr && app.font != nullptr) SendMessageW(h, WM_SETFONT,
+                                                          WPARAM(app.font), TRUE);
+    return h;
+}
+
+TBBUTTON tb_btn(int bmp, int cmd, BYTE style, const wchar_t* text) {
+    TBBUTTON b{};
+    b.iBitmap = bmp;
+    b.idCommand = cmd;
+    b.fsState = TBSTATE_ENABLED;
+    b.fsStyle = style;
+    b.iString = reinterpret_cast<INT_PTR>(text);
+    return b;
+}
+
+void create_toolbar(App& app) {
+    app.images = ImageList_Create(kIconSize, kIconSize, ILC_COLOR32, ICON_COUNT, 0);
+    void (*painters[])(HDC) = {
+        icon::play,        icon::stop,         icon::page_spectrum, icon::page_monitor,
+        icon::page_capture, icon::sweep,       icon::record,        icon::record_on,
+        icon::lock,        icon::export_csv,   icon::clear,         icon::apply_freq,
+    };
+    static_assert(sizeof(painters) / sizeof(painters[0]) == ICON_COUNT,
+                  "图标表与枚举不一致");
+    for (const auto p : painters) {
+        HBITMAP bmp = make_icon(p);
+        ImageList_Add(app.images, bmp, nullptr);
+        DeleteObject(bmp);
+    }
+
+    app.toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr,
+                                  WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT |
+                                      TBSTYLE_TOOLTIPS | CCS_NODIVIDER |
+                                      CCS_NOPARENTALIGN,
+                                  0, 0, 0, 0, app.main_wnd, nullptr,
+                                  GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(app.toolbar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+    SendMessageW(app.toolbar, TB_SETBITMAPSIZE, 0,
+                 MAKELPARAM(kIconSize, kIconSize));
+    SendMessageW(app.toolbar, TB_SETIMAGELIST, 0, LPARAM(app.images));
+    SendMessageW(app.toolbar, TB_SETPADDING, 0, MAKELPARAM(10, 12));
+
+    const TBBUTTON btns[] = {
+        tb_btn(ICON_PLAY, IDC_STARTSTOP, BTNS_AUTOSIZE, L"开始"),
+        tb_btn(0, 0, BTNS_SEP, nullptr),
+        tb_btn(ICON_PAGE0, IDC_PAGE0, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"频谱"),
+        tb_btn(ICON_PAGE1, IDC_PAGE1, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"监测"),
+        tb_btn(ICON_PAGE2, IDC_PAGE2, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"抓包"),
+        tb_btn(0, 0, BTNS_SEP, nullptr),
+        tb_btn(ICON_SWEEP, IDC_SWEEP, BTNS_CHECK | BTNS_AUTOSIZE, L"全频段"),
+        tb_btn(ICON_REC, IDC_RECORD, BTNS_CHECK | BTNS_AUTOSIZE, L"录制 IQ"),
+        tb_btn(0, 0, BTNS_SEP, nullptr),
+        tb_btn(ICON_LOCK, IDC_LOCK, BTNS_AUTOSIZE, L"锁定"),
+        tb_btn(ICON_EXPORT, IDC_EXPORT, BTNS_AUTOSIZE, L"导出 CSV"),
+        tb_btn(ICON_CLEAR, IDC_CLEAR, BTNS_AUTOSIZE, L"清空"),
+        tb_btn(ICON_APPLY, IDC_APPLYFREQ, BTNS_AUTOSIZE, L"应用频率"),
+    };
+    SendMessageW(app.toolbar, TB_ADDBUTTONS, WPARAM(sizeof(btns) / sizeof(btns[0])),
+                 LPARAM(btns));
+    SendMessageW(app.toolbar, TB_AUTOSIZE, 0, 0);
+}
+
+void create_settings_row(App& app) {
+    auto slot = [](std::vector<App::CtlSlot>& v, HWND h, int w, bool drop = false) {
+        v.push_back({h, w, drop});
+    };
+
+    // 通用：中心频率 / 采样率 / LNA / VGA
+    slot(app.row_common,
+         make_ctl(app, WC_STATICW, L"中心频率", SS_LEFT | SS_CENTERIMAGE, 0, 0), 52);
+    app.edit_freq = make_ctl(app, WC_EDITW, L"2450",
+                             ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0,
+                             IDC_EDIT_FREQ);
+    slot(app.row_common, app.edit_freq, 80);
+    slot(app.row_common,
+         make_ctl(app, WC_STATICW, L"采样率", SS_LEFT | SS_CENTERIMAGE, 0, 0), 52);
+    app.combo_rate = make_ctl(app, WC_COMBOBOXW, nullptr,
+                              CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_RATE);
+    for (const wchar_t* r : {L"8", L"10", L"16", L"20"})
+        SendMessageW(app.combo_rate, CB_ADDSTRING, 0, LPARAM(r));
+    SendMessageW(app.combo_rate, CB_SETCURSEL, WPARAM(app.rate_index), 0);
+    slot(app.row_common, app.combo_rate, 64, true);
+
+    app.track_lna = make_ctl(app, TRACKBAR_CLASSW, nullptr,
+                             TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP, 0, IDC_TRACK_LNA);
+    SendMessageW(app.track_lna, TBM_SETRANGE, TRUE, MAKELPARAM(8, 40));
+    SendMessageW(app.track_lna, TBM_SETTICFREQ, 8, 0);
+    SendMessageW(app.track_lna, TBM_SETPOS, TRUE, LPARAM(app.lna));
+    slot(app.row_common, app.track_lna, 128);
+    app.lbl_lna = make_ctl(app, WC_STATICW, L"LNA 16", SS_LEFT | SS_CENTERIMAGE, 0, 0);
+    slot(app.row_common, app.lbl_lna, 52);
+
+    app.track_vga = make_ctl(app, TRACKBAR_CLASSW, nullptr,
+                             TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP, 0, IDC_TRACK_VGA);
+    SendMessageW(app.track_vga, TBM_SETRANGE, TRUE, MAKELPARAM(2, 62));
+    SendMessageW(app.track_vga, TBM_SETTICFREQ, 2, 0);
+    SendMessageW(app.track_vga, TBM_SETPOS, TRUE, LPARAM(app.vga));
+    slot(app.row_common, app.track_vga, 128);
+    app.lbl_vga = make_ctl(app, WC_STATICW, L"VGA 16", SS_LEFT | SS_CENTERIMAGE, 0, 0);
+    slot(app.row_common, app.lbl_vga, 52);
+
+    // 监测页：自动跟踪 / 目标频率 / 活动阈值
+    app.check_autotrack = make_ctl(app, WC_BUTTONW, L"自动跟踪最强",
+                                   BS_AUTOCHECKBOX | WS_TABSTOP, 0,
+                                   IDC_CHECK_AUTOTRACK);
+    SendMessageW(app.check_autotrack, BM_SETCHECK, BST_CHECKED, 0);
+    slot(app.row_monitor, app.check_autotrack, 96);
+    slot(app.row_monitor,
+         make_ctl(app, WC_STATICW, L"目标频率", SS_LEFT | SS_CENTERIMAGE, 0, 0), 56);
+    app.edit_mon = make_ctl(app, WC_EDITW, L"2450",
+                            ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0, IDC_EDIT_MON);
+    slot(app.row_monitor, app.edit_mon, 80);
+    slot(app.row_monitor,
+         make_ctl(app, WC_STATICW, L"活动阈值", SS_LEFT | SS_CENTERIMAGE, 0, 0), 60);
+    app.track_threshold = make_ctl(app, TRACKBAR_CLASSW, nullptr,
+                                   TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP, 0,
+                                   IDC_TRACK_THR);
+    SendMessageW(app.track_threshold, TBM_SETRANGE, TRUE, MAKELPARAM(-100, -40));
+    SendMessageW(app.track_threshold, TBM_SETTICFREQ, 10, 0);
+    SendMessageW(app.track_threshold, TBM_SETPOS, TRUE, LPARAM(int(app.threshold)));
+    slot(app.row_monitor, app.track_threshold, 120);
+    app.lbl_thr = make_ctl(app, WC_STATICW, L"-70 dB", SS_LEFT | SS_CENTERIMAGE, 0, 0);
+    slot(app.row_monitor, app.lbl_thr, 44);
+
+    // 抓包页：突发阈值 / 符号率
+    slot(app.row_capture,
+         make_ctl(app, WC_STATICW, L"突发阈值", SS_LEFT | SS_CENTERIMAGE, 0, 0), 60);
+    app.track_burst = make_ctl(app, TRACKBAR_CLASSW, nullptr,
+                               TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP, 0,
+                               IDC_TRACK_BURST);
+    SendMessageW(app.track_burst, TBM_SETRANGE, TRUE, MAKELPARAM(-60, -20));
+    SendMessageW(app.track_burst, TBM_SETTICFREQ, 10, 0);
+    SendMessageW(app.track_burst, TBM_SETPOS, TRUE, LPARAM(int(app.burst_thr)));
+    slot(app.row_capture, app.track_burst, 120);
+    app.lbl_burst = make_ctl(app, WC_STATICW, L"-40 dB", SS_LEFT | SS_CENTERIMAGE, 0, 0);
+    slot(app.row_capture, app.lbl_burst, 44);
+    slot(app.row_capture,
+         make_ctl(app, WC_STATICW, L"符号率", SS_LEFT | SS_CENTERIMAGE, 0, 0), 52);
+    app.combo_symrate = make_ctl(app, WC_COMBOBOXW, nullptr,
+                                 CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_SYM);
+    for (const wchar_t* r : {L"1 Mbps", L"2 Mbps"})
+        SendMessageW(app.combo_symrate, CB_ADDSTRING, 0, LPARAM(r));
+    SendMessageW(app.combo_symrate, CB_SETCURSEL, WPARAM(app.symrate_idx), 0);
+    slot(app.row_capture, app.combo_symrate, 80, true);
+}
+
+void create_statusbar(App& app) {
+    app.statusbar = CreateWindowExW(0, STATUSCLASSNAMEW, nullptr,
+                                    WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0,
+                                    0, app.main_wnd, nullptr,
+                                    GetModuleHandleW(nullptr), nullptr);
+}
+
+// 摆放工具栏/设置行/状态栏/内容区（WM_SIZE、WM_DPICHANGED、页切换共用）
+void layout(App& app) {
+    if (app.main_wnd == nullptr || app.toolbar == nullptr) return;
+    const int scale = app.main_wnd != nullptr ? GetDpiForWindow(app.main_wnd) : 96;
+    const int s = scale / 96;   // 整数倍缩放足够（100%/125%→1，150%→1 近似；
+                                // 控件尺寸不追求逐 DPI 精确，布局稳定优先）
+    RECT rc;
+    GetClientRect(app.main_wnd, &rc);
+    const int w = rc.right, h = rc.bottom;
+
+    // 工具栏
+    SendMessageW(app.toolbar, WM_SIZE, 0, 0);
+    RECT tb{};
+    GetWindowRect(app.toolbar, &tb);
+    const int tb_h = tb.bottom - tb.top;
+    MoveWindow(app.toolbar, 0, 0, w, tb_h, TRUE);
+
+    // 设置行（单行，创建顺序摆放；页上下文控件按当前页显隐）
+    const int ctl_h = 24 * s;
+    int x = 8 * s;
+    const int row_y = tb_h + (34 * s - ctl_h) / 2;
+    const auto place = [&](std::vector<App::CtlSlot>& v) {
+        for (const auto& c : v) {
+            const int ch = c.drop ? 130 * s : ctl_h;   // 组合框高度含下拉列表
+            MoveWindow(c.h, x, row_y, c.w * s, ch, TRUE);
+            x += c.w * s + 6 * s;
+        }
+    };
+    place(app.row_common);
+    const bool mon = app.page == 1, cap = app.page == 2;
+    for (const auto& c : app.row_monitor)
+        ShowWindow(c.h, mon ? SW_SHOW : SW_HIDE);
+    for (const auto& c : app.row_capture)
+        ShowWindow(c.h, cap ? SW_SHOW : SW_HIDE);
+    if (mon) place(app.row_monitor);
+    if (cap) place(app.row_capture);
+    const int row_h = 34 * s;
+
+    // 状态栏（先自适应高，再贴底 + 分段右缘）
+    SendMessageW(app.statusbar, WM_SIZE, 0, 0);
+    RECT sb{};
+    GetWindowRect(app.statusbar, &sb);
+    const int sb_h = sb.bottom - sb.top;
+    MoveWindow(app.statusbar, 0, h - sb_h, w, sb_h, TRUE);
+    int p_esb = 72 * s, p_rec = 88 * s, p_frame = 72 * s, p_rg = 170 * s,
+        p_freq = 170 * s;
+    int edges[6];
+    edges[5] = w;
+    edges[4] = w - p_esb;
+    edges[3] = edges[4] - p_rec;
+    edges[2] = edges[3] - p_frame;
+    edges[1] = edges[2] - p_rg;
+    edges[0] = edges[1] - p_freq;
+    for (int i = 0; i < 5; ++i)
+        if (edges[i] < 40 * s) edges[i] = 40 * s + i * 4;   // 极窄窗口防倒挂
+    for (int i = 1; i < 6; ++i)
+        if (edges[i] <= edges[i - 1]) edges[i] = edges[i - 1] + 4;
+    SendMessageW(app.statusbar, SB_SETPARTS, 6, LPARAM(edges));
+
+    // 内容区（WinFlux 子窗口）填满剩余
+    if (app.host.hwnd() != nullptr)
+        MoveWindow(app.host.hwnd(), 0, tb_h + row_h, w,
+                   h - tb_h - row_h - sb_h, TRUE);
+}
+
+// 工具栏按钮态 + 状态栏文本（build 心跳驱动；缓存避免每帧消息风暴）
+void sync_chrome(App& app) {
+    if (app.toolbar != nullptr) {
+        if (app.sync_run != int(app.running)) {
+            TBBUTTONINFO bi{};
+            bi.cbSize = sizeof(bi);
+            bi.dwMask = TBIF_TEXT | TBIF_IMAGE;
+            bi.pszText = const_cast<LPWSTR>(app.running ? L"停止" : L"开始");
+            bi.iImage = app.running ? ICON_STOP : ICON_PLAY;
+            SendMessageW(app.toolbar, TB_SETBUTTONINFO, IDC_STARTSTOP,
+                         LPARAM(&bi));
+            app.sync_run = int(app.running);
+        }
+        if (app.sync_page != app.page) {
+            const int ids[3] = {IDC_PAGE0, IDC_PAGE1, IDC_PAGE2};
+            for (int i = 0; i < 3; ++i)
+                SendMessageW(app.toolbar, TB_SETSTATE, ids[i],
+                             LPARAM(TBSTATE_ENABLED |
+                                    (app.page == i ? TBSTATE_CHECKED : 0)));
+            app.sync_page = app.page;
+        }
+        if (app.sync_sweep != app.sweep_on) {
+            SendMessageW(app.toolbar, TB_SETSTATE, IDC_SWEEP,
+                         LPARAM(TBSTATE_ENABLED |
+                                (app.sweep_on == 1 ? TBSTATE_CHECKED : 0)));
+            app.sync_sweep = app.sweep_on;
+        }
+        const bool rec = app.recorder.recording();
+        if (app.sync_rec != int(rec)) {
+            TBBUTTONINFO bi{};
+            bi.cbSize = sizeof(bi);
+            bi.dwMask = TBIF_TEXT | TBIF_IMAGE | TBIF_STATE;
+            bi.fsState = TBSTATE_ENABLED | (rec ? TBSTATE_CHECKED : 0);
+            bi.pszText = const_cast<LPWSTR>(rec ? L"■ 停录" : L"● 录制 IQ");
+            bi.iImage = rec ? ICON_REC_ON : ICON_REC;
+            SendMessageW(app.toolbar, TB_SETBUTTONINFO, IDC_RECORD, LPARAM(&bi));
+            app.sync_rec = int(rec);
+        }
+    }
+
+    if (app.statusbar != nullptr) {
+        // 分段 0：基础状态（接收中时由动态段首词接续，避免与分段 1 重复）
+        std::wstring base = app.running ? L"接收中" : app.status;
+        SendMessageW(app.statusbar, SB_SETTEXT, 0, LPARAM(base.c_str()));
+        hackrftool::ui::StatusInfo si;
+        si.running = app.running;
+        si.sweep = app.sweep_on == 1;
+        si.recording = app.recorder.recording();
+        si.seg_idx = int(app.seg_idx.load());
+        si.seg_center_mhz = seg_center_mhz(app.seg_idx.load());
+        si.center_mhz = app.center_mhz;
+        si.rate_msps = unsigned(kRatesMsps[size_t(app.rate_index)]);
+        si.lna_db = app.lna;
+        si.vga_db = app.vga;
+        si.has_frame = !app.frame.db.empty();
+        si.frame_seq = app.frame.seq;
+        si.rec_bytes = app.recorder.bytes_written();
+        si.esb_hits = app.esb_hits.load();
+        std::wstring parts[5];
+        hackrftool::ui::status_parts(si, parts);
+        for (int i = 0; i < 5; ++i)
+            SendMessageW(app.statusbar, SB_SETTEXT, 1 + i, LPARAM(parts[i].c_str()));
+    }
+}
+
+// ---- 命令路由 ----------------------------------------------------------------
+
+void on_command(App& app, int id, int code, HWND from) {
+    switch (id) {
+    case IDC_STARTSTOP: toggle_rx(app); break;
+    case IDC_PAGE0: app.page = 0; layout(app); break;
+    case IDC_PAGE1: app.page = 1; layout(app); break;
+    case IDC_PAGE2: app.page = 2; layout(app); break;
+    case IDC_SWEEP: {
+        const LRESULT st = SendMessageW(app.toolbar, TB_GETSTATE, IDC_SWEEP, 0);
+        const bool on = (st & TBSTATE_CHECKED) != 0;
+        set_sweep_live(app, on && app.running);
+        app.sweep_on = on ? 1 : 0;
+        break;
+    }
+    case IDC_RECORD: record_toggle(app); break;
+    case IDC_LOCK: monitor_lock(app); break;
+    case IDC_EXPORT: export_csv_dialog(app); break;
+    case IDC_CLEAR: clear_bursts(app); break;
+    case IDC_APPLYFREQ: apply_center_freq(app); break;
+    case IDC_COMBO_RATE:
+        if (code == CBN_SELCHANGE) {
+            const int i = int(SendMessageW(app.combo_rate, CB_GETCURSEL, 0, 0));
+            if (i >= 0 && i < 4) {
+                if (app.running) {
+                    hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                    cfg.sample_rate_hz = kRatesMsps[size_t(i)] * 1e6;
+                    std::string err;
+                    if (!app.radio.apply(cfg, &err))
+                        app.status = L"配置失败: " + widen(err);
+                }
+                app.rate_index = i;
+            }
+        }
+        break;
+    case IDC_COMBO_SYM:
+        if (code == CBN_SELCHANGE) {
+            const int i = int(SendMessageW(app.combo_symrate, CB_GETCURSEL, 0, 0));
+            if (i >= 0) app.symrate_idx = i;
+        }
+        break;
+    case IDC_CHECK_AUTOTRACK:
+        if (code == BN_CLICKED) {
+            app.auto_track =
+                SendMessageW(app.check_autotrack, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            app.monitor.set_mode(app.auto_track
+                                     ? hackrftool::dsp::ChannelMonitor::Mode::auto_peak
+                                     : hackrftool::dsp::ChannelMonitor::Mode::fixed_bin);
+        }
+        break;
+    default: (void)from; break;
+    }
+}
+
+void on_hscroll(App& app, HWND ctl) {
+    if (ctl == app.track_lna) {
+        int v = int(SendMessageW(ctl, TBM_GETPOS, 0, 0));
+        v = std::clamp((v + 4) / 8 * 8, 8, 40);
+        if (app.running) {
+            hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+            cfg.lna_gain_db = unsigned(v);
+            std::string err;
+            if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
+        }
+        app.lna = unsigned(v);
+        SendMessageW(ctl, TBM_SETPOS, TRUE, LPARAM(v));
+        SetWindowTextW(app.lbl_lna, (L"LNA " + std::to_wstring(v)).c_str());
+    } else if (ctl == app.track_vga) {
+        int v = int(SendMessageW(ctl, TBM_GETPOS, 0, 0));
+        v = std::clamp((v + 1) / 2 * 2, 2, 62);
+        if (app.running) {
+            hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+            cfg.vga_gain_db = unsigned(v);
+            std::string err;
+            if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
+        }
+        app.vga = unsigned(v);
+        SendMessageW(ctl, TBM_SETPOS, TRUE, LPARAM(v));
+        SetWindowTextW(app.lbl_vga, (L"VGA " + std::to_wstring(v)).c_str());
+    } else if (ctl == app.track_threshold) {
+        const int v = int(SendMessageW(ctl, TBM_GETPOS, 0, 0));
+        app.threshold = double(v);
+        SetWindowTextW(app.lbl_thr, (std::to_wstring(v) + L" dB").c_str());
+    } else if (ctl == app.track_burst) {
+        const int v = int(SendMessageW(ctl, TBM_GETPOS, 0, 0));
+        app.burst_thr = double(v);
+        SetWindowTextW(app.lbl_burst, (std::to_wstring(v) + L" dB").c_str());
+    }
+}
+
+LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_COMMAND:
+        if (app != nullptr)
+            on_command(*app, LOWORD(wp), HIWORD(wp), reinterpret_cast<HWND>(lp));
+        return 0;
+    case WM_HSCROLL:
+        if (app != nullptr) on_hscroll(*app, reinterpret_cast<HWND>(lp));
+        return 0;
+    case WM_NOTIFY: {
+        const auto* nm = reinterpret_cast<NMHDR*>(lp);
+        if (nm->code == TTN_GETDISPINFOW) {
+            auto* di =
+                reinterpret_cast<NMTTDISPINFOW*>(const_cast<NMHDR*>(nm));
+            switch (int(nm->idFrom)) {
+            case IDC_STARTSTOP: di->lpszText = const_cast<LPWSTR>(
+                L"开始/停止接收（HackRF 为独占设备）"); break;
+            case IDC_SWEEP: di->lpszText =
+                const_cast<LPWSTR>(L"全频段扫描（2400–2483.5 MHz 分 5 段轮换）"); break;
+            case IDC_RECORD: di->lpszText =
+                const_cast<LPWSTR>(L"录制原始 IQ 到 .cs8 文件（停止时写参数 sidecar）"); break;
+            case IDC_LOCK: di->lpszText =
+                const_cast<LPWSTR>(L"按目标频率锁定监测 bin"); break;
+            default: break;
+            }
+        }
+        return 0;
+    }
+    case WM_SIZE:
+        if (app != nullptr) layout(*app);
+        return 0;
+    case WM_DPICHANGED: {
+        const auto* r = reinterpret_cast<RECT*>(lp);
+        SetWindowPos(wnd, nullptr, r->left, r->top, r->right - r->left,
+                     r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        if (app != nullptr) {
+            create_native_font(*app);
+            for (const auto* v : {&app->row_common, &app->row_monitor, &app->row_capture})
+                for (const auto& c : *v)
+                    if (c.h != nullptr) SendMessageW(c.h, WM_SETFONT,
+                                                     WPARAM(app->font), TRUE);
+            layout(*app);
+        }
+        return 0;
+    }
+    case WM_CLOSE: DestroyWindow(wnd); return 0;
+    case WM_DESTROY: PostQuitMessage(0); return 0;
+    default: break;
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
 }
 
 } // namespace
@@ -887,8 +1286,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     SetUnhandledExceptionFilter(write_crash_dump);   // 崩溃自动落 dump
 
     // 单实例守卫：HackRF 是独占设备，第二个实例只会得到 "HackRF not found"，
-    // 且多实例互踢会把 USB 流状态搞 wedge（2026-09-05 七个残留实例实锤）。
-    // 已有实例时把它的窗口带到前台、提示后退出。
+    // 且多实例互踢会把 USB 流状态搞 wedge。已有实例时把它的窗口带到前台、
+    // 提示后退出。
     const HANDLE single = CreateMutexW(nullptr, TRUE, L"HackRFTool-SingleInstance");
     struct MutexGuard {
         HANDLE h;
@@ -911,27 +1310,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
         return 0;
     }
 
+    // DPI 感知必须先于任何窗口创建（检查员实锤：重构时误删导致整窗
+    // DWM 位图模糊、WM_DPICHANGED 成死代码）。清单不重复声明避免冲突。
     flux::enable_per_monitor_dpi_v2();
+
+    INITCOMMONCONTROLSEX icc{};
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
+    InitCommonControlsEx(&icc);
+
     App app;
-    app.running = app.host.make_state<bool>(false);
-    app.status = app.host.make_state<std::wstring>(L"未开始（点击「开始」）");
-    app.freq_text = app.host.make_state<std::wstring>(L"2450");
-    app.center_mhz = app.host.make_state<double>(2450.0);
-    // 增益默认 16/16：32/30 时时域饱和（频谱分 bin 看不出），突发检测会
-    // 把整段信号连成一片（M3 教训，详见 docs/m3、m4 交付记录）
-    app.lna = app.host.make_state<double>(16.0);
-    app.vga = app.host.make_state<double>(16.0);
-    app.rate_index = app.host.make_state<int>(3);
-    app.sweep_on = app.host.make_state<int>(0);
-    app.page = app.host.make_state<int>(0);
-    app.auto_track = app.host.make_state<bool>(true);
-    app.mon_text = app.host.make_state<std::wstring>(L"2450");
-    app.threshold = app.host.make_state<double>(-70.0);
-    app.burst_thr = app.host.make_state<double>(-40.0);
-    app.symrate_idx = app.host.make_state<int>(0);
 
     // 命令行：auto=接收+频谱页；autom=+监测页；autos=+全频段；autocap=+抓包页；
-    // selftest/selftestsweep=自测模式（跑 N 秒→断言→写 selftest-report.txt→退出码）
+    // autosc=+全频段+抓包页；selftest/selftestsweep=自测模式（跑 N 秒→断言→
+    // 写 selftest-report.txt→退出码）。selfclick 崩溃复现已退役（L4 根因已修）。
     bool auto_start = false;
     bool selftest = false;
     bool device_ok = false;
@@ -939,27 +1331,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
         if (wcscmp(cmd_line, L"auto") == 0) auto_start = true;
         if (wcscmp(cmd_line, L"autom") == 0) {
             auto_start = true;
-            app.page.set(1);
+            app.page = 1;
         }
         if (wcscmp(cmd_line, L"autos") == 0) {
             auto_start = true;
-            app.sweep_on.set(1);
+            app.sweep_on = 1;
         }
         if (wcscmp(cmd_line, L"autocap") == 0) {
             auto_start = true;
-            app.page.set(2);
+            app.page = 2;
         }
         if (wcscmp(cmd_line, L"autosc") == 0) {
             // 压测组合：接收 + 全频段扫描 + 实时抓包页（demod 高负载路径）
             auto_start = true;
-            app.sweep_on.set(1);
-            app.page.set(2);
-        }
-        if (wcscmp(cmd_line, L"selfclick") == 0) {
-            // 崩溃复现：接收后 1.5s 用 SendInput 点击「模式→全频段」分段
-            // （与用户操作路径完全一致：点击触发 on_change 内同步重建）
-            auto_start = true;
-            app.selfclick = true;
+            app.sweep_on = 1;
+            app.page = 2;
         }
         if (wcscmp(cmd_line, L"selftest") == 0) {
             auto_start = true;
@@ -968,9 +1354,32 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
         if (wcscmp(cmd_line, L"selftestsweep") == 0) {
             auto_start = true;
             selftest = true;
-            app.sweep_on.set(1);
+            app.sweep_on = 1;
         }
     }
+
+    // 主窗口（原生骨架）+ 工具栏 + 设置行 + 状态栏
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = &main_wndproc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
+    wc.lpszClassName = L"HackRFToolMain";
+    RegisterClassExW(&wc);
+    const UINT dpi = GetDpiForSystem();
+    app.main_wnd = CreateWindowExW(
+        0, L"HackRFToolMain", L"HackRFTool",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+        MulDiv(1200, dpi, 96), MulDiv(860, dpi, 96), nullptr, nullptr, instance,
+        &app);
+    SetWindowLongPtrW(app.main_wnd, GWLP_USERDATA, LONG_PTR(&app));
+    create_native_font(app);
+    create_toolbar(app);
+    create_settings_row(app);
+    create_statusbar(app);
+
     if (auto_start) {
         std::string err;
         if (!app.radio.open(&err)) {
@@ -978,35 +1387,50 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
         } else {
             apply_radio(app);
             if (app.radio.start_rx(&rx_trampoline_ui, &app, &err)) {
-                app.running.set(true);
+                app.running = true;
                 device_ok = true;
-                if (app.sweep_on.get() == 1) set_sweep_live(app, true);
+                if (app.sweep_on == 1) set_sweep_live(app, true);
             } else {
-                app.status.set(L"启动接收失败: " + widen(err));
+                app.status = L"启动接收失败: " + widen(err);
             }
         }
     }
 
+    // 内容区：WinFlux Host 建为顶层后立即重父化为子窗口（保留 D2D/DComp
+    // 合成渲染管线；消息驱动与窗口层级无关，外层泵照常分发）
     app.host.set_root_builder([&app] { return build(app); });
-
     flux::Host::Config cfg;
     cfg.title = L"HackRFTool";
     cfg.width = 1200;
     cfg.height = 860;
     if (!app.host.create(cfg, instance)) return 1;
+    ShowWindow(app.host.hwnd(), SW_HIDE);
+    LONG_PTR style = GetWindowLongPtrW(app.host.hwnd(), GWL_STYLE);
+    SetWindowLongPtrW(app.host.hwnd(), GWL_STYLE,
+                      (style & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME |
+                                 WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU |
+                                 WS_DLGFRAME)) |
+                          WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS);
+    SetWindowLongPtrW(app.host.hwnd(), GWL_EXSTYLE, 0);
+    SetParent(app.host.hwnd(), app.main_wnd);
+
+    layout(app);
+    sync_chrome(app);   // 命令行预设页/模式 → 工具栏态立即就位（缓存初始化）
+    ShowWindow(app.main_wnd, SW_SHOW);
+    UpdateWindow(app.main_wnd);
 
     // M6：自测看门狗——收集指标、断言、写报告、发 WM_QUIT
     if (selftest) {
         const DWORD ui_tid = GetCurrentThreadId();
-        int seconds = app.sweep_on.get() == 1 ? 8 : 6;
+        int seconds = app.sweep_on == 1 ? 8 : 6;
         // 浸润测试：HACKRFTOOL_SOAK=秒数 覆盖默认时长（覆盖"一段时间后才崩"的尺度）
         char soak[16] = {};
         if (GetEnvironmentVariableA("HACKRFTOOL_SOAK", soak, sizeof soak) > 0) {
-            const int s = std::atoi(soak);
-            if (s > 0 && s <= 900) seconds = s;
+            const int sec = std::atoi(soak);
+            if (sec > 0 && sec <= 900) seconds = sec;
         }
         const std::wstring report_path = exe_dir_path(
-            app.sweep_on.get() == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt");
+            app.sweep_on == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt");
         std::thread([&app, ui_tid, seconds, device_ok, report_path] {
             Sleep(500);
             if (app.build_count.load() < 3 && device_ok) {
@@ -1028,7 +1452,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             const bool hard_ok = device_ok && builds >= 10 && frames >= 50;
             if (std::FILE* rp = _wfopen(report_path.c_str(), L"w")) {
                 std::fprintf(rp, "HackRFTool selftest\n模式: %s  时长: %ds\n",
-                             app.sweep_on.get() == 1 ? "全频段" : "单窗", seconds);
+                             app.sweep_on == 1 ? "全频段" : "单窗", seconds);
                 std::fprintf(rp, "设备: %s\n", device_ok ? "OK" : "未找到");
                 std::fprintf(rp,
                              "builds=%u frames=%u wf_single=%u wf_sweep=%u "
@@ -1047,113 +1471,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
         }).detach();
     }
 
-    // 崩溃复现：1.5s 后模拟真实点击「模式→全频段」（与用户路径一致）
-    if (app.selfclick) {
-        std::thread([&app] {
-            const auto mark = [](const char* s) {
-                if (std::FILE* lp = std::fopen("selfclick.log", "a")) {
-                    std::fprintf(lp, "%s\n", s);
-                    std::fclose(lp);
-                }
-            };
-            mark("thread-start");
-            Sleep(1500);
-            mark("pre-findwindow");
-            if (HWND h = FindWindowW(nullptr, L"HackRFTool")) {
-                mark("found-window");
-                keybd_event(VK_MENU, 0, 0, 0);
-                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
-                ShowWindow(h, SW_RESTORE);
-                SetForegroundWindow(h);
-                Sleep(400);
-                mark("pre-click");
-                // 自动定位：PrintWindow 截窗口 → 找橙色选中分段（初始=单窗）→
-                // 「全频段」= 其右侧等宽段 → 点击其中心
-                RECT r;
-                GetWindowRect(h, &r);
-                const int ww = int(r.right - r.left), wh = int(r.bottom - r.top);
-                HDC scr = GetDC(nullptr);
-                HDC mem = CreateCompatibleDC(scr);
-                HBITMAP bmp =
-                    CreateCompatibleBitmap(scr, ww, wh);
-                SelectObject(mem, bmp);
-                PrintWindow(h, mem, PW_RENDERFULLCONTENT);
-                LONG hit_x = 0, hit_y = 0;
-                // 逐行找橙像素，按主行（橙最多的 y）取该行的橙色连通段
-                int best_row = -1, best_count = 0;
-                std::vector<std::pair<int, int>> runs;   // [start,end) 橙连通段
-                for (int y = 30; y < wh / 3; ++y) {
-                    std::vector<std::pair<int, int>> row_runs;
-                    int in_run = -1;
-                    for (int x = 0; x <= ww; ++x) {
-                        bool orange = false;
-                        if (x < ww) {
-                            const COLORREF c = GetPixel(mem, x, y);
-                            const int rr = GetRValue(c), gg = GetGValue(c),
-                                      bb = GetBValue(c);
-                            orange = rr > 200 && gg > 80 && gg < 180 && bb < 110;
-                        }
-                        if (orange && in_run < 0) in_run = x;
-                        if (!orange && in_run >= 0) {
-                            if (x - in_run > 20) row_runs.emplace_back(in_run, x);
-                            in_run = -1;
-                        }
-                    }
-                    const int cnt = int(row_runs.size());
-                    if (cnt > best_count) {
-                        best_count = cnt;
-                        best_row = y;
-                        runs = row_runs;
-                    }
-                }
-                if (best_count >= 2) {
-                    // 第 1 个橙块 = 开始按钮，第 2 个 = 单窗（选中态）→ 点其右侧
-                    const auto& seg = runs[1];
-                    hit_y = best_row;
-                    hit_x = seg.second + (seg.second - seg.first) / 2;
-                    if (std::FILE* lp = std::fopen("selfclick.log", "a")) {
-                        std::fprintf(lp,
-                                     "row=%d runs=%zu seg2=[%d,%d) -> click(%ld,%ld)\n",
-                                     best_row, runs.size(), seg.first, seg.second,
-                                     hit_x, hit_y);
-                        std::fclose(lp);
-                    }
-                    SetCursorPos(r.left + hit_x, r.top + hit_y);
-                    Sleep(150);
-                    INPUT down{};
-                    down.type = INPUT_MOUSE;
-                    down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-                    INPUT up = down;
-                    up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-                    SendInput(1, &down, sizeof(INPUT));
-                    Sleep(50);
-                    SendInput(1, &up, sizeof(INPUT));
-                    Sleep(800);
-                    mark(app.sweep_on.get() == 1 ? "HIT-sweep-on" : "MISS");
-                } else {
-                    mark("no-orange-found");
-                }
-                DeleteObject(bmp);
-                DeleteDC(mem);
-                ReleaseDC(nullptr, scr);
-                Sleep(2000);
-                if (std::FILE* lp = std::fopen("selfclick.log", "a")) {
-                    std::fprintf(lp, "clicked sweep_on=%d running=%d\n",
-                                 app.sweep_on.get(), app.running.get());
-                    std::fclose(lp);
-                }
-            }
-        }).detach();
+    // 外层消息泵（Host::run 不再使用；WM_QUIT 可来自主窗口或自测线程）
+    MSG msg;
+    int exit_code = 0;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
-
-    const int exit_code = app.host.run();
+    exit_code = int(msg.wParam);
     app.sweep_live.store(0);   // 收扫描线程（detach 线程须先令其退出再析构 App）
     Sleep(80);
 
     if (selftest) {
         // 退出码：无设备 42（CTest SKIP），硬断言失败 1，通过 0
         const std::wstring report_path = exe_dir_path(
-            app.sweep_on.get() == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt");
+            app.sweep_on == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt");
         std::FILE* rp = _wfopen(report_path.c_str(), L"r");
         bool device_ok_read = false, pass = true;
         if (rp != nullptr) {
