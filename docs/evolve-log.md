@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #60（FM/信号数据 1Hz 埋点 + UI 快照事件——日志验收覆盖数据面）
-- rounds done: 14（#50–#59 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #61（云图 APT 链路日志化排查 B6 + scan/record/sweep 埋点）
+- rounds done: 15（#50–#60 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - epics pending: none
@@ -43,6 +43,7 @@
 #57 | 用户功能：界面参数全量持久化（启动恢复+变更即缓存）+ 收音机音频 FFT 频谱（Meteor 顺延 #58） | findings(2) | actions(2) | result(green+progress, 5 ctest/217 断言) | diff(+~600) | app/settings 纯函数：18 项参数（页签/双频率/采样率/增益/功放/AFC/带宽/音量/输出设备/筛选三下拉…）TSV 序列化，容错解析（坏行跳过、越界回退默认、strtod endptr 防 abc→0 误收）；保存=build 心跳 3s 节流+序列化比对变化才写盘+WM_DESTROY 兜底；恢复=控件创建后写字段+同步控件（combo 下标越界自愈+audio_dev 设备列表变化回退默认）+自动开始接收（打开即回到上次工作状态）；selftest 模式禁写（防污染用户参数，真机双自测跑完 settings 原样保留实测）+命令行模式禁读（断言依赖出厂默认）；ensure_fm 增益默认策略加 gains_pinned 门（不再覆盖恢复值，实测 LNA24 保留）。dsp/fm 新 AudioSpectrumMeter：2048 点汉宁实 FFT（48k 下 23.4Hz 分辨率）+慢衰减峰保持（-0.3dB/帧，19k 导频窄峰不闪烁）+计数器触发（回绕点在块中不漏算）；ui 新 audio_spectrum_strip（-90..-10dBFS、0-24kHz 刻度、19k 导频参考线、峰保持淡线+实时谱主线）；fm_audio_cb 取静噪前 (L+R)/2 喂入。测试 199→217：settings 往返 18 项/容错（垃圾行+越界+nan+endptr）/空文本；频谱整 bin 峰位 42/幅值 -12.04dBFS（numpy 校准）/19k 峰位 811/静音后峰保持衰减 <1dB。真机验证：键盘模拟调谐 107.1+AFC 关+LNA24→settings.tsv 落盘→重启零操作自动接收中（107.1/STEREO/音频频谱低频能量集中/人声波形有数据/LNA24 不被广播默认覆盖）。排障：外部改文本再踩 SetWindowText 假成功——终用驱动级 keybd_event 真键盘（tools/tune-kb.ps1，Ctrl+A 和弦四步序列是关键）；构建验证 grep 英文错误行漏检中文 VS locale（错误 C）跑了陈旧 exe 一次——必须看构建 exit code
 #58 | 用户指令：全功能验收（工具栏/设置逐项+组合矩阵）→ 修复 B1-B5 + X 轴缩放 | findings(6) | actions(6) | result(green+progress, 5 ctest/217 断言) | diff(+~350) | 验收产物 docs/acceptance-report.md（功能脑图/选项规范性对照表/组合矩阵/问题清单）；修复：B1 收音链切采样率丢带宽（漏传 fm_bw 静默回 120k）、B2 全频段扫描锁采样率 20M（低档 5 段拼接频标错乱）、B3 全频段×收音页（开扫描停 FM 链+进页拒开，真机实测状态栏提示）、B4 收音页头部重构（信号灯绿/红+导频/峰值数值读数替代 24 格跳动条+立体声选项热切换 force_mono；设置行拆两行——行1 频率/带宽/音量/静音，行2 筛选/输出/微调/立体声，settings_rows() 纯函数 host_target/layout 共用）、B5 频谱页模式标题（单窗显示范围/全景标注扫描中——解用户"显示全频道是什么意思"疑问：即全频段扫描模式）；新增频谱 X 轴缩放（×1/2/4/8 segmented+左右平移+范围文本+刻度 0.2~10M 六档自适应，显示窗切片实现 spectrum_view 零改动）；stereo_opt/spec_zoom_idx 入设置持久化（20 项）；WM_DPICHANGED 字体列表补齐 radio 行（顺手修）。真机复测：两行布局全控件可见、×8=5MHz 窗 1M 刻度、B3 提示实测。待办移交 #59：信号库非模态弹窗（3a）、波形 Y 轴详细设置（3b 余）、云图接收链排查（B6 需卫星过境）
 #59 | 用户指令：全量日志系统（UI/点击/事件/数据详细记录，日志推算分析问题；减少视觉识别——本轮起验收走日志断言，run=#59–#78 共 20 轮） | findings(2) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+318) | src/app/telemetry：JSONL 结构化事件+环形缓冲（tail/count_event 自测断言）+文件 sink（1MB×3 轮转逐条 fflush）；埋点 on_command（code 白名单 0/1 滤 EN 刷屏）/on_hscroll/tune_to/toggle_rx 起停含失败 err/ensure_fm/reconfigure_rx/applyfreq/app 起停；测试 217→228（转义/序列化/环形/计数）；真机日志验收新范式：驱动序列→断言 app.start→rx.start→reconfig→fm.on→tune 事件链 ALL PASS 零截图。排障：kv 键 cat 与 JSON 顶层撞名（重复键覆盖）→band。视觉识别问题本 session 已实证（LNA 40 幻觉/波形数据幻觉两次）——用户指令正确
+#60 | 数据面遥测：UI 状态变更快照+DSP 1Hz+断言工具（日志替代视觉 #2） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~120) | UI state 事件=状态串 diff 变化即记（9 字段）；DSP fm 1Hz（peak/pilot/voice/静噪/avg——信号质量时间序列）；selftest 报告附遥测行（events=3 实测）；tools/log-assert.py 断言工具；真机六类事件断言 ALL PASS（tail 验证 1Hz 节流正确）
 
 ## 运行总结（#1–#4，用户指令停止）
 
