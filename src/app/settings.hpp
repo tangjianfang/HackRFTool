@@ -21,6 +21,7 @@ struct Settings {
     bool afc_on = true;              // 收音页自动频率微调
     bool stereo_opt = true;          // 立体声解码（不勾=强制单声）
     int spec_zoom_idx = 0;           // 频谱 X 轴缩放 ×1/2/4/8
+    int spec_y_idx = 0;              // 频谱 Y 轴动态 100/60/40dB
     double threshold = -70.0;        // 活动阈值 dB
     double burst_thr = -40.0;        // 突发阈值 dB
     int symrate_idx = 0;             // 0=1Mbps 1=2Mbps

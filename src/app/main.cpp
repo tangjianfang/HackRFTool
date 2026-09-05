@@ -160,6 +160,7 @@ struct App {
     int fm_bw = 0;                         // 收听带宽：0=±120k 1=±80k 2=±50k
     bool stereo_opt = true;                // 立体声选项（不勾=强制单声，B4）
     int spec_zoom_idx = 0;                // 频谱 X 轴缩放档（×1/2/4/8，3c）
+    int spec_y_idx = 0;                   // 频谱 Y 轴动态档（0 全/1 中/2 细，#63）
     HWND check_stereo = nullptr;
     HWND combo_bw = nullptr;
     unsigned long long afc_pause_until = 0;   // 显式调谐后 AFC 暂停期限
@@ -831,6 +832,10 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
             bar->children.push_back(flux::ui::segmented(
                 pal, {L"×1", L"×2", L"×4", L"×8"}, app.spec_zoom_idx,
                 [&app](int i) { app.spec_zoom_idx = i; }, {}));
+            bar->children.push_back(flux::ui::caption(pal, L"Y 轴", {}));
+            bar->children.push_back(flux::ui::segmented(
+                pal, {L"100dB", L"60dB", L"40dB"}, app.spec_y_idx,
+                [&app](int i) { app.spec_y_idx = i; }, {}));
             bar->children.push_back(flux::ui::icon_button(
                 pal, flux::IconKind::chevron_left, L"左移半窗",
                 [&app, vhalf] { tune_to(app, app.center_mhz - vhalf); }));
@@ -872,9 +877,11 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
             swprintf(lab, 16, L"%.6g", f);
             ticks.push_back({f, lab});
         }
+        static const float kYFloor[3] = {-100.0f, -60.0f, -40.0f};
         page_el->children.push_back(hackrftool::ui::spectrum_view(
             pal, sub, subpk, vlo, vhi, ticks, app.frame.seq, &app.spec_geom,
-            [&app] { on_spectrum_click(app); }));
+            [&app] { on_spectrum_click(app); },
+            kYFloor[size_t(app.spec_y_idx)]));
         page_el->children.push_back(
             hackrftool::ui::waterfall_view(pal, app.waterfall, app.waterfall.seq()));
     } else {

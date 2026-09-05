@@ -12,8 +12,9 @@ namespace {
 constexpr float kDbTop = 0.0f;
 constexpr float kDbFloor = -100.0f;
 
-float db_to_y(float db, float y, float h) noexcept {
-    const float t = (kDbTop - db) / (kDbTop - kDbFloor);   // 0..1，上小下大
+float db_to_y(float db, float y, float h, float floor_db) noexcept {
+    const float t = (kDbTop - std::clamp(db, floor_db, kDbTop)) /
+                    (kDbTop - floor_db);   // 0..1，上小下大
     return y + 4.0f + t * (h - 22.0f);   // 上下留白给轴标签
 }
 
@@ -42,13 +43,14 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
                                const std::vector<float>& peak, double f_lo_mhz,
                                double f_hi_mhz, const std::vector<SpectrumTick>& ticks,
                                unsigned seq, SpectrumGeom* geom_out,
-                               std::function<void()> on_tune) {
+                               std::function<void()> on_tune,
+                               float y_floor) {
     flux::Props p;
     p.flex_grow = 1.0f;
     p.background = pal.surface;
     p.radius = 10.0f;
     p.paint_id = seq;   // 数据不变则保持局部重绘
-    p.paint = [pal, db, peak, f_lo_mhz, f_hi_mhz, ticks, geom_out](
+    p.paint = [pal, db, peak, f_lo_mhz, f_hi_mhz, ticks, geom_out, y_floor](
                   flux::D2DRenderer& r, float x, float y, float w, float h,
                   bool, float, float) {
         if (geom_out != nullptr) {   // 点击换算用几何（每帧刷新）
@@ -57,9 +59,11 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
             geom_out->lo_mhz = f_lo_mhz;
             geom_out->hi_mhz = f_hi_mhz;
         }
-        // 网格：每 20 dB 一条
-        for (float grid_db = -20.0f; grid_db > kDbFloor; grid_db -= 20.0f) {
-            const float gy = db_to_y(grid_db, y, h);
+        // 网格：每 (span/5) dB 一条（全动态 20dB 细节档 12dB）
+        const float gstep = (kDbTop - y_floor) / 5.0f;
+        for (float grid_db = kDbTop - gstep; grid_db > y_floor + 1.0f;
+             grid_db -= gstep) {
+            const float gy = db_to_y(grid_db, y, h, y_floor);
             r.draw_line(x + 8.0f, gy, x + w - 8.0f, gy, pal.divider, 1.0f, 0.5f);
         }
         // 频率刻度（标签钳制在绘图区内，防首尾裁切）
@@ -76,16 +80,19 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
         // 渲染器顺序绘制无分层，先画会被后画的波形盖住（检查员 F4 驳回点）
         const auto ylab = [&](float db) {
             // 底衬防止网格/波形穿越刻度文字
-            r.fill_rect(flux::Rect{x, db_to_y(db, y, h) - 8.0f, 40.0f, 16.0f},
-                        pal.surface);
-            r.draw_text(flux::Rect{x + 2.0f, db_to_y(db, y, h) - 7.0f, 34.0f, 14.0f},
+            r.fill_rect(
+                flux::Rect{x, db_to_y(db, y, h, y_floor) - 8.0f, 40.0f, 16.0f},
+                pal.surface);
+            r.draw_text(
+                flux::Rect{x + 2.0f, db_to_y(db, y, h, y_floor) - 7.0f, 34.0f,
+                           14.0f},
                         std::to_wstring(int(db)), 10.0f, pal.text_secondary, false,
                         flux::Align::start, 0.7f);
         };
 
         if (db.empty()) {
             ylab(0.0f);
-            ylab(-50.0f);
+            ylab(y_floor + (kDbTop - y_floor) / 2.0f);
             r.draw_text(flux::Rect{x, y, w, h}, L"等待数据…", 14.0f, pal.text_secondary,
                         false, flux::Align::center);
             return;
@@ -94,16 +101,16 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
         std::vector<std::pair<float, float>> cur(n);
         for (std::size_t i = 0; i < n; ++i)
             cur[i] = {x + 8.0f + float(i) / float(n - 1) * (w - 16.0f),
-                      db_to_y(db[i], y, h)};
+                      db_to_y(db[i], y, h, y_floor)};
         if (peak.size() == n) {
             std::vector<std::pair<float, float>> pk(n);
             for (std::size_t i = 0; i < n; ++i)
-                pk[i] = {cur[i].first, db_to_y(peak[i], y, h)};
+                pk[i] = {cur[i].first, db_to_y(peak[i], y, h, y_floor)};
             r.draw_polyline(pk, pal.text_secondary, 1.0f, 0.55f);
         }
         r.draw_polyline(cur, pal.accent, 2.0f, 1.0f);
         ylab(0.0f);   // 刻度最后画：底衬才盖得住波形（顺序绘制无分层）
-        ylab(-50.0f);
+        ylab(y_floor + (kDbTop - y_floor) / 2.0f);
     };
     if (on_tune) p.on_click = std::move(on_tune);   // 点频谱=调谐（#55）
     return flux::view(std::move(p));

@@ -32,7 +32,8 @@ struct SpectrumGeom {
     const flux::Palette& pal, const std::vector<float>& db,
     const std::vector<float>& peak, double f_lo_mhz, double f_hi_mhz,
     const std::vector<SpectrumTick>& ticks, unsigned seq,
-    SpectrumGeom* geom_out = nullptr, std::function<void()> on_tune = nullptr);
+    SpectrumGeom* geom_out = nullptr, std::function<void()> on_tune = nullptr,
+    float y_floor = -100.0f);   // 纵轴底（0 固定顶）；-60 细节档看弱信号
 
 // 瀑布图：历史 64 行，16 级量化配色（深蓝→红）
 [[nodiscard]] flux::ElementPtr waterfall_view(const flux::Palette& pal,

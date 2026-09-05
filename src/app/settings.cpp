@@ -42,6 +42,7 @@ std::string serialize(const Settings& s) {
     os << "afc_on\t" << (s.afc_on ? 1 : 0) << "\n";
     os << "stereo_opt\t" << (s.stereo_opt ? 1 : 0) << "\n";
     os << "spec_zoom_idx\t" << s.spec_zoom_idx << "\n";
+    os << "spec_y_idx\t" << s.spec_y_idx << "\n";
     os << "threshold\t" << s.threshold << "\n";
     os << "burst_thr\t" << s.burst_thr << "\n";
     os << "symrate_idx\t" << s.symrate_idx << "\n";
@@ -103,6 +104,8 @@ std::optional<Settings> deserialize(std::string_view text) {
             if (clamp_int(std::llround(d), 0, 1, i)) { s.stereo_opt = i != 0; any = true; }
         } else if (key == "spec_zoom_idx") {
             if (clamp_int(std::llround(d), 0, 3, i)) { s.spec_zoom_idx = i; any = true; }
+        } else if (key == "spec_y_idx") {
+            if (clamp_int(std::llround(d), 0, 2, i)) { s.spec_y_idx = i; any = true; }
         } else if (key == "threshold") {
             if (finite_double(d, -120.0, 0.0, s.threshold)) any = true;
         } else if (key == "burst_thr") {
