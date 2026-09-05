@@ -970,6 +970,26 @@ static void test_afc_correction() {
     check(afc_correction(far, 2.0, 10.0f, 0.03, 0.3) == 0.0, "超界偏移不修正");
 }
 
+// 频谱点击峰值吸附：点在峰附近 → 精确吸到峰中心（而非像素位置）
+static void test_peak_snap() {
+    using hackrftool::dsp::peak_snap;
+    // 256 bins 覆盖 ±1 MHz：峰 -30 在 bin 206（+0.609 MHz，模拟 98.6 强台）
+    std::vector<float> db(256, -60.0f);
+    db[206] = -30.0f;
+    // 点击在 +0.5（98.5）：±0.15 搜索窗含 0.609 → 吸附到 ~+0.61
+    const double snap = peak_snap(db, 2.0, 0.5, 0.15, 8.0f);
+    check(snap > 0.58 && snap < 0.64, "点击偏 0.11 吸附到峰中心（+0.61）");
+    // 峰不显著 → 保持点击位置
+    std::vector<float> flat(256, -60.0f);
+    flat[206] = -55.0f;
+    check(peak_snap(flat, 2.0, 0.5, 0.15, 8.0f) == 0.5,
+          "无显著峰保持点击位置");
+    // 峰在搜索窗外 → 保持点击位置
+    std::vector<float> far(256, -60.0f);
+    far[40] = -20.0f;   // -0.68 MHz
+    check(peak_snap(far, 2.0, 0.5, 0.15, 8.0f) == 0.5, "窗外峰不打扰");
+}
+
 static void test_fm_decimator_stopband() {
     using hackrftool::dsp::Decimator;
     // 2 Msps → 250 kHz：带内 40 kHz 通过，带外 400 kHz 显著衰减
@@ -1180,6 +1200,7 @@ int main() {
     test_fm_receiver_mono_fallback();
     test_fm_dc_offset_survives();
     test_afc_correction();
+    test_peak_snap();
     test_fm_decimator_stopband();
     test_apt_decode();
     test_sigdb();

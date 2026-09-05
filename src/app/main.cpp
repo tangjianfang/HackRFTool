@@ -132,6 +132,9 @@ struct App {
     std::atomic<bool> squelch_open{false}; // 静噪门（峰均差判据，UI 心跳写）
     bool afc_on = true;                    // AFC 自动频率微调（收音页）
     HWND check_afc = nullptr;
+    int fm_bw = 0;                         // 收听带宽：0=±120k 1=±80k 2=±50k
+    HWND combo_bw = nullptr;
+    unsigned long long afc_pause_until = 0;   // 显式调谐后 AFC 暂停期限
     float squelch_gain = 0.0f;             // 静噪增益平滑（fm 线程私有）
     double radio_mhz = 98.0;               // 收音机页当前频率
     std::vector<double> stations;          // 扫台结果（MHz）
@@ -538,8 +541,10 @@ void ensure_fm(App& app, bool on) {
             SendMessageW(app.combo_rate, CB_SETCURSEL, 0, 0);
         }
         app.iq_ring.clear();
+        static const double kFmBw[3] = {120e3, 80e3, 50e3};
         app.fm_rx = std::make_unique<hackrftool::dsp::FmReceiver>(
-            kRatesMsps[size_t(app.rate_index)] * 1e6, 80.0);
+            kRatesMsps[size_t(app.rate_index)] * 1e6, 80.0, false,
+            kFmBw[size_t(app.fm_bw)]);
         app.fm_rx->set_audio_callback(&fm_audio_cb, &app);
         const bool ok = app.waveout.start(app.audio_dev);
         if (!ok) app.status = L"音频设备打开失败（检查扬声器/默认设备）";
@@ -1154,7 +1159,8 @@ flux::ElementPtr build(App& app) {
 
     // AFC（收音页、非扫描）：偏置台自动吸附回中心（107.1→107.0 类修正）
     if (app.fm_on.load() && app.afc_on && app.page == 3 &&
-        !app.fm_scan.load() && !app.frame.db.empty()) {
+        !app.fm_scan.load() && !app.frame.db.empty() &&
+        GetTickCount64() > app.afc_pause_until) {
         const double corr = hackrftool::dsp::afc_correction(
             app.frame.db, 2.0 * half_bw_mhz(app), 10.0f, 0.03, 0.4);
         if (corr != 0.0) {
@@ -1244,6 +1250,7 @@ enum : int {
     IDC_COMBO_AUDIO,
     IDC_CHECK_AMP,
     IDC_CHECK_AFC,
+    IDC_COMBO_BW,
 };
 
 // ---- 统一调谐与页面默认频率（#55） ------------------------------------------
@@ -1255,6 +1262,7 @@ void tune_to(App& app, double mhz) {
     const SigCat cat = band_of(mhz).cat;
     if (cat == SigCat::sat || cat == SigCat::radio) app.radio_mhz = mhz;
     app.center_mhz = mhz;
+    app.afc_pause_until = GetTickCount64() + 5000;   // 显式选择后 AFC 让位 5s
     if (app.running) (void)app.radio.set_center_hz(mhz * 1e6);
     wchar_t buf[32];
     swprintf(buf, 32, L"%.4g", mhz);
@@ -1294,6 +1302,15 @@ void on_spectrum_click(App& app) {
         }
         tune_to(app, std::clamp(mhz, 2400.0, 2483.5));
         app.status += L"（已从全景跳转单窗）";
+        return;
+    }
+    if (app.page == 3) {
+        // 收音页：峰值吸附——点击位置 ±0.15MHz 内最强显著峰即台中心
+        //（手点像素必偏几十 kHz，吸附后精确对台；配合 5s AFC 暂停=所点即所得）
+        const double click_off = mhz - app.center_mhz;
+        const double off = hackrftool::dsp::peak_snap(
+            app.frame.db, 2.0 * half_bw_mhz(app), click_off, 0.15, 8.0f);
+        tune_to(app, app.center_mhz + off);
         return;
     }
     const bool relock = app.mon_lock_mhz > 0.0 && !app.auto_track;
@@ -1711,6 +1728,14 @@ void create_settings_row(App& app) {
 
     // 收音机页（#53/#55）：频段类别/在线/排序筛选 + 频率（后备）+ 音量/静音
     slot(app.row_radio,
+         make_ctl(app, WC_STATICW, L"带宽", SS_LEFT | SS_CENTERIMAGE, 0, 0), 36);
+    app.combo_bw = make_ctl(app, WC_COMBOBOXW, nullptr,
+                            CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_BW);
+    for (const wchar_t* b : {L"±120k 广播", L"±80k", L"±50k 窄带"})
+        SendMessageW(app.combo_bw, CB_ADDSTRING, 0, LPARAM(b));
+    SendMessageW(app.combo_bw, CB_SETCURSEL, 0, 0);
+    slot(app.row_radio, app.combo_bw, 84, true);
+    slot(app.row_radio,
          make_ctl(app, WC_STATICW, L"类别", SS_LEFT | SS_CENTERIMAGE, 0, 0), 36);
     app.combo_sigcat = make_ctl(app, WC_COMBOBOXW, nullptr,
                                 CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_SIGCAT);
@@ -2064,6 +2089,19 @@ void on_command(App& app, int id, int code, HWND from) {
     case IDC_CHECK_AFC:
         if (code == BN_CLICKED)
             app.afc_on = SendMessageW(app.check_afc, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        break;
+    case IDC_COMBO_BW:
+        if (code == CBN_SELCHANGE) {
+            const int i = int(SendMessageW(app.combo_bw, CB_GETCURSEL, 0, 0));
+            if (i >= 0 && i < 3) {
+                app.fm_bw = i;
+                static const double kFmBw2[3] = {120e3, 80e3, 50e3};
+                if (app.fm_rx) app.fm_rx->set_bandwidth(kFmBw2[size_t(i)]);
+                app.status = i == 0 ? L"带宽 ±120k（FM 广播）"
+                           : i == 1 ? L"带宽 ±80k"
+                                    : L"带宽 ±50k（窄带/卫星 APT）";
+            }
+        }
         break;
     case IDC_CHECK_AMP:
         if (code == BN_CLICKED) {

@@ -42,6 +42,30 @@ double afc_correction(const std::vector<float>& db, double bw_mhz,
     return off;
 }
 
+double peak_snap(const std::vector<float>& db, double bw_mhz,
+                 double click_off_mhz, double search_mhz,
+                 float min_prom_db) noexcept {
+    if (db.size() < 8) return click_off_mhz;
+    float sum = 0.0f;
+    for (const float v : db) sum += v;
+    const float avg = sum / float(db.size());
+    const double lo_off = click_off_mhz - search_mhz;
+    const double hi_off = click_off_mhz + search_mhz;
+    const long lo = long(double(db.size()) * (0.5 + lo_off / bw_mhz));
+    const long hi = long(double(db.size()) * (0.5 + hi_off / bw_mhz));
+    std::size_t best = 0;
+    bool found = false;
+    for (long i = std::max(lo, 0L); i < std::min(hi, long(db.size())); ++i) {
+        if (!found || db[size_t(i)] > db[best]) {
+            best = size_t(i);
+            found = true;
+        }
+    }
+    if (!found || db[best] - avg < min_prom_db) return click_off_mhz;
+    const double t = (double(best) + 0.5) / double(db.size()) - 0.5;
+    return t * bw_mhz;
+}
+
 namespace {
 
 // hamming 窗 sinc 低通系数（截止 fc，采样 fs，系数和归一为 1）
@@ -65,8 +89,8 @@ std::vector<float> lowpass_taps(std::size_t taps, double fs, double fc) {
 
 } // namespace
 
-Decimator::Decimator(double fs_in_hz, std::size_t taps)
-    : taps_(lowpass_taps(taps, fs_in_hz, 120e3)) {   // FM 信道 ±120 kHz
+Decimator::Decimator(double fs_in_hz, std::size_t taps, double fc_hz)
+    : taps_(lowpass_taps(taps, fs_in_hz, fc_hz)) {   // FM 信道低通
     l_ = std::max<std::size_t>(std::size_t(fs_in_hz / 250e3 + 0.5), 1);
     hist_.assign(taps_.size(), {0.0f, 0.0f});
 }
@@ -86,8 +110,10 @@ std::optional<std::complex<float>> Decimator::push(std::complex<float> s) {
     return acc;
 }
 
-FmReceiver::FmReceiver(double fs_in_hz, double pll_bw_hz, bool force_mono)
-    : dec_(fs_in_hz, 128), pll_bw_(pll_bw_hz), force_mono_(force_mono) {
+FmReceiver::FmReceiver(double fs_in_hz, double pll_bw_hz, bool force_mono,
+                       double bw_hz)
+    : dec_(fs_in_hz, 128, bw_hz), pll_bw_(pll_bw_hz), force_mono_(force_mono),
+      fs_in_hz_(fs_in_hz), bw_hz_(bw_hz) {
     lp_taps_ = lowpass_taps(48, kMpxHz, 15e3);
     lpr_hist_.assign(lp_taps_.size(), 0.0f);
     lmr_hist_.assign(lp_taps_.size(), 0.0f);
@@ -173,6 +199,12 @@ void FmReceiver::mpx_step(float mpx) {
 }
 
 float FmReceiver::audio_peak() const noexcept { return peak_; }
+
+void FmReceiver::set_bandwidth(double bw_hz) {
+    if (bw_hz == bw_hz_) return;
+    bw_hz_ = bw_hz;
+    dec_ = Decimator(fs_in_hz_, 128, bw_hz);
+}
 
 void FmReceiver::feed(const std::int8_t* iq, std::size_t bytes) {
     const std::size_t n = bytes / 2;

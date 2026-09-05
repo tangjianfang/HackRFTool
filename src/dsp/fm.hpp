@@ -23,10 +23,18 @@ namespace hackrftool::dsp {
                                     double min_off_mhz,
                                     double max_off_mhz) noexcept;
 
+// 频谱点击峰值吸附（#55f）：在点击频率 ±search_mhz 内找最强显著峰的
+// 精确偏移（替代按像素换算——手点必偏，吸附后即台中心）；无显著峰
+// 返回 click_off_mhz 原值
+[[nodiscard]] double peak_snap(const std::vector<float>& db, double bw_mhz,
+                               double click_off_mhz, double search_mhz,
+                               float min_prom_db) noexcept;
+
 // hamming 窗 sinc 低通抽取器：fs_in → fs_in/L（L 定死输出 250 kHz）
 class Decimator {
 public:
-    Decimator(double fs_in_hz, std::size_t taps);
+    // fc_hz：信道低通截止（默认 ±120k 广播；窄带 50k 供卫星/窄 FM）
+    Decimator(double fs_in_hz, std::size_t taps, double fc_hz = 120e3);
 
     // 逐样本喂入；每 L 个输入产出一个输出（无则为空）
     [[nodiscard]] std::optional<std::complex<float>> push(std::complex<float> s);
@@ -52,12 +60,18 @@ public:
 
     // pll_bw_hz：导频环路带宽（收听 80 Hz 稳；测试用 300 Hz 加速锁定）
     // force_mono：诊断/弱信号模式——禁用 38k DSBSC 分支（噪声减半）
+    // bw_hz：信道滤波截止（±120k 广播 / ±80k / ±50k 窄带）
     explicit FmReceiver(double fs_in_hz, double pll_bw_hz = 80.0,
-                        bool force_mono = false);
+                        bool force_mono = false, double bw_hz = 120e3);
+
+    // 运行中切带宽（重建抽取滤波器，状态复位可接受）
+    void set_bandwidth(double bw_hz);
 
     void set_force_mono(bool m) noexcept { force_mono_ = m; }
 
     void set_audio_callback(AudioCb cb, void* ctx) noexcept { cb_ = cb; ctx_ = ctx; }
+
+    [[nodiscard]] double bandwidth_hz() const noexcept { return bw_hz_; }
 
     // 任意长度 int8 IQ（libusb 回调直喂）
     void feed(const std::int8_t* iq, std::size_t bytes);
@@ -71,6 +85,8 @@ private:
     void mpx_step(float mpx);
 
     Decimator dec_;
+    double fs_in_hz_ = 2e6;
+    double bw_hz_ = 120e3;
     // 鉴频状态
     std::complex<float> prev_{1.0f, 0.0f};
     bool have_prev_ = false;
