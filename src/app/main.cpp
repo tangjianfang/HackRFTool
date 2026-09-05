@@ -136,6 +136,15 @@ void rx_trampoline_ui(const std::int8_t* iq, std::size_t bytes, void* ctx) {
     if (app->recorder.recording()) app->recorder.write(iq, bytes);
 }
 
+// 报告文件落在 exe 旁边而非进程 CWD（CTest/脚本从任意目录拉起时路径确定）
+std::wstring exe_dir_path(const char* name) {
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring dir(exe);
+    const auto slash = dir.find_last_of(L'\\');
+    return dir.substr(0, slash + 1) + widen(name);
+}
+
 // 扫描线程：驻留到点改中心频率（绝不碰 UI/绘制线程——在 paint 里同步
 // set_freq 会把首帧 build 挂死）
 void sweep_loop(App& app) {
@@ -473,6 +482,14 @@ flux::ElementPtr monitor_page(App& app, const flux::Palette& pal) {
         pal, app.monitor.series(), float(app.threshold.get()), app.frame.seq));
     page_el->children.push_back(std::move(tools));
     page_el->children.push_back(std::move(stats_el));
+    if (app.sweep_on.get() == 1) {
+        // T1.3：扫描模式下监测语义说明（M2 遗留）
+        flux::Props note_p;
+        note_p.text_align = flux::Align::start;
+        page_el->children.push_back(flux::ui::caption(
+            pal, L"注：全频段扫描模式下，监测跟踪当前驻留段（5 段约每秒轮换）",
+            std::move(note_p)));
+    }
     return page_el;
 }
 
@@ -829,8 +846,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             const int s = std::atoi(soak);
             if (s > 0 && s <= 900) seconds = s;
         }
-        const char* report_path =
-            app.sweep_on.get() == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt";
+        const std::wstring report_path = exe_dir_path(
+            app.sweep_on.get() == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt");
         std::thread([&app, ui_tid, seconds, device_ok, report_path] {
             Sleep(500);
             if (app.build_count.load() < 3 && device_ok) {
@@ -850,7 +867,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
             const unsigned bursts = unsigned(app.live.bursts().size());
             const unsigned esb = app.esb_hits.load();
             const bool hard_ok = device_ok && builds >= 10 && frames >= 50;
-            if (std::FILE* rp = std::fopen(report_path, "w")) {
+            if (std::FILE* rp = _wfopen(report_path.c_str(), L"w")) {
                 std::fprintf(rp, "HackRFTool selftest\n模式: %s  时长: %ds\n",
                              app.sweep_on.get() == 1 ? "全频段" : "单窗", seconds);
                 std::fprintf(rp, "设备: %s\n", device_ok ? "OK" : "未找到");
@@ -976,9 +993,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
 
     if (selftest) {
         // 退出码：无设备 42（CTest SKIP），硬断言失败 1，通过 0
-        const char* report_path =
-            app.sweep_on.get() == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt";
-        std::FILE* rp = std::fopen(report_path, "r");
+        const std::wstring report_path = exe_dir_path(
+            app.sweep_on.get() == 1 ? "selftest-report-sweep.txt" : "selftest-report-single.txt");
+        std::FILE* rp = _wfopen(report_path.c_str(), L"r");
         bool device_ok_read = false, pass = true;
         if (rp != nullptr) {
             char line[256];

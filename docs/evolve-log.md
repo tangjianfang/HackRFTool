@@ -1,10 +1,10 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 86 断言
-- pointer: #1 (next round)
-- rounds done: 0
-- status: initialized
-- metrics: findings 0 | fixes 0 | regressions 0
+- pointer: #2 (next round)
+- rounds done: 1
+- status: running
+- metrics: findings 1 | fixes 1 | regressions 0
 
 ## Target pool
 
@@ -28,3 +28,4 @@
 
 ## Rounds
 
+#1 | T2.1/T2.2/T2.4 测试覆盖缺口 | findings(1) | actions(2) | result(green+progress, 5 ctest / 105 断言) | diff(+96) | 基线 86→105 断言：IqRecorder 契约边界/burst 极端输入/LiveBursts 环回绕；顺修 T1.1 死代码
