@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #74（T4.6 README 功能补全——收音机/云图/信号库/遥测）
-- rounds done: 28（#50–#73 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #75（遥测日志体积测量与采样分级评估）
+- rounds done: 29（#50–#74 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
@@ -55,6 +55,7 @@
 #71 | Meteor 接线（云图页 QPSK 直解诊断，三部曲 #3 交付） | findings(1) | actions(1) | result(green+progress, 5 ctest/235 断言) | diff(+~120) | 预设 Meteor 137.900→QpskDemod(sps=率/72k)+数据线程喂 IQ+16k 滑窗 ASM；状态卡眼图/频偏/命中+METEOR diag 遥测；真机日志验收 ALL PASS。坑：跨进程 CBN_SELCHANGE 伪造 wparam=MAKEWPARAM(id,1)（id 单发走不进 handler）
 #72 | Meteor 眼图假阳性治理（finding：APT 载波假眼 0.91 实测） | findings(1) | actions(1) | result(green+no-progress（判定修正无新断言）, 5 ctest/235 断言) | diff(+~5) | Costas 在连续波/调频信号也自聚——判定以 ASM 命中为准
 #73 | pool-refresh：Tier1-4 全量重核（T1.1/T1.2/T1.3 已修出池；新增 T1.5/T1.6/T4.6/T4.7；Tier3 按当前 src 重列——action pool-refresh） | findings(0) | actions(0) | result(green+no-progress（池维护轮）, 5 ctest/235 断言) | diff(+~40) | 池与代码对齐（D7 反向：代码已超前池）
+#74 | T4.6 README 功能补全（#53-#71 新功能入需求文档） | findings(0) | actions(1) | result(green+no-progress（文档轮）, 5 ctest/235 断言) | diff(+~8) | 扩展功能行：收音机/云图/Meteor/信号库/持久化/缩放/遥测
 
 ## 运行总结（#1–#4，用户指令停止）
 
