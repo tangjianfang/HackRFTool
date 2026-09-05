@@ -66,9 +66,7 @@ int main(int argc, char** argv) {
     std::printf("完成: %llu 字节 / %llu 块（期望 %llu 字节，丢弃 %llu 块）\n",
                 static_cast<unsigned long long>(bytes),
                 static_cast<unsigned long long>(g_blocks.load()),
-                static_cast<unsigned long long>(
-                    double(bytes ? bytes : 1) * 0.0 +
-                    seconds * cfg.sample_rate_hz * 2.0),
+                static_cast<unsigned long long>(seconds * cfg.sample_rate_hz * 2.0),
                 static_cast<unsigned long long>(g_rec.dropped_blocks()));
     return (bytes > 0 && g_rec.dropped_blocks() == 0) ? 0 : 2;
 }

@@ -564,6 +564,85 @@ static void test_end_to_end_pipeline() {
     }
 }
 
+static void test_iq_recorder_contract_edges() {
+    hackrftool::radio::IqRecorder rec;
+    check(!rec.stop(), "未启动时 stop 返回 false");
+    const std::int8_t dummy[8] = {};
+    rec.write(dummy, 8);   // 未启动：应被忽略，不得崩溃
+    check(!rec.recording(), "未启动不处于录制态");
+
+    check(rec.start(L"test-contract.cs8"), "启动");
+    check(!rec.start(L"test-contract2.cs8"), "重复启动返回 false");
+    // 50 块 × 4KB：写线程跟得上的量，验证无损全落盘
+    const std::vector<std::int8_t> block(4096, std::int8_t(-3));
+    for (int i = 0; i < 50; ++i) rec.write(block.data(), block.size());
+    check(rec.stop(), "停止");
+    check(rec.bytes_written() == 50 * 4096, "50 块全落盘");
+    check(rec.dropped_blocks() == 0, "无丢弃");
+    check(!rec.recording(), "停止后非录制态");
+    if (std::FILE* fp = _wfopen(L"test-contract.cs8", L"rb")) {
+        std::fseek(fp, 0, SEEK_END);
+        check(std::ftell(fp) == static_cast<long>(50 * 4096), "文件长度一致");
+        std::fclose(fp);
+    }
+    _wremove(L"test-contract.cs8");
+    _wremove(L"test-contract2.cs8");
+}
+
+static void test_burst_detector_edges() {
+    // 全饱和（整段高于阈值）→ 恰好 1 个突发，钳制到全长
+    const std::vector<std::int8_t> sat(4000, 100);   // (100,100) 功率 2e4
+    const auto b1 = hackrftool::dsp::detect_bursts(sat.data(), sat.size(), -30.0f, 200);
+    check(b1.size() == 1, "全饱和单突发");
+    if (b1.size() == 1) {
+        check(b1[0].start_sample == 0, "饱和突发从 0 起");
+        check(b1[0].length_samples == 2000, "饱和突发钳制全长");
+    }
+    // 全静默 → 零突发
+    const std::vector<std::int8_t> sil(4000, 1);   // (1,1) ≈ -39dB
+    check(hackrftool::dsp::detect_bursts(sil.data(), sil.size(), -30.0f, 200).empty(),
+          "全静默零突发");
+    // 窗口不整除的奇数长度突发
+    std::vector<std::int8_t> odd(909 * 2, 1);
+    for (std::size_t i = 0; i < 909; ++i) {
+        odd[i * 2] = 100;
+        odd[i * 2 + 1] = 0;
+    }
+    const auto b3 = hackrftool::dsp::detect_bursts(odd.data(), odd.size(), -30.0f, 200);
+    check(b3.size() == 1 && b3[0].length_samples >= 909, "奇数长度突发");
+}
+
+static void test_live_bursts_ring_wrap() {
+    // 环 1000：写 2700 样本（2.7 圈），突发在绝对 2000..2199（末圈内）
+    hackrftool::dsp::LiveBursts live(1000);
+    const std::vector<std::int8_t> silence(2000, 1);   // 2000 字节 = 1000 样本静默
+    live.write(silence.data(), silence.size());
+    live.write(silence.data(), silence.size());   // 累计 2000 静默
+    std::vector<std::int8_t> burst(200 * 2, 1);
+    for (std::size_t i = 0; i < 200; ++i) {
+        burst[i * 2] = 100;
+        burst[i * 2 + 1] = 0;
+    }
+    live.write(burst.data(), burst.size());
+    live.write(silence.data(), silence.size() / 2);   // 尾部静默推进水位
+    (void)live.refresh(-30.0f, 200);
+    check(live.bursts().size() == 1, "回绕后检出 1 突发");
+    if (!live.bursts().empty()) {
+        const auto& b = live.bursts().back();
+        check(b.start_sample >= 1800 && b.start_sample <= 2200, "回绕绝对样本号连续");
+        std::vector<std::int8_t> slice;
+        check(live.read_slice(b.start_sample, b.samples, slice), "回绕切片可取");
+        // 检测起点含 -window/2 修正，切片头部允许静默：断言主体为突发
+        int strong = 0;
+        for (std::size_t i = 0; i + 1 < slice.size(); i += 2)
+            strong += (int(slice[i]) > 50) ? 1 : 0;
+        check(slice.size() == b.samples * 2 && strong >= 90, "回绕切片包含突发主体");
+    }
+    // 早于最旧水位 → 拒绝
+    std::vector<std::int8_t> out;
+    check(!live.read_slice(0, 10, out), "被挤出环的区间拒绝");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -587,6 +666,9 @@ int main() {
     test_esb_corruption_rejected();
     test_esb_noise();
     test_end_to_end_pipeline();
+    test_iq_recorder_contract_edges();
+    test_burst_detector_edges();
+    test_live_bursts_ring_wrap();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }
