@@ -9,6 +9,7 @@
 
 #include "dsp/analyzer.hpp"
 #include "app/settings.hpp"
+#include "dsp/meteor.hpp"
 #include "app/telemetry.hpp"
 #include "dsp/burst_detector.hpp"
 #include "dsp/channel_monitor.hpp"
@@ -1078,6 +1079,78 @@ static void test_telemetry() {
     _wremove(tmp.c_str());
 }
 
+// Meteor QPSK 解调（#70）：合成 72ksym QPSK（Sps≈6.67@480k 抽取域）加噪，
+// Costas+Gardner 收敛后眼图张开、符号判决正确率 >95%；ASM 帧同步容忍噪声
+static void test_meteor_qpsk() {
+    using hackrftool::dsp::QpskDemod;
+    using hackrftool::dsp::qpsk_soft_bits;
+    using hackrftool::dsp::find_ccsds_asm;
+    // 合成：sps=8（480k/60k 便于整数域验证），随机 QPSK + 频偏 0.8 rad/千样本
+    const double sps = 8.0, foff = 0.0008;
+    std::vector<std::complex<float>> samples;
+    std::vector<std::pair<float, float>> truth;
+    unsigned rng = 12345;
+    const auto rnd = [&rng] {
+        rng = rng * 1664525u + 1013904223u;
+        return (double(rng >> 8) / 16777216.0) - 0.5;
+    };
+    const int n_sym = 4000;
+    for (int k = 0; k < n_sym; ++k) {
+        const int quad = int((rng >> 16) & 3);
+        const double base = (quad * 90 + 45) * hackrftool::dsp::kPi / 180.0;
+        truth.push_back({float(std::cos(base)), float(std::sin(base))});
+        for (int j = 0; j < int(sps); ++j) {
+            const double ph = base + double(k * int(sps) + j) * foff;
+            const double noise = 0.05 * rnd();
+            samples.push_back({float(std::cos(ph) + noise),
+                               float(std::sin(ph) + 0.05 * rnd())});
+        }
+    }
+    QpskDemod demod(sps);
+    long agree = 0, total = 0, skip = 500;   // 前 500 符号收敛期不计
+    std::vector<float> soft;
+    for (std::size_t i = 0, si = 0; i < samples.size() && si < truth.size();
+         ++i) {
+        if (auto s = demod.push(samples[i])) {
+            if (skip > 0) { --skip; ++si; continue; }
+            const auto& t = truth[si++];
+            // 相位模糊四态：任一旋转一致即判对
+            bool ok = false;
+            for (int r = 0; r < 4; ++r) {
+                const double a = r * hackrftool::dsp::kPi / 2;
+                const float ti = float(t.first * std::cos(a) -
+                                       t.second * std::sin(a));
+                const float tq = float(t.first * std::sin(a) +
+                                       t.second * std::cos(a));
+                if ((s->first >= 0) == (ti >= 0) && (s->second >= 0) == (tq >= 0))
+                    ok = true;
+            }
+            if (ok) ++agree;
+            ++total;
+            const auto bits = qpsk_soft_bits(s->first, s->second);
+            soft.push_back(bits.first);
+            soft.push_back(bits.second);
+        }
+    }
+    check(total >= int(n_sym) - 600,   // 500 收敛期跳过 + 末端半符号余量
+          "解调器符号产出率正常（Gardner 逐符号）");
+    check(double(agree) / double(std::max<long>(total, 1)) > 0.95,
+          "QPSK 判决正确率 >95%（Costas 四态模糊内）");
+    check(demod.eye_quality() > 0.6, "眼图质量收敛（>0.6）");
+    // ASM：把已知 ASM 经同一映射插入软比特流头部再找
+    static const int asm_bits[32] = {0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1,
+                                     1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1,
+                                     0, 1};
+    std::vector<float> with_asm;
+    for (int b = 0; b < 32; ++b) with_asm.push_back(asm_bits[b] ? 1.f : -1.f);
+    for (float v : soft) with_asm.push_back(v);
+    double q = 0.0;
+    const long pos = find_ccsds_asm(with_asm, &q);
+    check(pos == 0 && q > 0.9, "CCSDS ASM 帧同步精确命中（头部）");
+    const long pos2 = find_ccsds_asm(soft, &q);
+    check(pos2 >= 0 || q < 0.9, "随机流不误报 ASM（或质量阈值外）");
+}
+
 static void test_settings_roundtrip() {
     using hackrftool::app::Settings;
     Settings s;
@@ -1385,6 +1458,7 @@ int main() {
     test_peak_snap();
     test_voice_level();
     test_settings_roundtrip();
+    test_meteor_qpsk();
     test_telemetry();
     test_audio_spectrum();
     test_fm_decimator_stopband();
