@@ -4,6 +4,8 @@
 #include <utility>
 #include <vector>
 
+#include "dsp/level_map.hpp"
+
 namespace hackrftool::ui {
 
 namespace {
@@ -14,6 +16,9 @@ float db_to_y(float db, float y, float h) noexcept {
     const float t = (kDbTop - db) / (kDbTop - kDbFloor);   // 0..1，上小下大
     return y + 4.0f + t * (h - 22.0f);   // 上下留白给轴标签
 }
+
+// dB → 16 级色阶（dsp/level_map.hpp，映射窗 [-110,-30]：原 [-100,-40] 下
+// 深蓝档在常用增益（16/16，底噪 -70~-50）永不触发）
 
 // 16 级瀑布色带：深蓝 → 蓝 → 绿 → 黄 → 红
 flux::Color wf_color(int level) noexcept {
@@ -96,12 +101,8 @@ flux::ElementPtr waterfall_view(const flux::Palette& pal,
         const float cw = w / float(cols), rh = (h - 4.0f) / float(rows);
         for (std::size_t row = 0; row < rows; ++row) {
             for (std::size_t col = 0; col < cols; ++col) {
-                const float db = snap[row * cols + col];
-                // dB → 16 级：[-100,-40] 映射 [0,15]，≤-100 视为底
                 const int level =
-                    (db <= kDbFloor)
-                        ? 0
-                        : std::clamp(int((db - kDbFloor) / 60.0f * 15.0f), 0, 15);
+                    hackrftool::dsp::waterfall_level(snap[row * cols + col]);
                 r.fill_rect(flux::Rect{x + float(col) * cw, y + 2.0f + float(row) * rh,
                                        cw + 1.0f, rh + 1.0f},
                             wf_color(level));

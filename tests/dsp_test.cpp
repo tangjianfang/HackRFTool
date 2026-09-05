@@ -13,6 +13,7 @@
 #include "dsp/fft.hpp"
 #include "dsp/esb.hpp"
 #include "dsp/gfsk.hpp"
+#include "dsp/level_map.hpp"
 #include "dsp/live_bursts.hpp"
 #include "dsp/panorama.hpp"
 #include "dsp/waterfall.hpp"
@@ -669,6 +670,21 @@ static void test_capture_sidecar() {
     _wremove(L"test-sc.cs8.txt");
 }
 
+static void test_waterfall_level_map() {
+    // 映射窗 [-110,-30]：端点钳制 + 单调 + 常用底噪档位可见（T4.3）
+    check(hackrftool::dsp::waterfall_level(-130.0f) == 0, "低于窗底 → 0");
+    check(hackrftool::dsp::waterfall_level(-110.0f) == 0, "窗底 → 0");
+    check(hackrftool::dsp::waterfall_level(-30.0f) == 15, "窗顶 → 15");
+    check(hackrftool::dsp::waterfall_level(-10.0f) == 15, "高于窗顶 → 15");
+    check(hackrftool::dsp::waterfall_level(-70.0f) == 7, "中点 -70 → 7（7.5 截断）");
+    check(hackrftool::dsp::waterfall_level(-70.0f) ==
+              hackrftool::dsp::waterfall_level(-70.0f),
+          "纯函数确定");
+    // T4.3 验收：旧窗 [-100,-40] 下 -75dB 落 6 级，但 -95dB 底噪=0 级全黑；
+    // 新窗下 -95 → 2 级（深蓝可见）
+    check(hackrftool::dsp::waterfall_level(-95.0f) == 2, "深底噪 -95 → 深蓝可见");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -696,6 +712,7 @@ int main() {
     test_burst_detector_edges();
     test_live_bursts_ring_wrap();
     test_capture_sidecar();
+    test_waterfall_level_map();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }
