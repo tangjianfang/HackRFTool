@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #76（验收报告终态更新——B6/B7 与 Meteor 状态）
-- rounds done: 30（#50–#75 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #77（epic 候选评估：Meteor 解压缩 EP 提案——触发标准 d）
+- rounds done: 31（#50–#76 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
@@ -57,6 +57,7 @@
 #73 | pool-refresh：Tier1-4 全量重核（T1.1/T1.2/T1.3 已修出池；新增 T1.5/T1.6/T4.6/T4.7；Tier3 按当前 src 重列——action pool-refresh） | findings(0) | actions(0) | result(green+no-progress（池维护轮）, 5 ctest/235 断言) | diff(+~40) | 池与代码对齐（D7 反向：代码已超前池）
 #74 | T4.6 README 功能补全（#53-#71 新功能入需求文档） | findings(0) | actions(1) | result(green+no-progress（文档轮）, 5 ctest/235 断言) | diff(+~8) | 扩展功能行：收音机/云图/Meteor/信号库/持久化/缩放/遥测
 #75 | 遥测体积测量（measured）：117B/行实测，全开 2 行/s → 1MB 轮转 89 分钟、3 份 4.4 小时 | findings(0) | actions(0) | result(green+no-progress（测量轮，结论：容量充足不做降采样——避免过度工程）, 5 ctest/235 断言) | diff(0) | 体积评估闭环
+#76 | 验收报告终态（B6 排查就绪/B7 完成/Meteor 交付） | findings(0) | actions(1) | result(green+no-progress（文档）, 5 ctest/235 断言) | diff(+~6) | 报告与实际状态对齐
 
 ## 运行总结（#1–#4，用户指令停止）
 
