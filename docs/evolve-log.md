@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #63（频谱 Y 轴范围可调——用户建议 3b 余项）
-- rounds done: 17（#50–#62 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #64（遥测日志查看器——日志页/导出，服务云图排查与用户直接读日志）
+- rounds done: 18（#50–#63 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - epics pending: none
@@ -46,6 +46,7 @@
 #60 | 数据面遥测：UI 状态变更快照+DSP 1Hz+断言工具（日志替代视觉 #2） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~120) | UI state 事件=状态串 diff 变化即记（9 字段）；DSP fm 1Hz（peak/pilot/voice/静噪/avg——信号质量时间序列）；selftest 报告附遥测行（events=3 实测）；tools/log-assert.py 断言工具；真机六类事件断言 ALL PASS（tail 验证 1Hz 节流正确）
 #61 | APT 链路诊断遥测+scan/record/sweep 埋点（日志替代视觉 #3；云图 B6 排查基础） | findings(1) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~110) | AptDecoder 导出 subcarrier_level/sync_per_sec（过境判读三要素：sub/sync/lines）；APT diag 1Hz 实测待过境 sub=0.006-0.023 底噪/lines=2 噪声行——卫星来时日志可直接判链路哪段断；SCAN start/done+record+sweep 生命周期入日志。排障：埋点插在变量声明前（C2065 连锁 13 错——python replace 锚点选声明行之前）
 #62 | 信号库非模态弹窗（用户建议 3a；日志替代视觉 #4） | findings(2) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~160) | 工具栏「信号库」按钮→原生非模态 ListView（双击=调谐，任意页可用）；库版本戳增量刷新防闪；SIGDB open/close/pick 入日志——日志驱动验收 ALL PASS 零截图。坑：filter_signals 返回下标集；匿名 ns 内定义与前向声明=两个函数（C2668）
+#63 | 频谱 Y 轴动态档 100/60/40dB（用户建议 3b 收尾） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~60) | spectrum_view 尾参 y_floor（默认行为不变）；缩放条 Y 轴 segmented 三档（40dB 细节档看弱信号）与 X 缩放正交组合；spec_y_idx 入持久化
 
 ## 运行总结（#1–#4，用户指令停止）
 
