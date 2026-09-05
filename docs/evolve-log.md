@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #61（云图 APT 链路日志化排查 B6 + scan/record/sweep 埋点）
-- rounds done: 15（#50–#60 已完成；本 run= #59–#78 共 20 轮）
+- pointer: #62（信号库非模态弹窗——用户建议 3a）
+- rounds done: 16（#50–#61 已完成；本 run= #59–#78 共 20 轮）
 - status: active
 - metrics: findings 38 | fixes 40 | regressions 0（E4 按轮次行累加）
 - epics pending: none
@@ -44,6 +44,7 @@
 #58 | 用户指令：全功能验收（工具栏/设置逐项+组合矩阵）→ 修复 B1-B5 + X 轴缩放 | findings(6) | actions(6) | result(green+progress, 5 ctest/217 断言) | diff(+~350) | 验收产物 docs/acceptance-report.md（功能脑图/选项规范性对照表/组合矩阵/问题清单）；修复：B1 收音链切采样率丢带宽（漏传 fm_bw 静默回 120k）、B2 全频段扫描锁采样率 20M（低档 5 段拼接频标错乱）、B3 全频段×收音页（开扫描停 FM 链+进页拒开，真机实测状态栏提示）、B4 收音页头部重构（信号灯绿/红+导频/峰值数值读数替代 24 格跳动条+立体声选项热切换 force_mono；设置行拆两行——行1 频率/带宽/音量/静音，行2 筛选/输出/微调/立体声，settings_rows() 纯函数 host_target/layout 共用）、B5 频谱页模式标题（单窗显示范围/全景标注扫描中——解用户"显示全频道是什么意思"疑问：即全频段扫描模式）；新增频谱 X 轴缩放（×1/2/4/8 segmented+左右平移+范围文本+刻度 0.2~10M 六档自适应，显示窗切片实现 spectrum_view 零改动）；stereo_opt/spec_zoom_idx 入设置持久化（20 项）；WM_DPICHANGED 字体列表补齐 radio 行（顺手修）。真机复测：两行布局全控件可见、×8=5MHz 窗 1M 刻度、B3 提示实测。待办移交 #59：信号库非模态弹窗（3a）、波形 Y 轴详细设置（3b 余）、云图接收链排查（B6 需卫星过境）
 #59 | 用户指令：全量日志系统（UI/点击/事件/数据详细记录，日志推算分析问题；减少视觉识别——本轮起验收走日志断言，run=#59–#78 共 20 轮） | findings(2) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+318) | src/app/telemetry：JSONL 结构化事件+环形缓冲（tail/count_event 自测断言）+文件 sink（1MB×3 轮转逐条 fflush）；埋点 on_command（code 白名单 0/1 滤 EN 刷屏）/on_hscroll/tune_to/toggle_rx 起停含失败 err/ensure_fm/reconfigure_rx/applyfreq/app 起停；测试 217→228（转义/序列化/环形/计数）；真机日志验收新范式：驱动序列→断言 app.start→rx.start→reconfig→fm.on→tune 事件链 ALL PASS 零截图。排障：kv 键 cat 与 JSON 顶层撞名（重复键覆盖）→band。视觉识别问题本 session 已实证（LNA 40 幻觉/波形数据幻觉两次）——用户指令正确
 #60 | 数据面遥测：UI 状态变更快照+DSP 1Hz+断言工具（日志替代视觉 #2） | findings(0) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~120) | UI state 事件=状态串 diff 变化即记（9 字段）；DSP fm 1Hz（peak/pilot/voice/静噪/avg——信号质量时间序列）；selftest 报告附遥测行（events=3 实测）；tools/log-assert.py 断言工具；真机六类事件断言 ALL PASS（tail 验证 1Hz 节流正确）
+#61 | APT 链路诊断遥测+scan/record/sweep 埋点（日志替代视觉 #3；云图 B6 排查基础） | findings(1) | actions(1) | result(green+progress, 5 ctest/228 断言) | diff(+~110) | AptDecoder 导出 subcarrier_level/sync_per_sec（过境判读三要素：sub/sync/lines）；APT diag 1Hz 实测待过境 sub=0.006-0.023 底噪/lines=2 噪声行——卫星来时日志可直接判链路哪段断；SCAN start/done+record+sweep 生命周期入日志。排障：埋点插在变量声明前（C2065 连锁 13 错——python replace 锚点选声明行之前）
 
 ## 运行总结（#1–#4，用户指令停止）
 
