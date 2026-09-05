@@ -144,6 +144,7 @@ struct App {
     std::vector<CtlSlot> row_capture;   // 仅抓包页
     // 工具栏状态同步缓存（避免每帧重复 TB_SETSTATE 消息）
     int sync_run = -1, sync_page = -1, sync_sweep = -1, sync_rec = -1;
+    std::wstring sync_sb[6];   // 状态栏分段文本缓存（相同文本不重发 SB_SETTEXT）
 };
 
 constexpr double kSweepLoMhz = 2400.0;
@@ -1024,14 +1025,16 @@ void layout(App& app) {
     const int tb_h = tb.bottom - tb.top;
     MoveWindow(app.toolbar, 0, 0, w, tb_h, TRUE);
 
-    // 设置行（单行，创建顺序摆放；页上下文控件按当前页显隐）
+    // 设置行（单行，创建顺序摆放；页上下文控件按当前页显隐）。
+    // bRepaint=FALSE：拉伸时每步 WM_SIZE 重摆全部控件，带重画会连闪；
+    // 控件自身收到 WM_PAINT 补画即可。
     const int ctl_h = 24 * s;
     int x = 8 * s;
     const int row_y = tb_h + (34 * s - ctl_h) / 2;
     const auto place = [&](std::vector<App::CtlSlot>& v) {
         for (const auto& c : v) {
             const int ch = c.drop ? 130 * s : ctl_h;   // 组合框高度含下拉列表
-            MoveWindow(c.h, x, row_y, c.w * s, ch, TRUE);
+            MoveWindow(c.h, x, row_y, c.w * s, ch, FALSE);
             x += c.w * s + 6 * s;
         }
     };
@@ -1066,10 +1069,12 @@ void layout(App& app) {
         if (edges[i] <= edges[i - 1]) edges[i] = edges[i - 1] + 4;
     SendMessageW(app.statusbar, SB_SETPARTS, 6, LPARAM(edges));
 
-    // 内容区（WinFlux 子窗口）填满剩余
+    // 内容区（WinFlux 子窗口）填满剩余。bRepaint=FALSE：Host 的 WM_SIZE
+    // 处理器本身做同步直绘（request_render 不走 InvalidateRect），额外
+    // 失效只会叠加一遍擦除-重画造成拖拽闪烁
     if (app.host.hwnd() != nullptr)
         MoveWindow(app.host.hwnd(), 0, tb_h + row_h, w,
-                   h - tb_h - row_h - sb_h, TRUE);
+                   h - tb_h - row_h - sb_h, FALSE);
 }
 
 // 工具栏按钮态 + 状态栏文本（build 心跳驱动；缓存避免每帧消息风暴）
@@ -1114,8 +1119,8 @@ void sync_chrome(App& app) {
 
     if (app.statusbar != nullptr) {
         // 分段 0：基础状态（接收中时由动态段首词接续，避免与分段 1 重复）
-        std::wstring base = app.running ? L"接收中" : app.status;
-        SendMessageW(app.statusbar, SB_SETTEXT, 0, LPARAM(base.c_str()));
+        std::wstring parts[6];
+        parts[0] = app.running ? L"接收中" : app.status;
         hackrftool::ui::StatusInfo si;
         si.running = app.running;
         si.sweep = app.sweep_on == 1;
@@ -1130,10 +1135,13 @@ void sync_chrome(App& app) {
         si.frame_seq = app.frame.seq;
         si.rec_bytes = app.recorder.bytes_written();
         si.esb_hits = app.esb_hits.load();
-        std::wstring parts[5];
-        hackrftool::ui::status_parts(si, parts);
-        for (int i = 0; i < 5; ++i)
-            SendMessageW(app.statusbar, SB_SETTEXT, 1 + i, LPARAM(parts[i].c_str()));
+        hackrftool::ui::status_parts(si, parts + 1);
+        for (int i = 0; i < 6; ++i) {
+            if (parts[i] != app.sync_sb[i]) {   // 文本未变不重发（防重绘叠加闪烁）
+                app.sync_sb[i] = parts[i];
+                SendMessageW(app.statusbar, SB_SETTEXT, i, LPARAM(parts[i].c_str()));
+            }
+        }
     }
 }
 
@@ -1230,6 +1238,16 @@ void on_hscroll(App& app, HWND ctl) {
 LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
     switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;   // 不擦除（类画刷=nullptr）：新暴露区域由 WM_PAINT 增量填充
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(wnd, &ps);
+        // 只填无效区（WS_CLIPCHILDREN 已把子控件区域裁出）：设置行底色
+        FillRect(ps.hdc, &ps.rcPaint, GetSysColorBrush(COLOR_BTNFACE));
+        EndPaint(wnd, &ps);
+        return 0;
+    }
     case WM_COMMAND:
         if (app != nullptr)
             on_command(*app, LOWORD(wp), HIWORD(wp), reinterpret_cast<HWND>(lp));
@@ -1358,19 +1376,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
         }
     }
 
-    // 主窗口（原生骨架）+ 工具栏 + 设置行 + 状态栏
+    // 主窗口（原生骨架）+ 工具栏 + 设置行 + 状态栏。
+    // 类样式禁用 CS_HREDRAW/CS_VREDRAW（拉伸时全窗失效重画=闪烁元凶），
+    // 背景改由 WM_PAINT 只填无效区；WS_EX_COMPOSITED 让 GDI 子控件
+    //（工具栏/设置行/状态栏）双缓冲合成，消除拖拽残闪。
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = &main_wndproc;
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
+    wc.hbrBackground = nullptr;
     wc.lpszClassName = L"HackRFToolMain";
     RegisterClassExW(&wc);
     const UINT dpi = GetDpiForSystem();
     app.main_wnd = CreateWindowExW(
-        0, L"HackRFToolMain", L"HackRFTool",
+        WS_EX_COMPOSITED, L"HackRFToolMain", L"HackRFTool",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
         MulDiv(1200, dpi, 96), MulDiv(860, dpi, 96), nullptr, nullptr, instance,
         &app);
