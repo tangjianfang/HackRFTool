@@ -1319,6 +1319,9 @@ flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
     const std::uint64_t lines = app.apt.lines();
     const bool imaging =
         app.meteor_on ? app.meteor_asm_hits > 0 : (sps >= 1 && lines > 0);
+    // 注：eye_quality 在非 QPSK 信号（如 NOAA APT 载波）上也会虚高自聚
+    //（实测 0.91）——ASM 命中才是帧同步金标准，eye 仅辅助
+
     wchar_t txt[96];
     if (app.meteor_on) {   // Meteor LRPT：眼图/频偏/ASM 命中（QPSK 直解）
         swprintf(txt, 96, L"眼图 %.2f｜频偏 %.4f｜ASM 命中 %lu",
