@@ -40,6 +40,7 @@ std::string serialize(const Settings& s) {
     os << "amp\t" << (s.amp ? 1 : 0) << "\n";
     os << "auto_track\t" << (s.auto_track ? 1 : 0) << "\n";
     os << "afc_on\t" << (s.afc_on ? 1 : 0) << "\n";
+    os << "stereo_opt\t" << (s.stereo_opt ? 1 : 0) << "\n";
     os << "threshold\t" << s.threshold << "\n";
     os << "burst_thr\t" << s.burst_thr << "\n";
     os << "symrate_idx\t" << s.symrate_idx << "\n";
@@ -97,6 +98,8 @@ std::optional<Settings> deserialize(std::string_view text) {
             if (clamp_int(std::llround(d), 0, 1, i)) { s.auto_track = i != 0; any = true; }
         } else if (key == "afc_on") {
             if (clamp_int(std::llround(d), 0, 1, i)) { s.afc_on = i != 0; any = true; }
+        } else if (key == "stereo_opt") {
+            if (clamp_int(std::llround(d), 0, 1, i)) { s.stereo_opt = i != 0; any = true; }
         } else if (key == "threshold") {
             if (finite_double(d, -120.0, 0.0, s.threshold)) any = true;
         } else if (key == "burst_thr") {

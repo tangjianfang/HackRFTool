@@ -150,6 +150,8 @@ struct App {
     bool afc_on = true;                    // AFC 自动频率微调（收音页）
     HWND check_afc = nullptr;
     int fm_bw = 0;                         // 收听带宽：0=±120k 1=±80k 2=±50k
+    bool stereo_opt = true;                // 立体声选项（不勾=强制单声，B4）
+    HWND check_stereo = nullptr;
     HWND combo_bw = nullptr;
     unsigned long long afc_pause_until = 0;   // 显式调谐后 AFC 暂停期限
     float squelch_gain = 0.0f;             // 静噪增益平滑（fm 线程私有）
@@ -237,6 +239,7 @@ struct App {
     std::vector<CtlSlot> row_monitor;   // 仅监测页
     std::vector<CtlSlot> row_capture;   // 仅抓包页
     std::vector<CtlSlot> row_radio;     // 仅收音机页（#53）
+    std::vector<CtlSlot> row_radio2;    // 收音机页第二行（筛选/音频选项，B4）
     std::vector<CtlSlot> row_weather;   // 仅云图页（#54）
     // 工具栏状态同步缓存（避免每帧重复 TB_SETSTATE 消息）
     int sync_run = -1, sync_page = -1, sync_sweep = -1, sync_rec = -1;
@@ -552,6 +555,12 @@ void fm_loop(App& app) {
 // 开/关收音机音频链（进入收音页 + 接收中 → 开；离开/停止 → 关）。
 // 采样率自动切 2 Msps（窄带任务省算力，FmReceiver 按当前率重建）
 void ensure_fm(App& app, bool on) {
+    // B3：全频段扫描期间频率每秒轮换 5 段，解调音频只剩跳变噪声——
+    // 拒开音频链并提示（扫描关闭后进页/重新操作即恢复）
+    if (on && app.sweep_on == 1) {
+        app.status = L"全频段扫描中，收音/云图暂不可用（先退出全频段）";
+        return;
+    }
     const bool was = app.fm_on.load();
     if (on == was) {
         if (on && !app.waveout.running()) (void)app.waveout.start(app.audio_dev);
@@ -586,8 +595,8 @@ void ensure_fm(App& app, bool on) {
         app.iq_ring.clear();
         static const double kFmBw[3] = {120e3, 80e3, 50e3};
         app.fm_rx = std::make_unique<hackrftool::dsp::FmReceiver>(
-            kRatesMsps[size_t(app.rate_index)] * 1e6, 80.0, false,
-            kFmBw[size_t(app.fm_bw)]);
+            kRatesMsps[size_t(app.rate_index)] * 1e6, 80.0,
+            !app.stereo_opt, kFmBw[size_t(app.fm_bw)]);
         app.fm_rx->set_audio_callback(&fm_audio_cb, &app);
         const bool ok = app.waveout.start(app.audio_dev);
         if (!ok) app.status = L"音频设备打开失败（检查扬声器/默认设备）";
@@ -764,6 +773,11 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
     auto page_el = flux::view(std::move(page_p));
     const double half = half_bw_mhz(app);   // 窗宽随采样率（#53：低速档不再错位）
     if (app.sweep_on == 0) {
+        // B5：模式标题明示"看的是哪段"（用户疑问：全频道显示是什么意思）
+        wchar_t mode[64];
+        swprintf(mode, 64, L"单窗模式 %.0f–%.0f MHz（点击频谱=调谐）",
+                 app.center_mhz - half, app.center_mhz + half);
+        page_el->children.push_back(flux::ui::caption(pal, mode, {}));
         wchar_t lo[16], hi[16];
         swprintf(lo, 16, L"-%.0fM", half);
         swprintf(hi, 16, L"+%.0fM", half);
@@ -779,6 +793,10 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
         page_el->children.push_back(
             hackrftool::ui::waterfall_view(pal, app.waterfall, app.waterfall.seq()));
     } else {
+        page_el->children.push_back(flux::ui::caption(
+            pal,
+            L"全景扫描中 2400–2483.5 MHz（5 段每秒轮换拼接，点击强频段=专门收听）",
+            {}));
         const std::vector<hackrftool::ui::SpectrumTick> ticks = {
             {2400.0, L"2400"}, {2420.0, L"2420"}, {2440.0, L"2440"},
             {2460.0, L"2460"}, {2480.0, L"2480"},
@@ -1057,20 +1075,20 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
     freq_p.text_align = flux::Align::start;
     head->children.push_back(
         flux::label(wd1(app.radio_mhz) + L" MHz", std::move(freq_p)));
-    const bool stereo = app.fm_pilot.load() > 0.02f;
-    head->children.push_back(flux::ui::badge(
-        pal, stereo ? flux::ui::BadgeKind::success : flux::ui::BadgeKind::neutral,
-        stereo ? L"STEREO" : L"MONO"));
-    const float peak = app.fm_peak.load();
-    const int bars = std::min(int(peak * 24.0f + 0.5f), 24);
-    std::wstring meter;
-    for (int i = 0; i < 24; ++i) meter += (i < bars) ? L"█" : L"·";
-    head->children.push_back(flux::ui::caption(pal, meter, {}));
+    // 信号状态灯（B4）：绿=接收正常（判有台）、红=空频点——颜色即语义，
+    // 不再跳动；峰值与导频改为数值读数（稳定不闪，替代原 24 格电平条）
     head->children.push_back(flux::ui::badge(
         pal,
         app.squelch_open.load() ? flux::ui::BadgeKind::success
-                                : flux::ui::BadgeKind::neutral,
-        app.squelch_open.load() ? L"● 有台" : L"○ 空频点"));
+                                : flux::ui::BadgeKind::danger,
+        app.squelch_open.load() ? L"● 信号正常" : L"● 无信号"));
+    {
+        wchar_t buf[48];
+        swprintf(buf, 48, L"导频 %.3f｜峰值 %+.1f dB",
+                 app.fm_pilot.load(),
+                 20.0f * std::log10(std::max(app.fm_peak.load(), 1e-6f)));
+        head->children.push_back(flux::ui::caption(pal, buf, {}));
+    }
     page_el->children.push_back(std::move(head));
 
     // 人声强度滚动波形（30s 历史，人声越强越高=信号越好）
@@ -1310,6 +1328,7 @@ enum : int {
     IDC_CHECK_AMP,
     IDC_CHECK_AFC,
     IDC_COMBO_BW,
+    IDC_CHECK_STEREO,
 };
 
 // ---- 统一调谐与页面默认频率（#55） ------------------------------------------
@@ -1357,6 +1376,7 @@ void apply_page_default(App& app) {
     s.amp = app.amp;
     s.auto_track = app.auto_track;
     s.afc_on = app.afc_on;
+    s.stereo_opt = app.stereo_opt;
     s.threshold = app.threshold;
     s.burst_thr = app.burst_thr;
     s.symrate_idx = app.symrate_idx;
@@ -1380,6 +1400,7 @@ void restore_settings(App& app, const hackrftool::app::Settings& s) {
     app.amp = s.amp;
     app.auto_track = s.auto_track;
     app.afc_on = s.afc_on;
+    app.stereo_opt = s.stereo_opt;
     app.threshold = s.threshold;
     app.burst_thr = s.burst_thr;
     app.symrate_idx = s.symrate_idx;
@@ -1403,6 +1424,8 @@ void restore_settings(App& app, const hackrftool::app::Settings& s) {
                  app.auto_track ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(app.check_afc, BM_SETCHECK,
                  app.afc_on ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(app.check_stereo, BM_SETCHECK,
+                 app.stereo_opt ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(app.track_threshold, TBM_SETPOS, TRUE, LPARAM(int(app.threshold)));
     SendMessageW(app.track_burst, TBM_SETPOS, TRUE, LPARAM(int(app.burst_thr)));
     SetWindowTextW(app.lbl_thr, (std::to_wstring(int(app.threshold)) + L" dB").c_str());
@@ -1910,20 +1933,20 @@ void create_settings_row(App& app) {
     for (const wchar_t* s : {L"FM 广播", L"NOAA 卫星", L"2.4G ISM", L"全部"})
         SendMessageW(app.combo_sigcat, CB_ADDSTRING, 0, LPARAM(s));
     SendMessageW(app.combo_sigcat, CB_SETCURSEL, 0, 0);
-    slot(app.row_radio, app.combo_sigcat, 88, true);
+    slot(app.row_radio2, app.combo_sigcat, 88, true);   // 第二行：筛选组（B4）
     app.combo_online = make_ctl(app, WC_COMBOBOXW, nullptr,
                                 CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_ONLINE);
     for (const wchar_t* s : {L"仅在线", L"全部"})
         SendMessageW(app.combo_online, CB_ADDSTRING, 0, LPARAM(s));
     SendMessageW(app.combo_online, CB_SETCURSEL, 0, 0);
-    slot(app.row_radio, app.combo_online, 66, true);
+    slot(app.row_radio2, app.combo_online, 66, true);
     app.combo_sort = make_ctl(app, WC_COMBOBOXW, nullptr,
                               CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_SORT);
     for (const wchar_t* s : {L"按强度", L"按频率"})
         SendMessageW(app.combo_sort, CB_ADDSTRING, 0, LPARAM(s));
     SendMessageW(app.combo_sort, CB_SETCURSEL, 0, 0);
-    slot(app.row_radio, app.combo_sort, 66, true);
-    slot(app.row_radio,
+    slot(app.row_radio2, app.combo_sort, 66, true);
+    slot(app.row_radio2,
          make_ctl(app, WC_STATICW, L"输出", SS_LEFT | SS_CENTERIMAGE, 0, 0), 34);
     app.combo_audio = make_ctl(app, WC_COMBOBOXW, nullptr,
                                CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_AUDIO);
@@ -1931,7 +1954,7 @@ void create_settings_row(App& app) {
     for (const auto& d : hackrftool::audio::WaveOut::enum_devices())
         SendMessageW(app.combo_audio, CB_ADDSTRING, 0, LPARAM(d.c_str()));
     SendMessageW(app.combo_audio, CB_SETCURSEL, 0, 0);
-    slot(app.row_radio, app.combo_audio, 150, true);
+    slot(app.row_radio2, app.combo_audio, 150, true);
     slot(app.row_radio,
          make_ctl(app, WC_STATICW, L"频率 MHz", SS_LEFT | SS_CENTERIMAGE, 0, 0), 60);
     app.edit_radio = make_ctl(app, WC_EDITW, L"98.0",
@@ -1951,7 +1974,12 @@ void create_settings_row(App& app) {
     app.check_afc = make_ctl(app, WC_BUTTONW, L"自动微调", BS_AUTOCHECKBOX | WS_TABSTOP,
                              0, IDC_CHECK_AFC);
     SendMessageW(app.check_afc, BM_SETCHECK, BST_CHECKED, 0);
-    slot(app.row_radio, app.check_afc, 76);
+    slot(app.row_radio2, app.check_afc, 76);
+    // 立体声选项（B4）：不勾=强制单声（弱导频/噪声场景更稳）
+    app.check_stereo = make_ctl(app, WC_BUTTONW, L"立体声",
+                                BS_AUTOCHECKBOX | WS_TABSTOP, 0, IDC_CHECK_STEREO);
+    SendMessageW(app.check_stereo, BM_SETCHECK, BST_CHECKED, 0);
+    slot(app.row_radio2, app.check_stereo, 62);
     // 「扫描电台」为动作按钮，归工具栏行 1（布局契约：按钮在工具栏）
 
     // 云图页（#54）：卫星预设 + 记录 + 保存
@@ -1981,6 +2009,9 @@ void create_statusbar(App& app) {
 }
 
 // 内容区目标矩形（layout 与几何看门狗共用——判定与摆放必须同一算法）
+// 设置行行数（host_target 与 layout 共用——几何看门狗铁律：同一算法）
+int settings_rows(const App& app) { return app.page == 3 ? 2 : 1; }
+
 bool host_target(App& app, RECT* out) {
     if (app.main_wnd == nullptr || app.toolbar == nullptr ||
         app.statusbar == nullptr || app.host.hwnd() == nullptr)
@@ -1992,7 +2023,7 @@ bool host_target(App& app, RECT* out) {
     const int s = int(GetDpiForWindow(app.main_wnd)) / 96;
     const int row_h = 34 * s;
     out->left = 0;
-    out->top = (tb.bottom - tb.top) + row_h;
+    out->top = (tb.bottom - tb.top) + row_h * settings_rows(app);
     out->right = rc.right;
     out->bottom = std::max(rc.bottom - (sb.bottom - sb.top), out->top);
     return true;
@@ -2027,16 +2058,17 @@ void layout(App& app) {
     // bRepaint=FALSE：拉伸时每步 WM_SIZE 重摆全部控件，带重画会连闪；
     // 控件自身收到 WM_PAINT 补画即可。
     const int ctl_h = 24 * s;
-    int x = 8 * s;
     const int row_y = tb_h + (34 * s - ctl_h) / 2;
-    const auto place = [&](std::vector<App::CtlSlot>& v) {
+    const auto place = [&](std::vector<App::CtlSlot>& v, int line) {
+        int px = 8 * s;
+        const int py = row_y + line * 34 * s;
         for (const auto& c : v) {
             const int ch = c.drop ? 130 * s : ctl_h;   // 组合框高度含下拉列表
-            MoveWindow(c.h, x, row_y, c.w * s, ch, FALSE);
-            x += c.w * s + 6 * s;
+            MoveWindow(c.h, px, py, c.w * s, ch, FALSE);
+            px += c.w * s + 6 * s;
         }
     };
-    place(app.row_common);
+    place(app.row_common, 0);
     const bool mon = app.page == 1, cap = app.page == 2;
     const bool rad = app.page == 3, wx = app.page == 4;
     for (const auto& c : app.row_monitor)
@@ -2045,12 +2077,17 @@ void layout(App& app) {
         ShowWindow(c.h, cap ? SW_SHOW : SW_HIDE);
     for (const auto& c : app.row_radio)
         ShowWindow(c.h, rad ? SW_SHOW : SW_HIDE);
+    for (const auto& c : app.row_radio2)
+        ShowWindow(c.h, rad ? SW_SHOW : SW_HIDE);
     for (const auto& c : app.row_weather)
         ShowWindow(c.h, wx ? SW_SHOW : SW_HIDE);
-    if (mon) place(app.row_monitor);
-    if (cap) place(app.row_capture);
-    if (rad) place(app.row_radio);
-    if (wx) place(app.row_weather);
+    if (mon) place(app.row_monitor, 0);
+    if (cap) place(app.row_capture, 0);
+    if (rad) {
+        place(app.row_radio, 0);
+        place(app.row_radio2, 1);   // 收音页第二行：筛选/音频选项（B4）
+    }
+    if (wx) place(app.row_weather, 0);
 
     // 状态栏（先自适应高，再贴底 + 分段右缘）
     SendMessageW(app.statusbar, WM_SIZE, 0, 0);
@@ -2186,6 +2223,7 @@ void on_command(App& app, int id, int code, HWND from) {
     case IDC_SWEEP: {
         const LRESULT st = SendMessageW(app.toolbar, TB_GETSTATE, IDC_SWEEP, 0);
         const bool on = (st & TBSTATE_CHECKED) != 0;
+        if (on) ensure_fm(app, false);   // B3：开扫描先停音频链（跳频噪声无意义）
         if (on && app.rate_index != 4) {
             // 全频段扫描按 20 Msps 窗设计（5 段×17.5 MHz），强制顶档
             app.rate_index = 4;
@@ -2258,6 +2296,16 @@ void on_command(App& app, int id, int code, HWND from) {
         if (code == BN_CLICKED)
             app.afc_on = SendMessageW(app.check_afc, BM_GETCHECK, 0, 0) == BST_CHECKED;
         break;
+    case IDC_CHECK_STEREO:
+        if (code == BN_CLICKED) {
+            app.stereo_opt =
+                SendMessageW(app.check_stereo, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            if (app.fm_rx)
+                app.fm_rx->set_force_mono(!app.stereo_opt);   // 运行中热切换
+            app.status = app.stereo_opt ? L"立体声解码开启"
+                                        : L"强制单声道（弱导频场景更稳）";
+        }
+        break;
     case IDC_COMBO_BW:
         if (code == CBN_SELCHANGE) {
             const int i = int(SendMessageW(app.combo_bw, CB_GETCURSEL, 0, 0));
@@ -2288,14 +2336,23 @@ void on_command(App& app, int id, int code, HWND from) {
     case IDC_COMBO_RATE:
         if (code == CBN_SELCHANGE) {
             const int i = int(SendMessageW(app.combo_rate, CB_GETCURSEL, 0, 0));
+            if (app.sweep_on == 1 && i != 4) {
+                // B2：全景拼接按 20Msps 5 段设计，低档率频标全错——扫描中锁定
+                SendMessageW(app.combo_rate, CB_SETCURSEL, 4, 0);
+                app.status = L"全频段扫描期间采样率锁定 20 Msps（先退出全频段）";
+                break;
+            }
             if (i >= 0 && i < 5) {
                 app.rate_index = i;
                 reconfigure_rx(app, current_radio_cfg(app));
-                // 收音链运行中换采样率：按新率重建解调器
+                // 收音链运行中换采样率：按新率重建解调器（带宽档保持——
+                // B1：漏传第 4 参会静默回 ±120k，与带宽下拉显示不一致）
                 if (app.fm_on.load()) {
                     app.iq_ring.clear();
+                    static const double kBw[3] = {120e3, 80e3, 50e3};
                     app.fm_rx = std::make_unique<hackrftool::dsp::FmReceiver>(
-                        kRatesMsps[size_t(i)] * 1e6, 80.0);
+                        kRatesMsps[size_t(i)] * 1e6, 80.0, !app.stereo_opt,
+                        kBw[size_t(app.fm_bw)]);
                     app.fm_rx->set_audio_callback(&fm_audio_cb, &app);
                 }
             }
@@ -2435,7 +2492,9 @@ LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                      r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
         if (app != nullptr) {
             create_native_font(*app);
-            for (const auto* v : {&app->row_common, &app->row_monitor, &app->row_capture})
+            for (const auto* v : {&app->row_common, &app->row_monitor,
+                                  &app->row_capture, &app->row_radio,
+                                  &app->row_radio2, &app->row_weather})
                 for (const auto& c : *v)
                     if (c.h != nullptr) SendMessageW(c.h, WM_SETFONT,
                                                      WPARAM(app->font), TRUE);

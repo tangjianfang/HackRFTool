@@ -19,6 +19,7 @@ struct Settings {
     bool amp = false;                // 板载功放
     bool auto_track = true;          // 监测自动跟踪最强
     bool afc_on = true;              // 收音页自动频率微调
+    bool stereo_opt = true;          // 立体声解码（不勾=强制单声）
     double threshold = -70.0;        // 活动阈值 dB
     double burst_thr = -40.0;        // 突发阈值 dB
     int symrate_idx = 0;             // 0=1Mbps 1=2Mbps

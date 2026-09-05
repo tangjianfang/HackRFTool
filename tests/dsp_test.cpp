@@ -1029,6 +1029,7 @@ static void test_settings_roundtrip() {
     s.amp = true;
     s.auto_track = false;
     s.afc_on = false;
+    s.stereo_opt = false;
     s.threshold = -65;
     s.burst_thr = -35;
     s.symrate_idx = 1;
@@ -1046,8 +1047,9 @@ static void test_settings_roundtrip() {
           "频率字段往返");
     check(b.rate_index == 0 && b.lna == 24 && b.vga == 32 && b.amp,
           "增益/采样率/功放往返");
-    check(!b.auto_track && !b.afc_on && b.fm_bw == 2 && b.vol == 55,
-          "开关/带宽/音量往返");
+    check(!b.auto_track && !b.afc_on && !b.stereo_opt && b.fm_bw == 2 &&
+              b.vol == 55,
+          "开关/带宽/音量/立体声往返");
     check(b.sig_cat == 2 && !b.sig_online && b.sig_sort == 1 &&
               b.audio_dev == 1 && b.symrate_idx == 1,
           "筛选/设备/符号率往返");
