@@ -1048,6 +1048,34 @@ static void test_telemetry() {
     check(lg.count_event("TEST", "ev.a") >= 2, "按 cat/event 过滤计数");
     const auto tail = lg.tail(3);
     check(tail.size() == 3 && tail[2].kv[0].second == "2", "tail 时序与内容");
+    // 文件轮转（#69）：写满 max_bytes → 主文件截断、.1 存在且非空。
+    // 单实例日志器被上面用例占用——独立实例直测（open 到临时小文件）
+    hackrftool::log::Logger file_lg;
+    const std::wstring tmp = L"telem-rotate-test.jsonl";
+    _wremove((tmp + L".1").c_str());
+    _wremove(tmp.c_str());
+    file_lg.open(tmp, 400);   // 400B 上限，每条约 70B → 6 条内触发
+    for (int k = 0; k < 12; ++k) {
+        char ev[24];
+        std::snprintf(ev, sizeof ev, "ev%d", k);
+        file_lg.write(hackrftool::log::Level::info, "T", ev, {});
+    }
+    file_lg.close();
+    bool rot1 = false, main_nonempty = false;
+    if (std::FILE* f = _wfopen((tmp + L".1").c_str(), L"rb")) {
+        char buf[8];
+        rot1 = std::fread(buf, 1, 4, f) > 0;
+        std::fclose(f);
+    }
+    if (std::FILE* f = _wfopen(tmp.c_str(), L"rb")) {
+        char buf[8];
+        main_nonempty = std::fread(buf, 1, 4, f) > 0;
+        std::fclose(f);
+    }
+    check(rot1, "轮转归档 .1 非空（写满触发）");
+    check(main_nonempty, "轮转后主文件重写非空");
+    _wremove((tmp + L".1").c_str());
+    _wremove(tmp.c_str());
 }
 
 static void test_settings_roundtrip() {
