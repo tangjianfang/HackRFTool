@@ -171,6 +171,8 @@ struct App {
     int sig_sort = 0;         // 排序：0=强度 1=频率
     hackrftool::ui::SpectrumGeom spec_geom;   // 频谱点击换算几何（paint 每帧回写）
     HWND combo_sigcat = nullptr, combo_online = nullptr, combo_sort = nullptr;
+    int audio_dev = -1;   // 输出设备（-1=系统默认；WaveOut::enum_devices 下标）
+    HWND combo_audio = nullptr;
 
     // ---- 云图（#54）----
     std::atomic<bool> apt_on{false};           // APT 解码启用（记录勾选+云图页+接收中）
@@ -450,7 +452,7 @@ void fm_loop(App& app) {
 void ensure_fm(App& app, bool on) {
     const bool was = app.fm_on.load();
     if (on == was) {
-        if (on && !app.waveout.running()) (void)app.waveout.start();
+        if (on && !app.waveout.running()) (void)app.waveout.start(app.audio_dev);
         return;
     }
     if (on) {
@@ -469,7 +471,8 @@ void ensure_fm(App& app, bool on) {
         app.fm_rx = std::make_unique<hackrftool::dsp::FmReceiver>(
             kRatesMsps[size_t(app.rate_index)] * 1e6, 80.0);
         app.fm_rx->set_audio_callback(&fm_audio_cb, &app);
-        (void)app.waveout.start();
+        const bool ok = app.waveout.start(app.audio_dev);
+        if (!ok) app.status = L"音频设备打开失败（检查扬声器/默认设备）";
         app.fm_on.store(true);
         std::thread(fm_loop, std::ref(app)).detach();
     } else {
@@ -1113,6 +1116,7 @@ enum : int {
     IDC_COMBO_SIGCAT,
     IDC_COMBO_ONLINE,
     IDC_COMBO_SORT,
+    IDC_COMBO_AUDIO,
 };
 
 // ---- 统一调谐与页面默认频率（#55） ------------------------------------------
@@ -1597,6 +1601,15 @@ void create_settings_row(App& app) {
     SendMessageW(app.combo_sort, CB_SETCURSEL, 0, 0);
     slot(app.row_radio, app.combo_sort, 66, true);
     slot(app.row_radio,
+         make_ctl(app, WC_STATICW, L"输出", SS_LEFT | SS_CENTERIMAGE, 0, 0), 34);
+    app.combo_audio = make_ctl(app, WC_COMBOBOXW, nullptr,
+                               CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_AUDIO);
+    SendMessageW(app.combo_audio, CB_ADDSTRING, 0, LPARAM(L"系统默认"));
+    for (const auto& d : hackrftool::audio::WaveOut::enum_devices())
+        SendMessageW(app.combo_audio, CB_ADDSTRING, 0, LPARAM(d.c_str()));
+    SendMessageW(app.combo_audio, CB_SETCURSEL, 0, 0);
+    slot(app.row_radio, app.combo_audio, 150, true);
+    slot(app.row_radio,
          make_ctl(app, WC_STATICW, L"频率 MHz", SS_LEFT | SS_CENTERIMAGE, 0, 0), 60);
     app.edit_radio = make_ctl(app, WC_EDITW, L"98.0",
                               ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0,
@@ -1885,6 +1898,19 @@ void on_command(App& app, int id, int code, HWND from) {
     case IDC_COMBO_SORT:
         if (code == CBN_SELCHANGE)
             app.sig_sort = int(SendMessageW(app.combo_sort, CB_GETCURSEL, 0, 0));
+        break;
+    case IDC_COMBO_AUDIO:
+        if (code == CBN_SELCHANGE && app.fm_on.load()) {
+            // 切设备 = 重开音频链（设备在 open 时绑定）
+            app.audio_dev =
+                int(SendMessageW(app.combo_audio, CB_GETCURSEL, 0, 0)) - 1;
+            ensure_fm(app, false);
+            Sleep(50);
+            ensure_fm(app, true);
+        } else if (code == CBN_SELCHANGE) {
+            app.audio_dev =
+                int(SendMessageW(app.combo_audio, CB_GETCURSEL, 0, 0)) - 1;
+        }
         break;
     case IDC_COMBO_SAT:
         if (code == CBN_SELCHANGE) {

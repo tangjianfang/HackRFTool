@@ -127,11 +127,13 @@ void FmReceiver::mpx_step(float mpx) {
         const float ar = last_r_ + float(frac) * (de_r_ - last_r_);
         abuf_l_.push_back(std::clamp(al, -1.0f, 1.0f));
         abuf_r_.push_back(std::clamp(ar, -1.0f, 1.0f));
+        // 表头电平：峰值保持 + 慢衰减（~0.1s 回落）
+        peak_ *= 0.9998f;
+        peak_ = std::max(peak_, std::abs(al));
+        peak_ = std::max(peak_, std::abs(ar));
         res_pos_ -= 1.0;
         if (abuf_l_.size() >= 480) {
             if (cb_ != nullptr) cb_(abuf_l_.data(), abuf_r_.data(), 480, ctx_);
-            for (const float v : abuf_l_) peak_ = std::max(peak_, std::abs(v));
-            for (const float v : abuf_r_) peak_ = std::max(peak_, std::abs(v));
             abuf_l_.clear();
             abuf_r_.clear();
         }
