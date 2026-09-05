@@ -27,6 +27,7 @@
 
 #include "dsp/analyzer.hpp"
 #include "dsp/apt.hpp"
+#include "dsp/meteor.hpp"
 #include "app/settings.hpp"
 #include "app/telemetry.hpp"
 #include "dsp/channel_monitor.hpp"
@@ -152,6 +153,11 @@ struct App {
     HWND sigdb_wnd = nullptr;
     HWND sigdb_list = nullptr;
     unsigned sigdb_stamp = 0;   // 上次刷新的库版本（signals 大小+首条频率）
+    // Meteor LRPT（#71）：QPSK 直解（不走 FM 音频链），fm 数据线程读环喂入
+    std::unique_ptr<hackrftool::dsp::QpskDemod> meteor_demod;
+    std::vector<float> meteor_soft;      // 滑窗软比特（ASM 搜索）
+    unsigned long meteor_asm_hits = 0;   // CCSDS ASM 命中计数
+    int meteor_on = 0;                   // 1=云图页选了 Meteor
     // 日志查看器（#64）：遥测 tail 弹窗——云图排查/问题分析在应用内直接读
     HWND logview_wnd = nullptr;
     HWND logview_list = nullptr;
@@ -596,6 +602,32 @@ void fm_loop(App& app) {
             }
         }
         if (app.fm_rx) app.fm_rx->feed(tmp.data(), n);
+        // Meteor LRPT（#71）：QPSK 直接吃基带 IQ（int8 归一），软比特滑窗
+        // 搜 ASM——命中计数即帧同步指示（图像解压缩后置）
+        if (app.meteor_on && app.meteor_demod) {
+            const std::size_t pairs = n / 2;
+            for (std::size_t i = 0; i < pairs; ++i) {
+                const std::complex<float> iq{
+                    float(tmp[i * 2]) / 127.0f,
+                    float(tmp[i * 2 + 1]) / 127.0f};
+                if (auto sym = app.meteor_demod->push(iq)) {
+                    const auto bits =
+                        hackrftool::dsp::qpsk_soft_bits(sym->first, sym->second);
+                    app.meteor_soft.push_back(bits.first);
+                    app.meteor_soft.push_back(bits.second);
+                }
+            }
+            if (app.meteor_soft.size() >= 16384) {   // 滑窗搜帧头
+                double q = 0.0;
+                const long pos = hackrftool::dsp::find_ccsds_asm(
+                    app.meteor_soft, &q);
+                if (pos >= 0) ++app.meteor_asm_hits;
+                // 只保留尾 64 比特衔接（防窗口边界漏检）
+                app.meteor_soft.erase(
+                    app.meteor_soft.begin(),
+                    app.meteor_soft.end() - 64);
+            }
+        }
     }
     if (dump != nullptr) std::fclose(dump);
 }
@@ -1285,10 +1317,18 @@ flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
     const float sub = app.apt.subcarrier_level();
     const unsigned sps = app.apt.sync_per_sec();
     const std::uint64_t lines = app.apt.lines();
-    const bool imaging = sps >= 1 && lines > 0;
+    const bool imaging =
+        app.meteor_on ? app.meteor_asm_hits > 0 : (sps >= 1 && lines > 0);
     wchar_t txt[96];
-    swprintf(txt, 96, L"子载波 %.3f｜同步 %u/s｜累计行 %llu",
-             double(sub), sps, (unsigned long long)lines);
+    if (app.meteor_on) {   // Meteor LRPT：眼图/频偏/ASM 命中（QPSK 直解）
+        swprintf(txt, 96, L"眼图 %.2f｜频偏 %.4f｜ASM 命中 %lu",
+                 app.meteor_demod ? app.meteor_demod->eye_quality() : 0.0,
+                 app.meteor_demod ? app.meteor_demod->freq_offset_hz() : 0.0,
+                 app.meteor_asm_hits);
+    } else {
+        swprintf(txt, 96, L"子载波 %.3f｜同步 %u/s｜累计行 %llu",
+                 double(sub), sps, (unsigned long long)lines);
+    }
     flux::Props head_p;
     head_p.direction = flux::Direction::row;
     head_p.align = flux::Align::center;
@@ -1440,6 +1480,15 @@ flux::ElementPtr build(App& app) {
                  {"avg_db", std::to_string(
                                 sum / float(std::max<std::size_t>(
                                            app.frame.db.size(), 1)))}});
+            if (app.meteor_on && app.meteor_demod) {
+                char eye[16];
+                snprintf(eye, 16, "%.2f",
+                         app.meteor_demod->eye_quality());
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::info, "METEOR", "diag",
+                    {{"eye", eye},
+                     {"asm", std::to_string(app.meteor_asm_hits)}});
+            }
             if (app.apt_on.load()) {
                 // APT 链路诊断（#61）：云图排查三要素——子载波幅度/行同步率/
                 // 累计行数。过境判读：sub>0.3 且 sync≈2/s 且 lines 递增=链路
@@ -2239,7 +2288,7 @@ void create_settings_row(App& app) {
     app.combo_sat = make_ctl(app, WC_COMBOBOXW, nullptr,
                              CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_SAT);
     for (const wchar_t* s : {L"NOAA 19 · 137.100", L"NOAA 15 · 137.620",
-                             L"NOAA 18 · 137.9125"})
+                             L"NOAA 18 · 137.9125", L"Meteor M2 · 137.900"})
         SendMessageW(app.combo_sat, CB_ADDSTRING, 0, LPARAM(s));
     SendMessageW(app.combo_sat, CB_SETCURSEL, 1, 0);   // 默认 NOAA 15
     slot(app.row_weather, app.combo_sat, 130, true);
@@ -2791,14 +2840,32 @@ void on_command(App& app, int id, int code, HWND from) {
         break;
     case IDC_COMBO_SAT:
         if (code == CBN_SELCHANGE) {
+            // Meteor 模式切换（#71）：建/拆 QPSK 解调器（sps=采样率/72k）
+            {
+                const int sel =
+                    int(SendMessageW(app.combo_sat, CB_GETCURSEL, 0, 0));
+                const bool want_meteor = sel == 3;
+                if (want_meteor && !app.meteor_demod) {
+                    app.meteor_demod =
+                        std::make_unique<hackrftool::dsp::QpskDemod>(
+                            kRatesMsps[size_t(app.rate_index)] * 1e6 / 72000.0);
+                    app.meteor_soft.clear();
+                    app.meteor_asm_hits = 0;
+                } else if (!want_meteor) {
+                    app.meteor_demod.reset();
+                }
+                app.meteor_on = want_meteor ? 1 : 0;
+            }
             // NOAA 19/15/18 下行频率（#54 起配合 APT 解码）
-            static const double kSatMhz[3] = {137.100, 137.620, 137.9125};
+            static const double kSatMhz[4] = {137.100, 137.620, 137.9125,
+                                             137.900};
             const int i = int(SendMessageW(app.combo_sat, CB_GETCURSEL, 0, 0));
-            if (i >= 0 && i < 3 && app.running) {
+            if (i >= 0 && i < 4 && app.running) {
                 (void)app.radio.set_center_hz(kSatMhz[i] * 1e6);
                 app.center_mhz = kSatMhz[i];
                 app.radio_mhz = kSatMhz[i];
-                app.status = L"已调谐 " + wd1(kSatMhz[i]) + L" MHz（NOAA APT）";
+                app.status = L"已调谐 " + wd1(kSatMhz[i]) +
+                            (i == 3 ? L" MHz（Meteor LRPT）" : L" MHz（NOAA APT）");
             }
         }
         break;
