@@ -62,6 +62,18 @@ foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)
                 "${MSYS2_UCRT64_BIN}/${dll}" $<TARGET_FILE_DIR:HackRFSmoke>)
 endforeach()
 
+# 真机接收链定量诊断（临时工具）
+add_executable(HackRFRxCheck tools/rx_check.cpp src/dsp/analyzer.cpp
+                                        src/dsp/fft.cpp src/dsp/fm.cpp
+                                        src/radio/hackrf.cpp)
+target_include_directories(HackRFRxCheck PRIVATE src ${MSYS2_UCRT64_INCLUDE})
+flux_apply_compiler_options(HackRFRxCheck)
+foreach(dll libhackrf.dll libusb-1.0.dll libwinpthread-1.dll)
+    add_custom_command(TARGET HackRFRxCheck POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${MSYS2_UCRT64_BIN}/${dll}" $<TARGET_FILE_DIR:HackRFRxCheck>)
+endforeach()
+
 # M3：IQ 采集与离线分析控制台
 add_executable(HackRFCapture tools/iq_capture.cpp src/radio/hackrf.cpp
                                      src/radio/iq_recorder.cpp)

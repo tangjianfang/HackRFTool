@@ -309,6 +309,23 @@ hackrftool::radio::RadioConfig current_radio_cfg(App& app) {
     return cfg;
 }
 
+// 运行中重配（采样率/增益/频率）：停流→配置→重开。流中 hackrf_set_sample_rate
+// 返回成功但数据流不切换（真机实测解调全噪，#55c rx_check 铁证）
+void reconfigure_rx(App& app, const hackrftool::radio::RadioConfig& cfg) {
+    if (!app.running) {
+        std::string err;
+        if (!app.radio.apply(cfg, &err)) app.status = L"配置失败: " + widen(err);
+        return;
+    }
+    app.radio.stop_rx();
+    std::string err;
+    if (!app.radio.apply(cfg, &err)) {
+        app.status = L"配置失败: " + widen(err);
+    }
+    if (!app.radio.start_rx(&rx_trampoline_ui, &app, &err))
+        app.status = L"重启接收失败: " + widen(err);
+}
+
 void apply_radio(App& app) {
     hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
     std::string err;
@@ -328,6 +345,7 @@ void device_open_failed(App& app, const std::string& err) {
 }
 
 void ensure_fm(App& app, bool on);   // 收音机音频链开关（定义在收音机节）
+void reconfigure_rx(App& app, const hackrftool::radio::RadioConfig& cfg);
 void update_apt_on(App& app);        // APT 解码开关（定义在收音机节）
 
 void toggle_rx(App& app) {
@@ -479,14 +497,9 @@ void ensure_fm(App& app, bool on) {
             }
         }
         if (app.rate_index != 0) {
-            if (app.running) {
-                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
-                cfg.sample_rate_hz = 2e6;
-                std::string err;
-                if (!app.radio.apply(cfg, &err))
-                    app.status = L"切 2 Msps 失败: " + widen(err);
-            }
             app.rate_index = 0;
+            hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+            reconfigure_rx(app, cfg);
             SendMessageW(app.combo_rate, CB_SETCURSEL, 0, 0);
         }
         app.iq_ring.clear();
@@ -1887,14 +1900,8 @@ void on_command(App& app, int id, int code, HWND from) {
         const bool on = (st & TBSTATE_CHECKED) != 0;
         if (on && app.rate_index != 4) {
             // 全频段扫描按 20 Msps 窗设计（5 段×17.5 MHz），强制顶档
-            if (app.running) {
-                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
-                cfg.sample_rate_hz = 20e6;
-                std::string err;
-                if (!app.radio.apply(cfg, &err))
-                    app.status = L"切 20 Msps 失败: " + widen(err);
-            }
             app.rate_index = 4;
+            reconfigure_rx(app, current_radio_cfg(app));
             SendMessageW(app.combo_rate, CB_SETCURSEL, 4, 0);
         }
         set_sweep_live(app, on && app.running);
@@ -1977,14 +1984,8 @@ void on_command(App& app, int id, int code, HWND from) {
         if (code == CBN_SELCHANGE) {
             const int i = int(SendMessageW(app.combo_rate, CB_GETCURSEL, 0, 0));
             if (i >= 0 && i < 5) {
-                if (app.running) {
-                    hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
-                    cfg.sample_rate_hz = kRatesMsps[size_t(i)] * 1e6;
-                    std::string err;
-                    if (!app.radio.apply(cfg, &err))
-                        app.status = L"配置失败: " + widen(err);
-                }
                 app.rate_index = i;
+                reconfigure_rx(app, current_radio_cfg(app));
                 // 收音链运行中换采样率：按新率重建解调器
                 if (app.fm_on.load()) {
                     app.iq_ring.clear();
