@@ -151,6 +151,7 @@ struct App {
     HWND check_afc = nullptr;
     int fm_bw = 0;                         // 收听带宽：0=±120k 1=±80k 2=±50k
     bool stereo_opt = true;                // 立体声选项（不勾=强制单声，B4）
+    int spec_zoom_idx = 0;                // 频谱 X 轴缩放档（×1/2/4/8，3c）
     HWND check_stereo = nullptr;
     HWND combo_bw = nullptr;
     unsigned long long afc_pause_until = 0;   // 显式调谐后 AFC 暂停期限
@@ -773,22 +774,64 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
     auto page_el = flux::view(std::move(page_p));
     const double half = half_bw_mhz(app);   // 窗宽随采样率（#53：低速档不再错位）
     if (app.sweep_on == 0) {
-        // B5：模式标题明示"看的是哪段"（用户疑问：全频道显示是什么意思）
-        wchar_t mode[64];
-        swprintf(mode, 64, L"单窗模式 %.0f–%.0f MHz（点击频谱=调谐）",
-                 app.center_mhz - half, app.center_mhz + half);
-        page_el->children.push_back(flux::ui::caption(pal, mode, {}));
-        wchar_t lo[16], hi[16];
-        swprintf(lo, 16, L"-%.0fM", half);
-        swprintf(hi, 16, L"+%.0fM", half);
-        const std::vector<hackrftool::ui::SpectrumTick> ticks = {
-            {app.center_mhz - half, lo},
-            {app.center_mhz, L"中心"},
-            {app.center_mhz + half, hi},
-        };
+        // 3c：X 轴缩放（×1/×2/×4/×8——256bin 基础上 8 倍仍余 32bin 连线；
+        // 更窄需降采样率）+ 左右平移（步长=显示半窗）；瀑布保持全窗（时基不变）
+        static const double kZooms[4] = {1.0, 2.0, 4.0, 8.0};
+        const double zoom = kZooms[size_t(app.spec_zoom_idx)];
+        const double vhalf = half / zoom;
+        {
+            flux::Props bar_p;
+            bar_p.direction = flux::Direction::row;
+            bar_p.align = flux::Align::center;
+            bar_p.gap = 8.0f;
+            auto bar = flux::view(std::move(bar_p));
+            bar->children.push_back(flux::ui::caption(pal, L"X 轴缩放", {}));
+            bar->children.push_back(flux::ui::segmented(
+                pal, {L"×1", L"×2", L"×4", L"×8"}, app.spec_zoom_idx,
+                [&app](int i) { app.spec_zoom_idx = i; }, {}));
+            bar->children.push_back(flux::ui::icon_button(
+                pal, flux::IconKind::chevron_left, L"左移半窗",
+                [&app, vhalf] { tune_to(app, app.center_mhz - vhalf); }));
+            bar->children.push_back(flux::ui::icon_button(
+                pal, flux::IconKind::chevron_right, L"右移半窗",
+                [&app, vhalf] { tune_to(app, app.center_mhz + vhalf); }));
+            wchar_t zt[48];
+            swprintf(zt, 48, L"显示 %.3f–%.3f MHz（步进 %.1f M）",
+                     app.center_mhz - vhalf, app.center_mhz + vhalf, vhalf);
+            bar->children.push_back(flux::ui::caption(pal, zt, {}));
+            page_el->children.push_back(std::move(bar));
+        }
+        // 显示窗切片（spectrum_view 语义：db 覆盖 [lo,hi]——切片免改组件）
+        std::vector<float> sub, subpk;
+        const double vlo = app.center_mhz - vhalf, vhi = app.center_mhz + vhalf;
+        if (!app.frame.db.empty()) {
+            const double fbw = 2.0 * half / double(app.frame.db.size());
+            for (std::size_t i = 0; i < app.frame.db.size(); ++i) {
+                const double f = app.center_mhz - half + double(i) * fbw + fbw / 2.0;
+                if (f >= vlo && f <= vhi) {
+                    sub.push_back(app.frame.db[i]);
+                    subpk.push_back(app.frame.peak.empty() ? app.frame.db[i]
+                                                           : app.frame.peak[i]);
+                }
+            }
+        }
+        // 刻度粒度自适应窗宽（0.2/0.5/1/2/5/10 M 六档）
+        const double vw = 2.0 * vhalf;
+        const double step = vw > 40.0    ? 10.0
+                            : vw > 16.0  ? 5.0
+                            : vw > 6.0   ? 2.0
+                            : vw > 2.4   ? 1.0
+                            : vw > 0.8   ? 0.5
+                                         : 0.2;
+        std::vector<hackrftool::ui::SpectrumTick> ticks;
+        for (double f = std::ceil(vlo / step) * step; f <= vhi + 1e-9;
+             f += step) {
+            wchar_t lab[16];
+            swprintf(lab, 16, L"%.6g", f);
+            ticks.push_back({f, lab});
+        }
         page_el->children.push_back(hackrftool::ui::spectrum_view(
-            pal, app.frame.db, app.frame.peak, app.center_mhz - half,
-            app.center_mhz + half, ticks, app.frame.seq, &app.spec_geom,
+            pal, sub, subpk, vlo, vhi, ticks, app.frame.seq, &app.spec_geom,
             [&app] { on_spectrum_click(app); }));
         page_el->children.push_back(
             hackrftool::ui::waterfall_view(pal, app.waterfall, app.waterfall.seq()));
@@ -1377,6 +1420,7 @@ void apply_page_default(App& app) {
     s.auto_track = app.auto_track;
     s.afc_on = app.afc_on;
     s.stereo_opt = app.stereo_opt;
+    s.spec_zoom_idx = app.spec_zoom_idx;
     s.threshold = app.threshold;
     s.burst_thr = app.burst_thr;
     s.symrate_idx = app.symrate_idx;
@@ -1401,6 +1445,7 @@ void restore_settings(App& app, const hackrftool::app::Settings& s) {
     app.auto_track = s.auto_track;
     app.afc_on = s.afc_on;
     app.stereo_opt = s.stereo_opt;
+    app.spec_zoom_idx = s.spec_zoom_idx;
     app.threshold = s.threshold;
     app.burst_thr = s.burst_thr;
     app.symrate_idx = s.symrate_idx;
