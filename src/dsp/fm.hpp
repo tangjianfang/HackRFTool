@@ -15,6 +15,14 @@ namespace hackrftool::dsp {
 [[nodiscard]] float fm_discriminator(std::complex<float> cur,
                                      std::complex<float> prev) noexcept;
 
+// AFC 自动频率微调（#55e）：给定频谱 bins（覆盖中心 ±bw/2），若最强峰
+// 显著（峰均差≥min_prom）且偏移在 [min_off, max_off]，返回向峰方向的
+// 修正量（MHz，含符号）；无需修正返回 0。纯函数可单测。
+[[nodiscard]] double afc_correction(const std::vector<float>& db,
+                                    double bw_mhz, float min_prom_db,
+                                    double min_off_mhz,
+                                    double max_off_mhz) noexcept;
+
 // hamming 窗 sinc 低通抽取器：fs_in → fs_in/L（L 定死输出 250 kHz）
 class Decimator {
 public:

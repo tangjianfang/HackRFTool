@@ -12,6 +12,36 @@ float fm_discriminator(std::complex<float> cur, std::complex<float> prev) noexce
     return std::atan2(d.imag(), d.real()) * float(1.0 / kPi);
 }
 
+double afc_correction(const std::vector<float>& db, double bw_mhz,
+                      float min_prom_db, double min_off_mhz,
+                      double max_off_mhz) noexcept {
+    if (db.size() < 8) return 0.0;
+    float sum = 0.0f;
+    for (const float v : db) sum += v;
+    const float avg = sum / float(db.size());
+    // 只在允许吸附窗口（|off|≤max_off）内找最强峰——全局最强若在窗外
+    // 会永久挡住窗口内的可修正峰（真机 98.0：窗外 98.6 强台遮住窗内
+    // 98.3，AFC 永不触发，dump 实测中心始终空频点）
+    const double frac = max_off_mhz / bw_mhz;
+    const long lo = long(double(db.size()) * (0.5 - frac));
+    const long hi = long(double(db.size()) * (0.5 + frac));
+    std::size_t best = 0;
+    bool found = false;
+    for (long i = std::max(lo, 0L); i < std::min(hi, long(db.size())); ++i) {
+        if (!found || db[size_t(i)] > db[best]) {
+            best = size_t(i);
+            found = true;
+        }
+    }
+    if (!found) return 0.0;
+    if (db[best] - avg < min_prom_db) return 0.0;
+    const double t =
+        (double(best) + 0.5) / double(db.size()) - 0.5;   // -0.5..0.5
+    const double off = t * bw_mhz;
+    if (std::abs(off) < min_off_mhz || std::abs(off) > max_off_mhz) return 0.0;
+    return off;
+}
+
 namespace {
 
 // hamming 窗 sinc 低通系数（截止 fc，采样 fs，系数和归一为 1）

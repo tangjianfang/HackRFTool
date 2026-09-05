@@ -951,6 +951,25 @@ static void test_fm_dc_offset_survives() {
     check(l_1k > 0.05, "强 DC 下 1 kHz 音频可恢复（直流阻塞有效）");
 }
 
+// AFC：偏置峰自动吸附（107.1 调谐 → 台在 -0.1 → 修正 -0.1 回中心）
+static void test_afc_correction() {
+    using hackrftool::dsp::afc_correction;
+    // 256 bins 覆盖 ±1 MHz：噪声底 -60，峰 -30 在 bin 115（=-0.101 MHz）
+    std::vector<float> db(256, -60.0f);
+    db[115] = -30.0f;
+    const double c = afc_correction(db, 2.0, 10.0f, 0.03, 0.3);
+    check(c < -0.09 && c > -0.11, "AFC 偏置峰修正 ≈ -0.1 MHz");
+    check(afc_correction(db, 2.0, 40.0f, 0.03, 0.3) == 0.0,
+          "峰不够显著不修正");
+    std::vector<float> flat(256, -60.0f);
+    flat[128] = -58.0f;   // 2dB 小起伏
+    check(afc_correction(flat, 2.0, 10.0f, 0.03, 0.3) == 0.0,
+          "平坦谱不修正");
+    std::vector<float> far(256, -60.0f);
+    far[10] = -20.0f;   // 偏移 -0.84 MHz 超界
+    check(afc_correction(far, 2.0, 10.0f, 0.03, 0.3) == 0.0, "超界偏移不修正");
+}
+
 static void test_fm_decimator_stopband() {
     using hackrftool::dsp::Decimator;
     // 2 Msps → 250 kHz：带内 40 kHz 通过，带外 400 kHz 显著衰减
@@ -1160,6 +1179,7 @@ int main() {
     test_fm_receiver_stereo();
     test_fm_receiver_mono_fallback();
     test_fm_dc_offset_survives();
+    test_afc_correction();
     test_fm_decimator_stopband();
     test_apt_decode();
     test_sigdb();

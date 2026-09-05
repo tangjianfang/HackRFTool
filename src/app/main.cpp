@@ -130,6 +130,8 @@ struct App {
     std::atomic<float> fm_pilot{0.0f};     // 导频相关（立体声判定，UI 读）
     std::atomic<float> fm_peak{0.0f};      // 音频峰值表
     std::atomic<bool> squelch_open{false}; // 静噪门（峰均差判据，UI 心跳写）
+    bool afc_on = true;                    // AFC 自动频率微调（收音页）
+    HWND check_afc = nullptr;
     float squelch_gain = 0.0f;             // 静噪增益平滑（fm 线程私有）
     double radio_mhz = 98.0;               // 收音机页当前频率
     std::vector<double> stations;          // 扫台结果（MHz）
@@ -1150,6 +1152,22 @@ flux::ElementPtr build(App& app) {
         }
     }
 
+    // AFC（收音页、非扫描）：偏置台自动吸附回中心（107.1→107.0 类修正）
+    if (app.fm_on.load() && app.afc_on && app.page == 3 &&
+        !app.fm_scan.load() && !app.frame.db.empty()) {
+        const double corr = hackrftool::dsp::afc_correction(
+            app.frame.db, 2.0 * half_bw_mhz(app), 10.0f, 0.03, 0.4);
+        if (corr != 0.0) {
+            const double want = app.center_mhz + corr;
+            app.center_mhz = want;
+            app.radio_mhz = want;
+            if (app.running) (void)app.radio.set_center_hz(want * 1e6);
+            wchar_t buf[32];
+            swprintf(buf, 32, L"%.6g", want);
+            SetWindowTextW(app.edit_radio, buf);
+        }
+    }
+
     // 静噪判据（收音链在跑时）：当前帧峰均差 >8dB 视为带内有台
     if (app.fm_on.load()) {
         if (!app.frame.db.empty()) {
@@ -1225,6 +1243,7 @@ enum : int {
     IDC_COMBO_SORT,
     IDC_COMBO_AUDIO,
     IDC_CHECK_AMP,
+    IDC_CHECK_AFC,
 };
 
 // ---- 统一调谐与页面默认频率（#55） ------------------------------------------
@@ -1736,6 +1755,10 @@ void create_settings_row(App& app) {
     app.check_mute = make_ctl(app, WC_BUTTONW, L"静音", BS_AUTOCHECKBOX | WS_TABSTOP,
                               0, IDC_CHECK_MUTE);
     slot(app.row_radio, app.check_mute, 52);
+    app.check_afc = make_ctl(app, WC_BUTTONW, L"自动微调", BS_AUTOCHECKBOX | WS_TABSTOP,
+                             0, IDC_CHECK_AFC);
+    SendMessageW(app.check_afc, BM_SETCHECK, BST_CHECKED, 0);
+    slot(app.row_radio, app.check_afc, 76);
     // 「扫描电台」为动作按钮，归工具栏行 1（布局契约：按钮在工具栏）
 
     // 云图页（#54）：卫星预设 + 记录 + 保存
@@ -2037,6 +2060,10 @@ void on_command(App& app, int id, int code, HWND from) {
         break;
     case IDC_CHECK_APT:
         if (code == BN_CLICKED) update_apt_on(app);
+        break;
+    case IDC_CHECK_AFC:
+        if (code == BN_CLICKED)
+            app.afc_on = SendMessageW(app.check_afc, BM_GETCHECK, 0, 0) == BST_CHECKED;
         break;
     case IDC_CHECK_AMP:
         if (code == BN_CLICKED) {
