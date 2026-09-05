@@ -36,3 +36,6 @@ dumps/
 cdb-crash.log
 selfclick.log
 dumps/
+.zcode/
+*.lnk
+hover-*.png
