@@ -31,6 +31,7 @@ add_executable(HackRFTool WIN32
     src/dsp/gfsk.cpp
     src/dsp/live_bursts.cpp
     src/dsp/panorama.cpp
+    src/dsp/sigdb.cpp
     src/dsp/waterfall.cpp
     src/audio/waveout.cpp
     src/radio/hackrf.cpp
@@ -83,7 +84,7 @@ add_executable(HackRFToolTest tests/dsp_test.cpp src/dsp/analyzer.cpp
                               src/dsp/burst_detector.cpp src/dsp/channel_monitor.cpp
                               src/dsp/esb.cpp src/dsp/fft.cpp src/dsp/fm.cpp
                               src/dsp/gfsk.cpp
-                              src/dsp/live_bursts.cpp src/dsp/panorama.cpp
+                              src/dsp/live_bursts.cpp src/dsp/panorama.cpp src/dsp/sigdb.cpp
                               src/dsp/waterfall.cpp src/radio/iq_recorder.cpp
                               src/ui/status_text.cpp)
 target_include_directories(HackRFToolTest PRIVATE src)

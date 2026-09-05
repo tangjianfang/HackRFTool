@@ -1,10 +1,10 @@
 # evolve log — HackRFTool
 
-- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 168 断言
-- pointer: #55（功能三部曲：#53 收音机✓ #54 NOAA APT 云图✓ → #55 Meteor QPSK）
-- rounds done: 9（#50–#54 为用户指定轮号/主题，#5–#49 未运行）
+- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 187 断言
+- pointer: #56（Meteor QPSK 解调+帧同步——自 #55 顺延）
+- rounds done: 10（#50–#55 为用户指定轮号/主题，#5–#49 未运行）
 - status: active
-- metrics: findings 26 | fixes 29 | regressions 0（E4 按轮次行累加）
+- metrics: findings 27 | fixes 30 | regressions 0（E4 按轮次行累加）
 - epics pending: none
 
 ## Target pool
@@ -38,6 +38,7 @@
 #52 | 用户指令级 epic：原生 Win32 骨架重构（#51 的 WinFlux 自绘重排被判"布局没变化"，三次下达后经计划模式确认方案） | findings(3) | actions(1) | result(green+progress, 5 ctest/145 断言) | diff(+910/-540) | 原生主窗（HackRFToolMain）+顶部工具栏（ToolbarWindow32：启停/页签×3 单选/全频段/录制/锁定/导出/清空/应用频率，GDI 自绘 24px 图标洋红键透明）+设置行原生控件（EDIT/COMBOBOX/TRACKBAR/CHECKBOX 随页显隐）+底部 msctls_statusbar32 六分段（status_parts 新纯函数，138→145 断言）；WinFlux Host 重父化为内容区子窗（保留 D2D/DComp 管线，图表不迁移——用户选定）；app.manifest（comctl32 v6）+ /MANIFEST:NO 防重复；flux::State 全退场（普通字段+每帧重建），set-收尾铁律随之退役；外层 GetMessage 泵替换 host.run()；selfclick 退役（L4 根因已修）。检查员 4/6：DPI 感知回归（enable_per_monitor_dpi_v2 误删→已修）+组合框下拉高度（MoveWindow 高度须含列表→已修 drop 标志）实锤修复；启动 WinFlux 顶层窗闪现一帧=wontfix-upstream（Host::create 硬编码 SW_SHOW，建议上游加 Config.visible）。验证：真机 ctest 5/5（builds=256/frames=1045 PASS）、三页前台截图+1500x950 拉伸截图全部正常；PrintWindow PW_RENDERFULLCONTENT 漏画普通子控件（L6，新增 screenshot-fg.ps1 BitBlt 前台抓图）。后续三个修复提交：拉伸闪烁三连修（63bb01c）、拖拽卡死看门狗+停顿解冻（c62f02a，L9 伪造消息不可投递）、鼠标划过工具栏黑底 TBSTYLE_FLAT+WM_PRINTCLIENT（6126191，L10）+selftest 被守卫拦截静默 42
 #53 | 用户功能：收音机（立体声+自动扫台，三部曲 #1，计划模式批准） | findings(4) | actions(1) | result(green+progress, 5 ctest/160 断言) | diff(+649/-23) | dsp/fm 纯链路：FIR 抽取 fs→250k→正交鉴频→19k 导频 PLL（cos 型 PD 同相锁定）→38k DSBSC 立体声矩阵（sin 族同源，2θ 免 π 模糊）→50µs 去加重→250k→48k 线性重采样；audio/waveout（48k 立体声 4×100ms）；SPSC 4MB 环 + fm 专职线程（不挤采集/UI）；UI：页签+2（收音/云图，GDI 图标）、收音机页（频率大字+STEREO/MONO 徽章+音频电平表+信号 dB+FM 频谱）、扫台线程（87.5–108 步进 0.1 驻留 80ms 峰均差判台→预设下拉→调谐最强台）；kRatesMsps 加 2Msps 档（T4.5 关闭）+频谱窗宽/监测 bin 按实际采样率折算（原 20Msps 硬编码）+全频段强制 20Msps；合成测试 145→160（立体声分离 >20dB、单声道回退、抽取阻带 >20dB）。调试踩坑：重采样方向写反（×27 时间轴）、PLL PD −sinθ 锁正交点（L/R 恒互换）、合成器导频 sin/副载波 cos 违反同源惯例。真机验证：98MHz 实收广播（-32.9dB），音频听感待用户实测；云图页 #54 占位（卫星预设可调谐）
 #54 | 用户功能：NOAA APT 卫星云图（三部曲 #2） | findings(5) | actions(1) | result(green+progress, 5 ctest/168 断言) | diff(+~600) | dsp/apt：2.4k 子载波 I/Q 同步检波（相位无关免锁相）→包络 AGC→1040Hz 正交行同步（峰沿+周期验证+不应期+236 样本群延迟补偿+近满行补齐 flush）→2080px/0.5s 行装配→1800 行滚动缓冲（fm 线程 feed/UI 线程 snapshot 互斥）；ui/apt_view 原生 GDI 窗（StretchDIBits 8bpp 灰度 DIB，云图页覆盖内容区——WinFlux 渲染器无位图接口）+ GDI+ PNG 保存；云图页上下文行：卫星预设（NOAA 19/15/18）/记录勾选（默认开）/保存 PNG；apt_on=云图页+接收+记录。调试发现（合成信号驱动）：①延迟相关判同步方向反——图像平坦区相关积(0.25)>同步串交替区(0.09)，改 1040Hz 正交检测；②合成器像素样本 floor 导致行长 23203≠24000 行永不满；③峰重置打断近满行→补齐 flush；④测试取锁定前行验证（假失败）；⑤sed 正则引入 img.rows-1*kWidth 优先级 bug。测试 160→168：6 行合成端到端（同步锁定/暗标记精确 min@600/亮标记钟形峰显著/梯度）+零行守卫。真机验证：autowx 云图页 GDI 视窗+占位文案+预设行正常；真实卫星过境待用户实测（NOAA 15 默认 137.620）
+#55 | 用户功能：选择化交互——统一信号库/多条件筛选/随机收听/场景默认频率/频谱点击调谐（用户详细需求指令，Meteor 顺延 #56） | findings(0) | actions(1) | result(green+progress, 5 ctest/187 断言) | diff(+~700) | dsp/sigdb 纯函数：SignalEntry（频率/强度/在线）+ band_of 频段判定（FM 87.5-108/NOAA 137-138/2.4G ISM）+ filter_signals（类别×在线×强度/频率排序）+ random_pick（种子可测）+ merge_scan/mark_all_offline + TSV 持久化（signals.tsv 开机加载）；统一调谐 tune_to（自动频段分流+状态栏提示）；场景默认频率 apply_page_default（进页时中心不在该页频段→默认值：收音 98/云图 137.620/工具页 2450）；扫描泛化：类别选择（FM/NOAA/ISM）→信号库累积+落盘+电台段回最强台；收音机页重设计：筛选三下拉（类别/在线/排序）+信号库可点列表（行=频率+强度条+dB+在线点+频段名，点击即听，零手动输入）+频谱；频谱点击调谐（spectrum_view 增 SpectrumGeom paint 回写+on_click，main 侧 host.last_click_pos 换算；全景点击=退出扫描单窗跳转"专门收听该段"）；工具栏「随机收听」骰子按钮。测试 168→187（band_of/筛选/随机/合并/TSV 往返）。行为验证：跨进程 WM_GETTEXT 读频率框——点频谱 25%→97.48（97±1 窗 25% 数学吻合）、78%→98.06（新窗 78% 吻合）；ctest 5/5 含真机
 
 ## 运行总结（#1–#4，用户指令停止）
 

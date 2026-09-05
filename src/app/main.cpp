@@ -33,6 +33,7 @@
 #include "dsp/gfsk.hpp"
 #include "dsp/live_bursts.hpp"
 #include "dsp/panorama.hpp"
+#include "dsp/sigdb.hpp"
 #include "dsp/waterfall.hpp"
 #include "audio/waveout.hpp"
 #include "radio/hackrf.hpp"
@@ -80,6 +81,9 @@ LONG WINAPI write_crash_dump(EXCEPTION_POINTERS* e) {
     }
     return EXCEPTION_CONTINUE_SEARCH;   // 仍走系统默认崩溃流程（事件日志）
 }
+
+void tune_to(struct App& app, double mhz);   // 统一调谐（定义在 ids 枚举后）
+void on_spectrum_click(struct App& app);    // 频谱点击调谐（同上）
 
 struct App {
     flux::Host host;
@@ -160,6 +164,14 @@ struct App {
     HWND check_mute = nullptr;
     HWND lbl_vol = nullptr;
     HWND combo_sat = nullptr;       // 云图页卫星预设（#54 接收调谐）
+    // ---- 信号库与选择化交互（#55）----
+    std::vector<hackrftool::dsp::SignalEntry> signals;   // 扫描累积（启动加载）
+    int sig_cat = 0;          // 筛选：0=电台 1=卫星 2=ISM 3=全部
+    int sig_online = 1;       // 筛选：1=仅在线 0=全部
+    int sig_sort = 0;         // 排序：0=强度 1=频率
+    hackrftool::ui::SpectrumGeom spec_geom;   // 频谱点击换算几何（paint 每帧回写）
+    HWND combo_sigcat = nullptr, combo_online = nullptr, combo_sort = nullptr;
+
     // ---- 云图（#54）----
     std::atomic<bool> apt_on{false};           // APT 解码启用（记录勾选+云图页+接收中）
     hackrftool::dsp::AptDecoder apt;           // fm 线程 feed，UI 线程快照
@@ -468,11 +480,27 @@ void ensure_fm(App& app, bool on) {
     }
 }
 
-// 扫台线程：87.5–108 MHz 步进 100 kHz，驻留 80 ms 取均值峰；结束回原频
-void scan_stations_loop(App& app, double return_mhz) {
+// 统一扫描线程（#55 泛化）：按类别扫频段，命中并入信号库（强度/在线），
+// 结束落盘并回最强台（仅电台段）
+void scan_stations_loop(App& app, int cat, double return_mhz) {
+    using hackrftool::dsp::SigCat;
+    double lo, hi, step;
+    switch (cat) {
+    case 0: lo = 87.5; hi = 108.0; step = 0.1; break;      // FM 广播
+    case 1: lo = 137.0; hi = 138.0; step = 0.05; break;    // NOAA 卫星
+    case 2: lo = 2400.0; hi = 2483.5; step = 1.0; break;   // 2.4G ISM
+    default: lo = 87.5; hi = 108.0; step = 0.1; break;
+    }
+    const SigCat band_cat = cat == 0   ? SigCat::radio
+                            : cat == 1 ? SigCat::sat
+                                       : SigCat::ism;
     app.waveout.set_mute(true);
-    std::vector<std::pair<double, float>> hits;
-    for (double f = 87.5; f <= 108.0 && app.fm_scan.load(); f += 0.1) {
+    // 该段旧条目全部离线（保留待验证），命中重新置在线
+    for (auto& e : app.signals)
+        if (hackrftool::dsp::band_of(e.mhz).cat == band_cat) e.online = false;
+    double best = 0.0;
+    float best_db = -999.0f;
+    for (double f = lo; f <= hi && app.fm_scan.load(); f += step) {
         (void)app.radio.set_center_hz(f * 1e6);
         app.iq_ring.clear();
         Sleep(80);
@@ -484,49 +512,68 @@ void scan_stations_loop(App& app, double return_mhz) {
             mx = std::max(mx, v);
         }
         const float avg = sum / float(frame.db.size());
-        if (mx > -45.0f && mx - avg > 6.0f) hits.emplace_back(f, mx);
-    }
-    app.stations.clear();
-    SendMessageW(app.combo_stations, CB_RESETCONTENT, 0, 0);
-    double best = 0.0f;
-    float best_db = -999.0f;
-    wchar_t item[48];
-    for (const auto& [f, db] : hits) {
-        swprintf(item, 48, L"%.1f MHz  %.0f dB", f, db);
-        SendMessageW(app.combo_stations, CB_ADDSTRING, 0, LPARAM(item));
-        app.stations.push_back(f);
-        if (db > best_db) {
-            best_db = db;
-            best = f;
+        if (mx > -45.0f && mx - avg > 6.0f) {
+            hackrftool::dsp::merge_scan(app.signals, f, mx);
+            if (band_cat == SigCat::radio && mx > best_db) {
+                best_db = mx;
+                best = f;
+            }
         }
     }
-    // 回到原频率（或最强台）
-    const double back = (best > 0.0 && !hits.empty()) ? best : return_mhz;
+    (void)hackrftool::dsp::save_signals(
+        exe_dir_path("signals.tsv").c_str(), app.signals);
+    // 回频：电台段回最强台（找得到时），其余回原频
+    const double back =
+        (band_cat == SigCat::radio && best > 0.0) ? best : return_mhz;
     (void)app.radio.set_center_hz(back * 1e6);
     app.radio_mhz = back;
     app.center_mhz = back;
     wchar_t buf[32];
-    swprintf(buf, 32, L"%.1f", back);
+    swprintf(buf, 32, L"%.4g", back);
     SetWindowTextW(app.edit_radio, buf);
     app.waveout.set_mute(false);
     app.fm_scan.store(false);
-    app.status = L"扫描完成：" + std::to_wstring(app.stations.size()) + L" 个电台" +
-                 (hits.empty() ? L"（未检出，检查天线）" : L"，已调谐最强台");
+    // 汇总该段命中数
+    const auto idx = hackrftool::dsp::filter_signals(app.signals, band_cat,
+                                                     true, false);
+    app.status = L"扫描完成：" + std::to_wstring(idx.size()) + L" 个在线信号" +
+                 (band_cat == SigCat::radio && best > 0.0
+                      ? L"，已调谐最强台"
+                      : (idx.empty() ? L"（未检出，检查天线/增益）" : L""));
 }
 
 void start_scan(App& app) {
     if (app.fm_scan.load()) return;
     if (!app.running) {
-        app.status = L"请先开始接收再扫描电台";
+        app.status = L"请先开始接收再扫描";
         return;
     }
     if (app.sweep_on == 1) {
-        app.status = L"扫描电台需先退出全频段模式";
+        app.status = L"扫描需先退出全频段模式";
         return;
     }
     app.fm_scan.store(true);
-    app.status = L"扫台中…（87.5–108 MHz）";
-    std::thread(scan_stations_loop, std::ref(app), app.radio_mhz).detach();
+    static const wchar_t* kNames[3] = {L"FM 广播", L"NOAA 卫星", L"2.4G ISM"};
+    const int cat = app.sig_cat <= 2 ? app.sig_cat : 0;
+    app.status = std::wstring(L"扫频中：") + kNames[cat] + L"…";
+    std::thread(scan_stations_loop, std::ref(app), cat, app.center_mhz).detach();
+}
+
+// 随机收听/收看（#55）：当前筛选条件下的在线条目随机调谐
+void random_listen(App& app) {
+    using hackrftool::dsp::SigCat;
+    const SigCat cat = app.sig_cat == 0   ? SigCat::radio
+                       : app.sig_cat == 1 ? SigCat::sat
+                       : app.sig_cat == 2 ? SigCat::ism
+                                          : SigCat::all;
+    const long i = hackrftool::dsp::random_pick(
+        app.signals, cat, unsigned(GetTickCount() & 0x7fffffffu));
+    if (i < 0) {
+        app.status = L"无在线信号可选——先「扫描电台」积累信号库";
+        return;
+    }
+    tune_to(app, app.signals[size_t(i)].mhz);
+    app.status += L"（随机）";
 }
 
 // APT 解码开关：云图页 + 接收中 + 音频链在跑 + 「记录」勾选
@@ -585,7 +632,8 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
         };
         page_el->children.push_back(hackrftool::ui::spectrum_view(
             pal, app.frame.db, app.frame.peak, app.center_mhz - half,
-            app.center_mhz + half, ticks, app.frame.seq));
+            app.center_mhz + half, ticks, app.frame.seq, &app.spec_geom,
+            [&app] { on_spectrum_click(app); }));
         page_el->children.push_back(
             hackrftool::ui::waterfall_view(pal, app.waterfall, app.waterfall.seq()));
     } else {
@@ -595,7 +643,7 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
         };
         page_el->children.push_back(hackrftool::ui::spectrum_view(
             pal, app.pano.panorama(), {}, kSweepLoMhz, kSweepHiMhz, ticks,
-            app.pano.seq()));
+            app.pano.seq(), &app.spec_geom, [&app] { on_spectrum_click(app); }));
         page_el->children.push_back(hackrftool::ui::waterfall_view(
             pal, app.waterfall_sweep, app.waterfall_sweep.seq()));
     }
@@ -829,17 +877,32 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
     return page_el;
 }
 
-// ---- 收音机页（#53）：纯显示（频率/音量/扫描控制在工具栏） -------------------
+// ---- 收音机页（#53/#55 重设计）：信号库列表 + 筛选 + 点击即听 ----------------
+
+// 信号行文本：频率 + 强度条 + dB + 在线点 + 频段名
+std::wstring signal_row_text(const hackrftool::dsp::SignalEntry& e) {
+    wchar_t head[96];
+    swprintf(head, 96, L"%8.3f MHz  ", e.mhz);
+    std::wstring t = head;
+    const int bars = std::clamp(int((e.db + 100.0f) * 16.0f / 60.0f), 0, 16);
+    t += L"[";
+    for (int i = 0; i < 16; ++i) t += (i < bars) ? L"█" : L"·";
+    t += L"] ";
+    swprintf(head, 96, L"%5.0f dB  %s  %s", e.db,
+             e.online ? L"●在线" : L"○离线",
+             hackrftool::dsp::band_of(e.mhz).name);
+    return t + head;
+}
 
 flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
     flux::Props page_p;
     page_p.direction = flux::Direction::column;
     page_p.align = flux::Align::stretch;
-    page_p.gap = 12.0f;
+    page_p.gap = 8.0f;
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
 
-    // 频率大字 + 立体声徽章
+    // 频率大字 + 立体声徽章 + 收听提示
     flux::Props head_p;
     head_p.direction = flux::Direction::row;
     head_p.align = flux::Align::center;
@@ -847,7 +910,7 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
     auto head = flux::view(std::move(head_p));
     flux::Props freq_p;
     freq_p.bold = true;
-    freq_p.font_size_pt = 28.0f;
+    freq_p.font_size_pt = 24.0f;
     freq_p.flex_grow = 1.0f;
     freq_p.text_align = flux::Align::start;
     head->children.push_back(
@@ -856,35 +919,58 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
     head->children.push_back(flux::ui::badge(
         pal, stereo ? flux::ui::BadgeKind::success : flux::ui::BadgeKind::neutral,
         stereo ? L"STEREO" : L"MONO"));
-    page_el->children.push_back(std::move(head));
-
-    // 信号/音频电平表（读数行）
     const float peak = app.fm_peak.load();
     const int bars = std::min(int(peak * 24.0f + 0.5f), 24);
-    std::wstring meter = L"音频 [";
+    std::wstring meter;
     for (int i = 0; i < 24; ++i) meter += (i < bars) ? L"█" : L"·";
-    meter += L"]  ";
-    float mx = -200.0f;
-    for (const float v : app.frame.db) mx = std::max(mx, v);
-    flux::Props meter_p;
-    meter_p.text_align = flux::Align::start;
-    page_el->children.push_back(flux::label(
-        meter + L"信号 " + wd1(mx) + L" dB", std::move(meter_p)));
+    head->children.push_back(flux::ui::caption(pal, meter, {}));
+    page_el->children.push_back(std::move(head));
 
-    // 使用说明
+    // 信号库列表（按筛选条件）：点击行=调谐（#55 零手动输入）
+    using hackrftool::dsp::SigCat;
+    const SigCat cat = app.sig_cat == 0   ? SigCat::radio
+                       : app.sig_cat == 1 ? SigCat::sat
+                       : app.sig_cat == 2 ? SigCat::ism
+                                          : SigCat::all;
+    const auto idx = hackrftool::dsp::filter_signals(
+        app.signals, cat, app.sig_online == 1, app.sig_sort == 0);
     flux::Props tip_p;
     tip_p.text_align = flux::Align::start;
     page_el->children.push_back(flux::ui::caption(
-        pal, L"频率输入后点「应用频率」调谐；「扫描电台」自动找台并填入预设下拉。"
-             L"增益建议 LNA 24–32 / VGA 20–30（广播信号强，过载会静音失真）。",
+        pal, idx.empty()
+                 ? L"信号库为空：点工具栏「扫描电台」积累列表；列表行可直接点击收听"
+                 : L"信号库（" + std::to_wstring(idx.size()) +
+                       L" 条，按当前筛选）——点击任意行即调谐收听/收看",
         std::move(tip_p)));
+    flux::Props list_p;
+    list_p.direction = flux::Direction::column;
+    list_p.gap = 2.0f;
+    auto list = flux::view(std::move(list_p));
+    const std::size_t n_rows = std::min<std::size_t>(idx.size(), 48);
+    for (std::size_t k = 0; k < n_rows; ++k) {
+        const auto& e = app.signals[idx[k]];
+        flux::Props row_p;
+        row_p.text_align = flux::Align::start;
+        row_p.font_size_pt = 12.0f;
+        row_p.bold = e.online;
+        row_p.text_color = e.online ? pal.text : pal.text_secondary;
+        // 点行=调谐（lambda 拷贝频率值，不引用向量内存——列表会增长）
+        const double f = e.mhz;
+        row_p.on_click = [&app, f] { tune_to(app, f); };
+        list->children.push_back(flux::label(signal_row_text(e), std::move(row_p)));
+    }
+    flux::Props scroll_p;
+    scroll_p.flex_grow = 1.0f;
+    page_el->children.push_back(
+        flux::scroll_view(std::move(list), std::move(scroll_p)));
 
-    // 频谱（当前电台周边）：复用频谱视图，显示 FM 信号形态
+    // 频谱（点击信号=调谐，#55）
     const double half = half_bw_mhz(app);
     if (!app.frame.db.empty()) {
         page_el->children.push_back(hackrftool::ui::spectrum_view(
             pal, app.frame.db, app.frame.peak, app.center_mhz - half,
-            app.center_mhz + half, {}, app.frame.seq));
+            app.center_mhz + half, {}, app.frame.seq, &app.spec_geom,
+            [&app] { on_spectrum_click(app); }));
     }
     return page_el;
 }
@@ -892,6 +978,7 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
 // ---- 云图页（#54）：原生 GDI 云图窗覆盖内容区（此 WinFlux 占位被覆盖） ------
 
 flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
+    (void)app;   // 云图显示由原生 apt_view 承担（WinFlux 占位被覆盖）
     flux::Props page_p;
     page_p.flex_grow = 1.0f;
     auto page_el = flux::view(std::move(page_p));
@@ -1022,7 +1109,68 @@ enum : int {
     IDC_CHECK_MUTE,
     IDC_CHECK_APT,
     IDC_SAVEPNG,
+    IDC_RANDOM,
+    IDC_COMBO_SIGCAT,
+    IDC_COMBO_ONLINE,
+    IDC_COMBO_SORT,
 };
+
+// ---- 统一调谐与页面默认频率（#55） ------------------------------------------
+
+// 按目标频率自动分流：中心/状态栏统一走这里（收音机页语义 radio_mhz 同步）
+void tune_to(App& app, double mhz) {
+    using hackrftool::dsp::band_of;
+    using hackrftool::dsp::SigCat;
+    const SigCat cat = band_of(mhz).cat;
+    if (cat == SigCat::sat || cat == SigCat::radio) app.radio_mhz = mhz;
+    app.center_mhz = mhz;
+    if (app.running) (void)app.radio.set_center_hz(mhz * 1e6);
+    wchar_t buf[32];
+    swprintf(buf, 32, L"%.4g", mhz);
+    if (app.page == 3) SetWindowTextW(app.edit_radio, buf);
+    else SetWindowTextW(app.edit_freq, buf);
+    app.status = std::wstring(L"已调谐 ") + buf + L" MHz（" + band_of(mhz).name +
+                 L"）";
+}
+
+// 进入页面时若中心不在该页频段 → 落到场景默认值（#55：不同场景默认中心）
+void apply_page_default(App& app) {
+    using hackrftool::dsp::SigCat;
+    SigCat want;
+    switch (app.page) {
+    case 3: want = SigCat::radio; break;
+    case 4: want = SigCat::sat; break;
+    default: want = SigCat::ism; break;
+    }
+    if (!hackrftool::dsp::in_band(want, app.center_mhz))
+        tune_to(app, hackrftool::dsp::default_center(want));
+}
+
+// 频谱点击调谐（#55：点信号即调谐；全景点击=跳去专门收听该段）。
+// 频率由 spec_geom（paint 每帧回写）与 host.last_click_pos() 换算。
+void on_spectrum_click(App& app) {
+    const auto [cx, cy] = app.host.last_click_pos();
+    const auto& g = app.spec_geom;
+    const double t =
+        std::clamp(double(cx - g.x) / double(std::max(g.w, 1.0f)), 0.0, 1.0);
+    const double mhz = g.lo_mhz + t * (g.hi_mhz - g.lo_mhz);
+    if (app.sweep_on == 1) {
+        // 全频段全景：退出扫描、单窗居中点击频率——"点强频段专门收听"
+        const LRESULT st = SendMessageW(app.toolbar, TB_GETSTATE, IDC_SWEEP, 0);
+        if ((st & TBSTATE_CHECKED) != 0) {
+            set_sweep_live(app, false);
+            app.sweep_on = 0;
+        }
+        tune_to(app, std::clamp(mhz, 2400.0, 2483.5));
+        app.status += L"（已从全景跳转单窗）";
+        return;
+    }
+    const bool relock = app.mon_lock_mhz > 0.0 && !app.auto_track;
+    tune_to(app, mhz);
+    if (relock)
+        app.monitor.set_fixed_bin(mhz_to_bin(
+            app.mon_lock_mhz, app.center_mhz, 2.0 * half_bw_mhz(app)));
+}
 
 constexpr int kIconSize = 24;
 
@@ -1217,6 +1365,22 @@ void satellite(HDC dc) {
     DeleteObject(p);
 }
 
+void dice(HDC dc) {
+    // 骰子（随机收听）：方框 + 五点
+    HPEN p = CreatePen(PS_SOLID, 2, RGB(150, 90, 160));
+    const HGDIOBJ old = SelectObject(dc, p);
+    Rectangle(dc, 5, 5, 19, 19);
+    HBRUSH b = CreateSolidBrush(RGB(150, 90, 160));
+    const POINT pts[5] = {{8, 8}, {16, 8}, {12, 12}, {8, 16}, {16, 16}};
+    for (const POINT pt : pts) {
+        RECT rc{pt.x - 1, pt.y - 1, pt.x + 2, pt.y + 2};
+        FillRect(dc, &rc, b);
+    }
+    DeleteObject(b);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+
 } // namespace icon
 
 // 图标索引表（工具栏位图号 = 此处顺序）
@@ -1235,6 +1399,7 @@ enum : int {
     ICON_APPLY,
     ICON_RADIO,
     ICON_SAT,
+    ICON_DICE,
     ICON_COUNT,
 };
 
@@ -1278,7 +1443,7 @@ void create_toolbar(App& app) {
         icon::play,        icon::stop,         icon::page_spectrum, icon::page_monitor,
         icon::page_capture, icon::sweep,       icon::record,        icon::record_on,
         icon::lock,        icon::export_csv,   icon::clear,         icon::apply_freq,
-        icon::radio,       icon::satellite,
+        icon::radio,       icon::satellite,    icon::dice,
     };
     static_assert(sizeof(painters) / sizeof(painters[0]) == ICON_COUNT,
                   "图标表与枚举不一致");
@@ -1319,7 +1484,8 @@ void create_toolbar(App& app) {
         tb_btn(ICON_EXPORT, IDC_EXPORT, BTNS_AUTOSIZE, L"导出 CSV"),
         tb_btn(ICON_CLEAR, IDC_CLEAR, BTNS_AUTOSIZE, L"清空"),
         tb_btn(ICON_APPLY, IDC_APPLYFREQ, BTNS_AUTOSIZE, L"应用频率"),
-        tb_btn(ICON_SAT, IDC_SCAN, BTNS_AUTOSIZE, L"扫描电台"),
+        tb_btn(ICON_SAT, IDC_SCAN, BTNS_AUTOSIZE, L"扫描信号"),
+        tb_btn(ICON_DICE, IDC_RANDOM, BTNS_AUTOSIZE, L"随机收听"),
     };
     SendMessageW(app.toolbar, TB_ADDBUTTONS, WPARAM(sizeof(btns) / sizeof(btns[0])),
                  LPARAM(btns));
@@ -1409,18 +1575,33 @@ void create_settings_row(App& app) {
     SendMessageW(app.combo_symrate, CB_SETCURSEL, WPARAM(app.symrate_idx), 0);
     slot(app.row_capture, app.combo_symrate, 80, true);
 
-    // 收音机页（#53）：频率 / 电台预设 / 音量 / 静音 / 扫描
+    // 收音机页（#53/#55）：频段类别/在线/排序筛选 + 频率（后备）+ 音量/静音
     slot(app.row_radio,
-         make_ctl(app, WC_STATICW, L"电台 MHz", SS_LEFT | SS_CENTERIMAGE, 0, 0), 56);
+         make_ctl(app, WC_STATICW, L"类别", SS_LEFT | SS_CENTERIMAGE, 0, 0), 36);
+    app.combo_sigcat = make_ctl(app, WC_COMBOBOXW, nullptr,
+                                CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_SIGCAT);
+    for (const wchar_t* s : {L"FM 广播", L"NOAA 卫星", L"2.4G ISM", L"全部"})
+        SendMessageW(app.combo_sigcat, CB_ADDSTRING, 0, LPARAM(s));
+    SendMessageW(app.combo_sigcat, CB_SETCURSEL, 0, 0);
+    slot(app.row_radio, app.combo_sigcat, 88, true);
+    app.combo_online = make_ctl(app, WC_COMBOBOXW, nullptr,
+                                CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_ONLINE);
+    for (const wchar_t* s : {L"仅在线", L"全部"})
+        SendMessageW(app.combo_online, CB_ADDSTRING, 0, LPARAM(s));
+    SendMessageW(app.combo_online, CB_SETCURSEL, 0, 0);
+    slot(app.row_radio, app.combo_online, 66, true);
+    app.combo_sort = make_ctl(app, WC_COMBOBOXW, nullptr,
+                              CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_SORT);
+    for (const wchar_t* s : {L"按强度", L"按频率"})
+        SendMessageW(app.combo_sort, CB_ADDSTRING, 0, LPARAM(s));
+    SendMessageW(app.combo_sort, CB_SETCURSEL, 0, 0);
+    slot(app.row_radio, app.combo_sort, 66, true);
+    slot(app.row_radio,
+         make_ctl(app, WC_STATICW, L"频率 MHz", SS_LEFT | SS_CENTERIMAGE, 0, 0), 60);
     app.edit_radio = make_ctl(app, WC_EDITW, L"98.0",
                               ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0,
                               IDC_EDIT_RADIO);
-    slot(app.row_radio, app.edit_radio, 80);
-    slot(app.row_radio,
-         make_ctl(app, WC_STATICW, L"预设", SS_LEFT | SS_CENTERIMAGE, 0, 0), 36);
-    app.combo_stations = make_ctl(app, WC_COMBOBOXW, nullptr,
-                                  CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_STATION);
-    slot(app.row_radio, app.combo_stations, 110, true);
+    slot(app.row_radio, app.edit_radio, 72);
     app.track_vol = make_ctl(app, TRACKBAR_CLASSW, nullptr,
                              TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP, 0, IDC_TRACK_VOL);
     SendMessageW(app.track_vol, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
@@ -1646,19 +1827,20 @@ void sync_chrome(App& app) {
 void on_command(App& app, int id, int code, HWND from) {
     switch (id) {
     case IDC_STARTSTOP: toggle_rx(app); break;
-    case IDC_PAGE0: app.page = 0; ensure_fm(app, false); layout(app); break;
-    case IDC_PAGE1: app.page = 1; ensure_fm(app, false); layout(app); break;
-    case IDC_PAGE2: app.page = 2; ensure_fm(app, false); layout(app); break;
-    case IDC_PAGE3:
-        app.page = 3;
-        ensure_fm(app, app.running);
-        update_apt_on(app);
+    case IDC_PAGE0:
+    case IDC_PAGE1:
+    case IDC_PAGE2:
+        app.page = id - IDC_PAGE0;
+        ensure_fm(app, false);
+        apply_page_default(app);   // 场景默认频率（#55）
         layout(app);
         break;
+    case IDC_PAGE3:
     case IDC_PAGE4:
-        app.page = 4;
+        app.page = id - IDC_PAGE0;
         ensure_fm(app, app.running);
         update_apt_on(app);
+        apply_page_default(app);
         layout(app);
         break;
     case IDC_SWEEP: {
@@ -1686,21 +1868,23 @@ void on_command(App& app, int id, int code, HWND from) {
     case IDC_CLEAR: clear_bursts(app); break;
     case IDC_APPLYFREQ: apply_center_freq(app); break;
     case IDC_SCAN: start_scan(app); break;
-    case IDC_COMBO_STATION:
+    case IDC_RANDOM: random_listen(app); break;
+    case IDC_COMBO_SIGCAT:
         if (code == CBN_SELCHANGE) {
-            const int i = int(SendMessageW(app.combo_stations, CB_GETCURSEL, 0, 0));
-            if (i >= 0 && i < int(app.stations.size())) {
-                const double mhz = app.stations[size_t(i)];
-                wchar_t buf[32];
-                swprintf(buf, 32, L"%.1f", mhz);
-                SetWindowTextW(app.edit_radio, buf);
-                if (app.running)
-                    (void)app.radio.set_center_hz(mhz * 1e6);
-                app.radio_mhz = mhz;
-                app.center_mhz = mhz;
-                app.status = L"已调谐 " + wd1(mhz) + L" MHz";
+            const int i = int(SendMessageW(app.combo_sigcat, CB_GETCURSEL, 0, 0));
+            if (i >= 0) {
+                app.sig_cat = i;
+                app.status = L"筛选已切换（列表即时生效）";
             }
         }
+        break;
+    case IDC_COMBO_ONLINE:
+        if (code == CBN_SELCHANGE)
+            app.sig_online = int(SendMessageW(app.combo_online, CB_GETCURSEL, 0, 0));
+        break;
+    case IDC_COMBO_SORT:
+        if (code == CBN_SELCHANGE)
+            app.sig_sort = int(SendMessageW(app.combo_sort, CB_GETCURSEL, 0, 0));
         break;
     case IDC_COMBO_SAT:
         if (code == CBN_SELCHANGE) {
@@ -1941,6 +2125,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     InitCommonControlsEx(&icc);
 
     App app;
+    // 信号库加载（上次扫描结果开机即用，#55）
+    app.signals = hackrftool::dsp::load_signals(
+        exe_dir_path("signals.tsv").c_str());
 
     // 命令行：auto=接收+频谱页；autom=+监测页；autos=+全频段；autocap=+抓包页；
     // autosc=+全频段+抓包页；selftest/selftestsweep=自测模式（跑 N 秒→断言→

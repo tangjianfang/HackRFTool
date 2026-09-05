@@ -19,6 +19,7 @@
 #include "dsp/waterfall.hpp"
 #include "dsp/fm.hpp"
 #include "dsp/apt.hpp"
+#include "dsp/sigdb.hpp"
 #include "radio/iq_recorder.hpp"
 #include "ui/status_text.hpp"
 
@@ -1043,6 +1044,67 @@ static void test_apt_decode() {
     check(grad > 80, "梯度斜率显著（Δ>80）");
 }
 
+// ---- 信号库（#55） ----------------------------------------------------------
+
+static void test_sigdb() {
+    using hackrftool::dsp::SignalEntry;
+    using hackrftool::dsp::SigCat;
+    using hackrftool::dsp::band_of;
+    using hackrftool::dsp::default_center;
+    using hackrftool::dsp::in_band;
+    using hackrftool::dsp::merge_scan;
+    using hackrftool::dsp::mark_all_offline;
+    using hackrftool::dsp::filter_signals;
+    using hackrftool::dsp::random_pick;
+    using hackrftool::dsp::save_signals;
+    using hackrftool::dsp::load_signals;
+
+    check(band_of(98.0).cat == SigCat::radio, "98 MHz → FM 广播");
+    check(band_of(107.9).cat == SigCat::radio, "107.9 → FM 广播");
+    check(band_of(137.620).cat == SigCat::sat, "137.620 → NOAA 卫星");
+    check(band_of(2450.0).cat == SigCat::ism, "2450 → 2.4G ISM");
+    check(band_of(500.0).cat == SigCat::other, "500 → 其他");
+    check(default_center(SigCat::radio) == 98.0, "电台默认 98.0");
+    check(default_center(SigCat::sat) == 137.620, "卫星默认 137.620");
+    check(in_band(SigCat::radio, 100.0) && !in_band(SigCat::radio, 200.0),
+          "in_band 判定");
+
+    std::vector<SignalEntry> list;
+    merge_scan(list, 98.0, -35.0f);
+    merge_scan(list, 103.9, -42.0f);
+    merge_scan(list, 2455.0, -50.0f);
+    check(list.size() == 3, "三条新增");
+    merge_scan(list, 98.02, -30.0f);   // 容差内更新
+    check(list.size() == 3, "容差内合并不新增");
+    check(list[0].db == -30.0f && list[0].online, "更新强度并置在线");
+
+    mark_all_offline(list);
+    merge_scan(list, 103.9, -41.0f);   // 103.9 重新在线
+    const auto fm = filter_signals(list, SigCat::radio, true, true);
+    check(fm.size() == 1 && list[fm[0]].mhz == 103.9, "在线 FM 仅 103.9");
+
+    const auto by_freq = filter_signals(list, SigCat::all, false, false);
+    check(by_freq.size() == 3 && list[by_freq[0]].mhz < 99.0 &&
+              list[by_freq[2]].mhz == 2455.0, "全量按频率排序");
+    const auto by_db = filter_signals(list, SigCat::all, false, true);
+    check(list[by_db[0]].db >= list[by_db[1]].db, "按强度降序");
+
+    const long rp = random_pick(list, SigCat::radio, 42u);
+    check(rp >= 0 && band_of(list[size_t(rp)].mhz).cat == SigCat::radio,
+          "随机挑选落在 FM 段");
+    check(random_pick(list, SigCat::sat, 1u) == -1, "卫星段无在线 → -1");
+
+    const wchar_t* tmp = L"sigdb-test.tsv";
+    check(save_signals(tmp, list), "保存 TSV");
+    const auto back = load_signals(tmp);
+    check(back.size() == list.size(), "往返条目数一致");
+    bool same = back.size() == list.size();
+    for (std::size_t i = 0; same && i < back.size(); ++i)
+        same = std::abs(back[i].mhz - list[i].mhz) < 1e-3;
+    check(same, "往返频率一致");
+    std::remove("sigdb-test.tsv");
+}
+
 int main() {
     test_fft_dc();
     test_fft_tone_bin1();
@@ -1079,6 +1141,7 @@ int main() {
     test_fm_receiver_mono_fallback();
     test_fm_decimator_stopband();
     test_apt_decode();
+    test_sigdb();
     if (failures == 0) std::printf("HackRFToolTest: 全部通过\n");
     return failures == 0 ? 0 : 1;
 }

@@ -41,15 +41,22 @@ flux::Color wf_color(int level) noexcept {
 flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float>& db,
                                const std::vector<float>& peak, double f_lo_mhz,
                                double f_hi_mhz, const std::vector<SpectrumTick>& ticks,
-                               unsigned seq) {
+                               unsigned seq, SpectrumGeom* geom_out,
+                               std::function<void()> on_tune) {
     flux::Props p;
     p.flex_grow = 1.0f;
     p.background = pal.surface;
     p.radius = 10.0f;
     p.paint_id = seq;   // 数据不变则保持局部重绘
-    p.paint = [pal, db, peak, f_lo_mhz, f_hi_mhz, ticks](flux::D2DRenderer& r, float x,
-                                                         float y, float w, float h,
-                                                         bool, float, float) {
+    p.paint = [pal, db, peak, f_lo_mhz, f_hi_mhz, ticks, geom_out](
+                  flux::D2DRenderer& r, float x, float y, float w, float h,
+                  bool, float, float) {
+        if (geom_out != nullptr) {   // 点击换算用几何（每帧刷新）
+            geom_out->x = x;
+            geom_out->w = w;
+            geom_out->lo_mhz = f_lo_mhz;
+            geom_out->hi_mhz = f_hi_mhz;
+        }
         // 网格：每 20 dB 一条
         for (float grid_db = -20.0f; grid_db > kDbFloor; grid_db -= 20.0f) {
             const float gy = db_to_y(grid_db, y, h);
@@ -98,6 +105,7 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
         ylab(0.0f);   // 刻度最后画：底衬才盖得住波形（顺序绘制无分层）
         ylab(-50.0f);
     };
+    if (on_tune) p.on_click = std::move(on_tune);   // 点频谱=调谐（#55）
     return flux::view(std::move(p));
 }
 
