@@ -42,6 +42,10 @@ public:
 
     [[nodiscard]] bool synced() const;
     [[nodiscard]] std::uint64_t lines() const;
+    // 诊断（#61 遥测）：子载波检波幅度（0..1，过境时应显著抬升）与
+    // 最近 1s 行同步命中数（正常 ≈2/s）——云图排查靠日志不靠截图
+    [[nodiscard]] float subcarrier_level() const noexcept { return sub_level_; }
+    [[nodiscard]] unsigned sync_per_sec() const noexcept;
     void snapshot(AptImage& out);   // UI 线程取图像拷贝
 
 private:
@@ -74,6 +78,11 @@ private:
     mutable std::mutex mtx_;
     AptImage img_;
     std::atomic<bool> synced_{false};
+    // 诊断累计：子载波幅度平滑 + 行同步命中环形计数（最近 48000 样本）
+    float sub_level_ = 0.0f;
+    std::uint64_t sync_stamps_[8] = {};   // 环形：最近 8 次行同步的样本位置
+    std::size_t stamp_pos_ = 0;
+    std::uint64_t sample_pos_ = 0;
     float lo_ = 1e9f, hi_ = -1e9f;   // 归一化包络动态范围（自动对比度）
 };
 

@@ -708,6 +708,10 @@ void scan_stations_loop(App& app, int cat, double return_mhz) {
     // 回频：电台段回最强台（找得到时），其余回原频
     const double back =
         (band_cat == SigCat::radio && best > 0.0) ? best : return_mhz;
+    hackrftool::log::log_telemetry(hackrftool::log::Level::info, "SCAN",
+                                   "done",
+                                   {{"hits", std::to_string(hits.size())},
+                                    {"best", std::to_string(back)}});
     (void)app.radio.set_center_hz(back * 1e6);
     app.radio_mhz = back;
     app.center_mhz = back;
@@ -738,6 +742,9 @@ void start_scan(App& app) {
     app.fm_scan.store(true);
     static const wchar_t* kNames[3] = {L"FM 广播", L"NOAA 卫星", L"2.4G ISM"};
     const int cat = app.sig_cat <= 2 ? app.sig_cat : 0;
+    hackrftool::log::log_telemetry(
+        hackrftool::log::Level::info, "SCAN", "start",
+        {{"cat", std::to_string(cat)}});
     app.status = std::wstring(L"扫频中：") + kNames[cat] + L"…";
     std::thread(scan_stations_loop, std::ref(app), cat, app.center_mhz).detach();
 }
@@ -931,6 +938,9 @@ void record_toggle(App& app) {
         (void)hackrftool::radio::write_capture_sidecar(app.rec_path, info);
         app.status = L"录制完成: " + std::to_wstring(app.recorder.bytes_written()) +
                      L" 字节（参数已写 .txt）";
+        hackrftool::log::log_telemetry(
+            hackrftool::log::Level::info, "LIFE", "record.stop",
+            {{"bytes", std::to_string(app.recorder.bytes_written())}});
         return;
     }
     wchar_t path[MAX_PATH] = L"hackrftool-iq.cs8";
@@ -946,9 +956,13 @@ void record_toggle(App& app) {
     app.rec_path = path;
     if (!app.recorder.start(path)) {
         app.status = L"无法创建录制文件";
+        hackrftool::log::log_telemetry(hackrftool::log::Level::error, "LIFE",
+                                       "record.fail", {});
         return;
     }
     app.status = L"录制中…";
+    hackrftool::log::log_telemetry(hackrftool::log::Level::info, "LIFE",
+                                   "record.start", {});
 }
 
 // 突发行文本（懒生成 + 缓存）：时间/时长/峰值 + GFSK 前 8 字节 hex + ESB 帧识别
@@ -1335,6 +1349,19 @@ flux::ElementPtr build(App& app) {
                  {"avg_db", std::to_string(
                                 sum / float(std::max<std::size_t>(
                                            app.frame.db.size(), 1)))}});
+            if (app.apt_on.load()) {
+                // APT 链路诊断（#61）：云图排查三要素——子载波幅度/行同步率/
+                // 累计行数。过境判读：sub>0.3 且 sync≈2/s 且 lines 递增=链路
+                // 通；sub 高 sync=0=行同步问题；sub 低=无信号/频偏
+                char sb[16];
+                snprintf(sb, 16, "%.3f", app.apt.subcarrier_level());
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::info, "APT", "diag",
+                    {{"sub", sb},
+                     {"sync_ps", std::to_string(app.apt.sync_per_sec())},
+                     {"lines", std::to_string(app.apt.lines())},
+                     {"synced", app.apt.synced() ? "1" : "0"}});
+            }
         }
     }
 
@@ -2368,6 +2395,8 @@ void on_command(App& app, int id, int code, HWND from) {
         }
         set_sweep_live(app, on && app.running);
         app.sweep_on = on ? 1 : 0;
+        hackrftool::log::log_telemetry(hackrftool::log::Level::info, "RADIO",
+                                       "sweep", {{"on", on ? "1" : "0"}});
         break;
     }
     case IDC_RECORD: record_toggle(app); break;

@@ -20,6 +20,9 @@ void AptDecoder::envelope_step(float x) {
     // 慢速 AGC 峰值跟踪（0.999 衰减 ~2 s）
     env_max_ = std::max(env, env_max_ * 0.99992f);
     const float norm = env_max_ > 1e-6f ? env / env_max_ : 0.0f;
+    // 诊断（#61）：子载波幅度平滑（1e-3 τ≈1s@48k）
+    sub_level_ += 0.001f * (env - sub_level_);
+    ++sample_pos_;
     sync_step(norm);
     emit_pixel(norm);
 }
@@ -59,6 +62,8 @@ void AptDecoder::sync_step(float env) {
             const bool line_rate = dist > long(kLineSamples) - 1500 &&
                                    dist < long(kLineSamples) + 1500;
             if (line_rate) {
+                sync_stamps_[stamp_pos_ % 8] = sample_pos_;
+                stamp_pos_ = (stamp_pos_ + 1) % 8;
                 if (lock_hits_ < 3) ++lock_hits_;
                 if (lock_hits_ >= 2) synced_.store(true);
                 // 行接近满（≥1900 px）：峰比像素预算早到 ~190 样本（补偿后
@@ -131,6 +136,15 @@ void AptDecoder::feed(const float* audio, std::size_t n) {
 }
 
 bool AptDecoder::synced() const { return synced_.load(); }
+
+unsigned AptDecoder::sync_per_sec() const noexcept {
+    // 最近 1 个行周期（0.5s）内命中数 ×2——非原子读诊断量（fm 线程写/UI 读，
+    // 撞窗最多少计一次，诊断精度足够）
+    unsigned hits = 0;
+    for (const std::uint64_t t : sync_stamps_)
+        if (t != 0 && sample_pos_ - t < kLineSamples) ++hits;
+    return hits * 2;
+}
 
 std::uint64_t AptDecoder::lines() const {
     std::lock_guard<std::mutex> g(mtx_);
