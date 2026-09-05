@@ -917,9 +917,12 @@ void create_toolbar(App& app) {
     }
 
     app.toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr,
-                                  WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT |
-                                      TBSTYLE_TOOLTIPS | CCS_NODIVIDER |
-                                      CCS_NOPARENTALIGN,
+                                  // 不用 TBSTYLE_FLAT：透明工具栏不画自己的
+                                  // 背景、靠父窗口补画——我们的父窗不擦背景
+                                  //（反闪烁），热跟踪重绘时补画缺失=黑底
+                                  //（用户实测鼠标划过变黑，像素采样 86% dark）
+                                  WS_CHILD | WS_VISIBLE | TBSTYLE_TOOLTIPS |
+                                      CCS_NODIVIDER | CCS_NOPARENTALIGN,
                                   0, 0, 0, 0, app.main_wnd, nullptr,
                                   GetModuleHandleW(nullptr), nullptr);
     SendMessageW(app.toolbar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
@@ -1301,6 +1304,15 @@ LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_ERASEBKGND:
         return 1;   // 不擦除（类画刷=nullptr）：新暴露区域由 WM_PAINT 增量填充
+    case WM_PRINTCLIENT: {
+        // 透明子控件（如工具栏）重绘时向父窗口请求背景——必须补画，
+        // 否则 DC 残留=黑底（TBSTYLE_FLAT 教训，双保险保留）
+        HDC dc = reinterpret_cast<HDC>(wp);
+        RECT rc;
+        GetClientRect(wnd, &rc);
+        FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+        return 0;
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(wnd, &ps);
@@ -1395,6 +1407,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
         }
     } mutex_guard{single};
     if (single != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
+        // 自测模式被已有实例拦截：静默返回 42（CTest 记 SKIP）——弹窗会
+        // 让无人值守的 ctest 永久挂起（实测：残留实例+守卫弹窗=selftest 卡死）
+        if (cmd_line != nullptr && (wcscmp(cmd_line, L"selftest") == 0 ||
+                                    wcscmp(cmd_line, L"selftestsweep") == 0))
+            return 42;
         if (HWND prev = FindWindowW(nullptr, L"HackRFTool")) {
             ShowWindow(prev, SW_RESTORE);
             SetForegroundWindow(prev);
