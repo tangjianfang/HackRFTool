@@ -173,6 +173,8 @@ struct App {
     HWND combo_sigcat = nullptr, combo_online = nullptr, combo_sort = nullptr;
     int audio_dev = -1;   // 输出设备（-1=系统默认；WaveOut::enum_devices 下标）
     HWND combo_audio = nullptr;
+    bool amp = false;            // 板载功放（+14 dB，弱信号/室内天线场景）
+    HWND check_amp = nullptr;
 
     // ---- 云图（#54）----
     std::atomic<bool> apt_on{false};           // APT 解码启用（记录勾选+云图页+接收中）
@@ -303,6 +305,7 @@ hackrftool::radio::RadioConfig current_radio_cfg(App& app) {
     cfg.sample_rate_hz = kRatesMsps[size_t(app.rate_index)] * 1e6;
     cfg.lna_gain_db = app.lna;
     cfg.vga_gain_db = app.vga;
+    cfg.amp = app.amp;
     return cfg;
 }
 
@@ -456,6 +459,25 @@ void ensure_fm(App& app, bool on) {
         return;
     }
     if (on) {
+        // 广播接收默认增益（对照 SDRSharp 可用设置：LNA 40/amp on）；
+        // 用户手动调过（≥32）则不动
+        if (app.lna < 32) {
+            app.lna = 40;
+            app.vga = std::max(app.vga, 32u);
+            app.amp = true;
+            SendMessageW(app.track_lna, TBM_SETPOS, TRUE, LPARAM(40));
+            SendMessageW(app.track_vga, TBM_SETPOS, TRUE, LPARAM(app.vga));
+            if (app.check_amp != nullptr)
+                SendMessageW(app.check_amp, BM_SETCHECK, BST_CHECKED, 0);
+            SetWindowTextW(app.lbl_lna, L"LNA 40");
+            SetWindowTextW(app.lbl_vga, (L"VGA " + std::to_wstring(app.vga)).c_str());
+            if (app.running) {
+                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                std::string err;
+                if (!app.radio.apply(cfg, &err))
+                    app.status = L"配置失败: " + widen(err);
+            }
+        }
         if (app.rate_index != 0) {
             if (app.running) {
                 hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
@@ -1117,6 +1139,7 @@ enum : int {
     IDC_COMBO_ONLINE,
     IDC_COMBO_SORT,
     IDC_COMBO_AUDIO,
+    IDC_CHECK_AMP,
 };
 
 // ---- 统一调谐与页面默认频率（#55） ------------------------------------------
@@ -1517,6 +1540,9 @@ void create_settings_row(App& app) {
     SendMessageW(app.combo_rate, CB_SETCURSEL, WPARAM(app.rate_index), 0);
     slot(app.row_common, app.combo_rate, 64, true);
 
+    app.check_amp = make_ctl(app, WC_BUTTONW, L"功放", BS_AUTOCHECKBOX | WS_TABSTOP,
+                             0, IDC_CHECK_AMP);
+    slot(app.row_common, app.check_amp, 52);
     app.track_lna = make_ctl(app, TRACKBAR_CLASSW, nullptr,
                              TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP, 0, IDC_TRACK_LNA);
     SendMessageW(app.track_lna, TBM_SETRANGE, TRUE, MAKELPARAM(8, 40));
@@ -1932,6 +1958,17 @@ void on_command(App& app, int id, int code, HWND from) {
         break;
     case IDC_CHECK_APT:
         if (code == BN_CLICKED) update_apt_on(app);
+        break;
+    case IDC_CHECK_AMP:
+        if (code == BN_CLICKED) {
+            app.amp = SendMessageW(app.check_amp, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            if (app.running) {
+                hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                std::string err;
+                if (!app.radio.apply(cfg, &err))
+                    app.status = L"配置失败: " + widen(err);
+            }
+        }
         break;
     case IDC_SAVEPNG:
         if (code == BN_CLICKED) save_apt_dialog(app);
