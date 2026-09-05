@@ -152,6 +152,10 @@ struct App {
     HWND sigdb_wnd = nullptr;
     HWND sigdb_list = nullptr;
     unsigned sigdb_stamp = 0;   // 上次刷新的库版本（signals 大小+首条频率）
+    // 日志查看器（#64）：遥测 tail 弹窗——云图排查/问题分析在应用内直接读
+    HWND logview_wnd = nullptr;
+    HWND logview_list = nullptr;
+    std::size_t logview_stamp = 0;   // 上次刷新的日志总数
     // 数据面遥测（#60）：UI 状态变更快照 + DSP 1Hz 节流
     std::string last_ui_state;
     unsigned long long last_dsp_ms = 0;
@@ -1269,6 +1273,7 @@ flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
 void sync_chrome(App& app);   // 定义在原生骨架节（工具栏态 + 状态栏文本）
 void save_settings_tick(App& app);   // 设置缓存心跳保存（#57，定义见设置节）
 void sigdb_refresh(App& app);   // 信号库弹窗刷新（#62，定义见弹窗节）
+void logview_refresh(App& app);  // 日志查看器刷新（#64）
 void layout(App& app);        // 定义在原生骨架节（几何摆放；看门狗共用）
 bool host_target(App& app, RECT* out);   // 内容区目标矩形
 
@@ -1315,6 +1320,7 @@ flux::ElementPtr build(App& app) {
     sync_chrome(app);
     save_settings_tick(app);   // 设置缓存（#57）：3s 节流、变化才写盘
     if (app.sigdb_wnd != nullptr) sigdb_refresh(app);   // 弹窗 2Hz 刷新
+    if (app.logview_wnd != nullptr) logview_refresh(app);   // 日志窗刷新
     // 遥测（#60）：UI 状态变更即记（非周期轮询——变化才是事件）；
     // DSP 数据 1Hz 快照（峰值/静噪/导频/人声/在线台——分析信号质量用）
     {
@@ -1493,6 +1499,7 @@ enum : int {
     IDC_COMBO_BW,
     IDC_CHECK_STEREO,
     IDC_SIGDB,
+    IDC_LOGVIEW,
 };
 
 // ---- 统一调谐与页面默认频率（#55） ------------------------------------------
@@ -1996,6 +2003,7 @@ void create_toolbar(App& app) {
         tb_btn(ICON_SAT, IDC_SCAN, BTNS_AUTOSIZE, L"扫描信号"),
         tb_btn(ICON_DICE, IDC_RANDOM, BTNS_AUTOSIZE, L"随机收听"),
         tb_btn(ICON_SAT, IDC_SIGDB, BTNS_CHECK | BTNS_AUTOSIZE, L"信号库"),
+        tb_btn(ICON_DICE, IDC_LOGVIEW, BTNS_CHECK | BTNS_AUTOSIZE, L"日志"),
     };
     SendMessageW(app.toolbar, TB_ADDBUTTONS, WPARAM(sizeof(btns) / sizeof(btns[0])),
                  LPARAM(btns));
@@ -2435,6 +2443,116 @@ void sigdb_toggle(App& app) {
     sigdb_refresh(app);
 }
 
+// ---- 遥测日志查看器（#64）：tail 弹窗，总数变化才重建 --------------------
+
+void logview_refresh(App& app) {
+    if (app.logview_list == nullptr) return;
+    auto& lg = hackrftool::log::Logger::instance();
+    if (lg.count() == app.logview_stamp) return;
+    app.logview_stamp = lg.count();
+    SendMessageW(app.logview_list, LVM_DELETEALLITEMS, 0, 0);
+    wchar_t buf[160];
+    const auto evs = lg.tail(200);
+    int i = int(evs.size());
+    for (auto it = evs.rbegin(); it != evs.rend(); ++it) {   // 新在上
+        LVITEMW li{};
+        li.mask = LVIF_TEXT;
+        swprintf(buf, 160, L"%llu.%03llu",
+                 (unsigned long long)(it->ts / 1000),
+                 (unsigned long long)(it->ts % 1000));
+        li.pszText = buf;
+        li.iItem = i - 1;
+        const int idx = int(SendMessageW(app.logview_list, LVM_INSERTITEMW, 0,
+                                         LPARAM(&li)));
+        li.iItem = idx;
+        wcscpy(buf, it->level == hackrftool::log::Level::error   ? L"ERROR"
+                    : it->level == hackrftool::log::Level::warn ? L"WARN"
+                                                                : L"info");
+        li.iSubItem = 1;
+        SendMessageW(app.logview_list, LVM_SETITEMW, 0, LPARAM(&li));
+        swprintf(buf, 160, L"%S/%S", it->cat.c_str(), it->event.c_str());
+        li.iSubItem = 2;
+        SendMessageW(app.logview_list, LVM_SETITEMW, 0, LPARAM(&li));
+        // kv 拼一行（截断 80 字符）
+        std::string kv;
+        for (const auto& [k, v] : it->kv) {
+            kv += k + "=" + v + " ";
+            if (kv.size() > 80) break;
+        }
+        swprintf(buf, 160, L"%.*S", 100, kv.c_str());
+        li.iSubItem = 3;
+        SendMessageW(app.logview_list, LVM_SETITEMW, 0, LPARAM(&li));
+        --i;
+    }
+}
+
+LRESULT CALLBACK logview_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_SIZE:
+        if (app != nullptr && app->logview_list != nullptr)
+            MoveWindow(app->logview_list, 0, 0, LOWORD(lp), HIWORD(lp), TRUE);
+        return 0;
+    case WM_DESTROY:
+        if (app != nullptr) {
+            app->logview_wnd = nullptr;
+            app->logview_list = nullptr;
+        }
+        return 0;
+    default:
+        return DefWindowProcW(wnd, msg, wp, lp);
+    }
+}
+
+void logview_toggle(App& app) {
+    if (app.logview_wnd != nullptr) {
+        DestroyWindow(app.logview_wnd);
+        return;
+    }
+    static bool reg = false;
+    if (!reg) {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = logview_wndproc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"HackRFLogView";
+        RegisterClassW(&wc);
+        reg = true;
+    }
+    HWND wnd = CreateWindowW(L"HackRFLogView", L"遥测日志（最近 200 条，新在上）",
+                             WS_OVERLAPPEDWINDOW, 520, 120, 760, 420,
+                             app.main_wnd, nullptr, GetModuleHandleW(nullptr),
+                             nullptr);
+    if (wnd == nullptr) return;
+    SetWindowLongPtrW(wnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&app));
+    HWND lv = CreateWindowExW(
+        0, WC_LISTVIEWW, nullptr,
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS, 0, 0, 740, 400,
+        wnd, reinterpret_cast<HMENU>(5002), GetModuleHandleW(nullptr), nullptr);
+    ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT |
+                                              LVS_EX_DOUBLEBUFFER);
+    LVCOLUMNW col{};
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.pszText = const_cast<LPWSTR>(L"时间(s)");
+    col.cx = 90;
+    SendMessageW(lv, LVM_INSERTCOLUMNW, 0, LPARAM(&col));
+    col.pszText = const_cast<LPWSTR>(L"级别");
+    col.cx = 50;
+    SendMessageW(lv, LVM_INSERTCOLUMNW, 1, LPARAM(&col));
+    col.pszText = const_cast<LPWSTR>(L"分类/事件");
+    col.cx = 150;
+    SendMessageW(lv, LVM_INSERTCOLUMNW, 2, LPARAM(&col));
+    col.pszText = const_cast<LPWSTR>(L"数据");
+    col.cx = 440;
+    SendMessageW(lv, LVM_INSERTCOLUMNW, 3, LPARAM(&col));
+    app.logview_wnd = wnd;
+    app.logview_list = lv;
+    app.logview_stamp = 0;
+    ShowWindow(wnd, SW_SHOW);
+    logview_refresh(app);
+}
+
 // 工具栏按钮态 + 状态栏文本（build 心跳驱动；缓存避免每帧消息风暴）。
 // 状态栏文本 4Hz 节流（帧号每帧都变，40Hz 重绘无意义且是拖拽外的高频
 // 重绘源）；拖拽进行中整体跳过（与 layout 冻结配套，拖拽期零子窗重绘）。
@@ -2562,6 +2680,7 @@ void on_command(App& app, int id, int code, HWND from) {
     case IDC_SCAN: start_scan(app); break;
     case IDC_RANDOM: random_listen(app); break;
     case IDC_SIGDB: sigdb_toggle(app); break;
+    case IDC_LOGVIEW: logview_toggle(app); break;
     case IDC_COMBO_SIGCAT:
         if (code == CBN_SELCHANGE) {
             const int i = int(SendMessageW(app.combo_sigcat, CB_GETCURSEL, 0, 0));
