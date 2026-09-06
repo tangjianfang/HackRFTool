@@ -11,7 +11,7 @@
 | 目标一 | 整理 `C:\baidunetdiskdownload\HackRF` 的 RF 开发/学习资料，形成结构化知识库（见第 3 章） |
 | 目标二 | 开发 2.4 GHz 信号检测工具：检测信号强度与稳定性，并尝试抓取 2.4 GHz 空口数据包（见第 4 章） |
 | 扩展功能 | **收音机**（FM 立体声 87.5–108、AFC 自动微调、静音带宽三档、人声强度波形、音频 FFT 频谱 0–24kHz 含 19k 导频线）· **卫星云图**（NOAA APT 三星预设 137.100/137.620/137.9125、链路状态卡、PNG 保存；Meteor M2 LRPT QPSK 解调 137.900、眼图/ASM 帧同步诊断）· **信号库**（扫描累积、多条件筛选、随机收听、非模态弹窗双击调谐）· **设置持久化**（21 项参数 settings.tsv，重启即用含自动接收）· **频谱 X/Y 轴缩放**（×1–8 + 100/60/40dB 档）· **遥测日志**（UI/点击/事件/数据全量 JSONL + 应用内日志查看器 + log-assert 断言工具——UI 验收走日志不走截图） |
-| 当前状态 | **M0–M6 全部完成（2026-09-06）**：v0.1 频谱+瀑布（[M1](docs/m1-交付记录.md)）· v0.2 信道监测/统计/CSV（[M2](docs/m2-交付记录.md)）· v0.3 抓包离线链路（[M3](docs/m3-交付记录.md)）· v0.4 全频段扫描（[M4](docs/m4-交付记录.md)）· v0.5 实时抓包 UI + ESB 协议解帧（[M5](docs/m5-交付记录.md)）· v0.6 自动化测试体系（[M6](docs/m6-交付记录.md)，`ctest --preset x64-release` 一键 5/5） |
+| 当前状态 | **M0–M6 全部完成（2026-09-06）**：v0.1 频谱+瀑布（[M1](docs/m1-交付记录.md)）· v0.2 信道监测/统计/CSV（[M2](docs/m2-交付记录.md)）· v0.3 抓包离线链路（[M3](docs/m3-交付记录.md)）· v0.4 全频段扫描（[M4](docs/m4-交付记录.md)）· v0.5 实时抓包 UI + ESB 协议解帧（[M5](docs/m5-交付记录.md)）· v0.6 自动化测试体系（[M6](docs/m6-交付记录.md)，`ctest --preset x64-release` 一键 5/5）；演进至 #97：UI 三级架构（一级全局工具栏/二级通用+页特有设置行/内容区纯显示+图内轴刻度规范，[#87-#97](docs/evolve-log.md)）· 收音机/云图/轨道页/信号库/遥测/卫星过境预测 |
 
 ## 2. 背景与资源
 
@@ -38,6 +38,18 @@
 - Windows + Visual Studio 2022（本机已装齐所需组件）
 - 语言/框架：C++、Win32 API；界面使用 WinFlux SDK
 - 产物形态：Windows x64 桌面应用
+
+### 2.5 构建与运行（统一 Release 路径，T4.4）
+
+```sh
+cmake --build --preset x64-release      # 或仓库根 build.bat（只构建）
+ctest --preset x64-release              # 一键验收：5/5（无真机时自测记 SKIP）
+```
+
+- 主程序：`out/build/x64-release/Release/HackRFTool.exe`（libhackrf 等三个 DLL 由构建后步骤自动复制到 exe 旁）
+- 真机自测：`HackRFTool.exe selftest`（单窗 6s）/ `selftestsweep`（全频段 8s），报告落 exe 旁；命令行模式另有 `auto`/`autom`/`autos`/`autocap`/`autoradio`/`autowx`/`autosc`
+- 数据文件（exe 旁）：`settings.tsv`（21 项参数持久化）、`signals.tsv`（信号库）、`hackrftool.jsonl`（结构化遥测，`python tools/log-assert.py <日志> "LIFE:app.start,RADIO:tune"` 断言）
+- 真机注意：每次插 USB 先 `hackrf_spiflash -R` 软复位（固件已知 bug）；合规边界只收不发
 
 ## 3. 知识库整理需求
 

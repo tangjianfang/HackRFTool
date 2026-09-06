@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 258 断言
-- pointer: 用户指令 run（08:00 收尾）：#98 README 文档轮 → 回顾轮（余池：灰块占位 P3 上游疑/FMDUMP 归档 P3/T2.3 esb 基准/T4.2 --csv）
-- rounds done: 50（#87-#96 见下；#97 遥测并发压测）
+- pointer: 用户指令 run（08:00 收尾）：回顾轮（余池：灰块占位 P3 上游疑/FMDUMP 归档 P3/T2.3 esb 基准/T4.2 --csv）
+- rounds done: 51（#87-#97 见下；#98 README 运行指引+状态行）
 - status: active
 - metrics: findings 59 | fixes 72 | regressions 0（E4 按轮次行累加；本 run #87-#97 +13/+17/0）
 - checkpoint（#97 后，10 轮节点）: 本 run=用户优先 UI 三级架构（#87 重叠根因 place 同线叠放/#88 动作归位/#89 频谱条上移/#90 轴刻度规范/#91 持久化收口 red→green/#92 云图倒计时+UTF-8 乱码/#93 tools ID 漂移误触清空/#94 最小窗口/#95 静默失败遥测/#96 设备错误分流/#97 遥测并发压测）全部 green+progress，断言 251→258；深挖轮入库 12 findings（3P1 已清/6P2 已清/P3 记池）；下一段 #98 README（T4.4/T4.6）→ #99 回顾（重放审计+报告）；灰块占位=WinFlux 上游疑（仅云图页内容顶一排空灰卡，e87-e92 截图持续，本仓库不可修只记录）
@@ -80,6 +80,7 @@
 #95 | 深挖 P2：静默失败遥测双修（settings 损坏/selftest 报告写失败） | findings(2) | actions(2) | result(green+progress, 5 ctest/254 断言) | diff(+~30) | settings.tsv 存在但解析失败 → SETTINGS restore.fail(warn)+状态栏提示（文件不存在=首次运行仍静默，读文件提前区分）；selftest 报告 _wfopen 写失败 → stderr+LIFE selftest.report_fail(error)——原读端拿不到报告按 42 记 SKIP，会把磁盘满/权限问题伪装成无设备。枚举名坑：Level::error 非 err（C2838 一次修正）
 #96 | 深挖 P2：libhackrf 加载失败与设备未插分流提示 | findings(1) | actions(1) | result(green+progress, 5 ctest/254 断言) | diff(+~12) | device_open_failed 按 err 含 LoadLibrary/缺函数 分流：DLL 部署问题给三 DLL 恢复指引（杀软隔离是实际高发），设备未插给独占/软复位指引。灰块占位（P3）核查为仅云图页存在的纯视觉残留，疑 WinFlux 上游帧残留——按规约记录不可修，留待上游
 #97 | T2.5 遥测并发压测基准（red→green，断言 254→258） | findings(1) | actions(1) | result(green+progress, 5 ctest/258 断言) | diff(+~45) | 8 线程×500 条独立实例：total 计数无丢失/count_event 环形封顶语义核实（初版断言误把 count_event 当全量计数——读实现改期望 600，非竞态是语义）/快照不越界/内容完整；mutex 单锁路径并发安全实测通过
+#98 | T4.4+T4.6：README 新增「构建与运行」（统一 Release 路径）+ 当前状态行补三级架构演进 | findings(0) | actions(1) | result(green+no-progress（文档轮）, 5 ctest/258 断言) | diff(+~20) | 2.5 节：构建/验收命令、exe 与 DLL 路径、selftest 与命令行模式、settings.tsv/signals.tsv/遥测断言用法、真机软复位与合规边界
 
 ## 运行总结（#1–#4，用户指令停止）
 
