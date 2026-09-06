@@ -32,6 +32,7 @@
 #include "dsp/meteor.hpp"
 #include "dsp/meteor_frame.hpp"
 #include "dsp/orbit.hpp"
+#include "dsp/worldmap_data.hpp"
 #include "dsp/meteor_vitab.hpp"
 #include "app/settings.hpp"
 #include "app/telemetry.hpp"
@@ -1481,6 +1482,16 @@ flux::ElementPtr orbit_display(App& app, const flux::Palette& pal) {
                 }
                 r.draw_polygon(oct, c);
             };
+            // 大陆（Natural Earth 110m 填充——"标准世界地图"观感）
+            for (const auto& ring : hackrftool::dsp::kCoastlines) {
+                std::vector<std::pair<float, float>> poly;
+                poly.reserve(ring.pts.size());
+                for (const auto& pt : ring.pts) {
+                    const std::pair<float, float> g = px_of(pt[0], pt[1]);
+                    poly.push_back(g);
+                }
+                r.draw_polygon(poly, pal.divider);
+            }
             // 深圳站（洋红点+标签）
             const std::pair<float,float> sz_pt = px_of(114.0579, 22.5431);
             dot(sz_pt.first, sz_pt.second, 4.0f, pal.danger);
@@ -1771,6 +1782,7 @@ enum : int {
     IDC_PAGE2,
     IDC_PAGE3,
     IDC_PAGE4,
+    IDC_PAGE5,
     IDC_SWEEP,
     IDC_RECORD,
     IDC_LOCK,
@@ -1805,7 +1817,7 @@ enum : int {
     IDC_CHECK_STEREO,
     IDC_SIGDB,
     IDC_LOGVIEW,
-    IDC_PAGE5,
+    IDC_PAGE_MAX,
 };
 
 // ---- 统一调谐与页面默认频率（#55） ------------------------------------------
@@ -3029,9 +3041,9 @@ void sync_chrome(App& app) {
             app.sync_run = int(app.running);
         }
         if (app.sync_page != app.page) {
-            const int ids[5] = {IDC_PAGE0, IDC_PAGE1, IDC_PAGE2, IDC_PAGE3,
-                                IDC_PAGE4};
-            for (int i = 0; i < 5; ++i)
+            const int ids[6] = {IDC_PAGE0, IDC_PAGE1, IDC_PAGE2, IDC_PAGE3,
+                                IDC_PAGE4, IDC_PAGE5};
+            for (int i = 0; i < 6; ++i)
                 SendMessageW(app.toolbar, TB_SETSTATE, ids[i],
                              LPARAM(TBSTATE_ENABLED |
                                     (app.page == i ? TBSTATE_CHECKED : 0)));

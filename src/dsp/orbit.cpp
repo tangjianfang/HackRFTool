@@ -125,7 +125,8 @@ SubPoint sat_subpoint(const TleElements& tle, std::int64_t unix_sec) noexcept {
     const double gmst = rad(280.46061837 + 360.98564736629 * d);
     const double lon_orb = std::atan2(r[1], r[0]) - gmst;
     double lon = deg(lon_orb);
-    lon = std::fmod(lon + 540.0, 360.0) - 180.0;   // 归一 ±180
+    // 归一 ±180（两次 fmod：负数时 C++ fmod 保符号，先垫 360 再取模）
+    lon = std::fmod(std::fmod(lon + 180.0, 360.0) + 360.0, 360.0) - 180.0;
     const double rxy = std::sqrt(r[0] * r[0] + r[1] * r[1]);
     const double gclat = std::atan2(r[2], rxy);    // 地心纬度
     const double rmag = std::sqrt(rxy * rxy + r[2] * r[2]);
