@@ -59,10 +59,11 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
             geom_out->lo_mhz = f_lo_mhz;
             geom_out->hi_mhz = f_hi_mhz;
         }
-        // 网格：每 (span/5) dB 一条（全动态 20dB 细节档 12dB）
-        const float gstep = (kDbTop - y_floor) / 5.0f;
-        for (float grid_db = kDbTop - gstep; grid_db > y_floor + 1.0f;
-             grid_db -= gstep) {
+        // 网格与纵轴刻度同源（#90：dB 刻度取整十值，标签逐线标注——
+        // 原 span/5 分割产生 -12/-24 等碎值且只标 2 处）
+        const float gstep =
+            y_floor <= -90.0f ? 20.0f : y_floor <= -50.0f ? 15.0f : 10.0f;
+        for (float grid_db = -gstep; grid_db > y_floor + 1.0f; grid_db -= gstep) {
             const float gy = db_to_y(grid_db, y, h, y_floor);
             r.draw_line(x + 8.0f, gy, x + w - 8.0f, gy, pal.divider, 1.0f, 0.5f);
         }
@@ -75,24 +76,30 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
             r.draw_text(flux::Rect{lx, y + h - 18.0f, 56.0f, 14.0f}, tick.label, 10.0f,
                         pal.text_secondary, false, flux::Align::center);
         }
-        // 纵轴 dB 刻度（与监测页 RSSI 图一致；-100 即图底界，该处空间留给
-        // 底部频率刻度，标注会重叠故跳过）。注意：必须在波形折线之后调用——
-        // 渲染器顺序绘制无分层，先画会被后画的波形盖住（检查员 F4 驳回点）
-        const auto ylab = [&](float db) {
+        // 纵轴 dB 刻度（#90：逐网格线标注，顶格带单位；-100 底界空间留给
+        // 频率刻度故不标）。注意：必须在波形折线之后调用——渲染器顺序绘制
+        // 无分层，先画会被后画的波形盖住（检查员 F4 驳回点）
+        const auto ylab = [&](float db, bool unit = false) {
             // 底衬防止网格/波形穿越刻度文字
             r.fill_rect(
                 flux::Rect{x, db_to_y(db, y, h, y_floor) - 8.0f, 40.0f, 16.0f},
                 pal.surface);
+            wchar_t lab[12];
+            swprintf(lab, 12, unit ? L"%d dB" : L"%d", int(db));
             r.draw_text(
-                flux::Rect{x + 2.0f, db_to_y(db, y, h, y_floor) - 7.0f, 34.0f,
+                flux::Rect{x + 2.0f, db_to_y(db, y, h, y_floor) - 7.0f, 44.0f,
                            14.0f},
-                        std::to_wstring(int(db)), 10.0f, pal.text_secondary, false,
-                        flux::Align::start, 0.7f);
+                lab, 10.0f, pal.text_secondary, false, flux::Align::start, 0.7f);
+        };
+        const auto ylab_grid = [&] {
+            ylab(kDbTop, true);
+            for (float grid_db = -gstep; grid_db > y_floor + 1.0f;
+                 grid_db -= gstep)
+                ylab(grid_db);
         };
 
         if (db.empty()) {
-            ylab(0.0f);
-            ylab(y_floor + (kDbTop - y_floor) / 2.0f);
+            ylab_grid();
             r.draw_text(flux::Rect{x, y, w, h}, L"等待数据…", 14.0f, pal.text_secondary,
                         false, flux::Align::center);
             return;
@@ -109,8 +116,7 @@ flux::ElementPtr spectrum_view(const flux::Palette& pal, const std::vector<float
             r.draw_polyline(pk, pal.text_secondary, 1.0f, 0.55f);
         }
         r.draw_polyline(cur, pal.accent, 2.0f, 1.0f);
-        ylab(0.0f);   // 刻度最后画：底衬才盖得住波形（顺序绘制无分层）
-        ylab(y_floor + (kDbTop - y_floor) / 2.0f);
+        ylab_grid();   // 刻度最后画：底衬才盖得住波形（顺序绘制无分层）
     };
     if (on_tune) p.on_click = std::move(on_tune);   // 点频谱=调谐（#55）
     return flux::view(std::move(p));
@@ -134,6 +140,7 @@ flux::ElementPtr waterfall_view(const flux::Palette& pal,
         const auto snap = wf.snapshot();
         const std::size_t cols = wf.cols(), rows = wf.rows();
         const float cw = w / float(cols), rh = (h - 4.0f) / float(rows);
+        const float plot_w = w - 26.0f;   // 右缘留色标带（#90）
         std::vector<int> levels(snap.size());
         for (std::size_t i = 0; i < snap.size(); ++i)
             levels[i] = hackrftool::dsp::waterfall_level(snap[i]);
@@ -145,6 +152,19 @@ flux::ElementPtr waterfall_view(const flux::Palette& pal,
                                    float(run.len) * cw + 1.0f, rh + 1.0f},
                         wf_color(run.level));
         }
+        // 色标图例（#90）：16 级色带 + 端值——颜色↔dB 可对读（映射窗同
+        // dsp/level_map：[-110,-30]）
+        const float cb_x = x + plot_w + 6.0f, cb_w = 14.0f;
+        for (int lv = 0; lv < 16; ++lv) {
+            const float t1 = float(lv + 1) / 16.0f;
+            const float y0 = y + 2.0f + (1.0f - t1) * (h - 4.0f);
+            r.fill_rect(flux::Rect{cb_x, y0, cb_w, (h - 4.0f) / 16.0f + 1.0f},
+                        wf_color(lv));
+        }
+        r.draw_text(flux::Rect{cb_x - 6.0f, y + 2.0f, 30.0f, 12.0f}, L"-30", 9.0f,
+                    pal.text_secondary, false, flux::Align::start, 0.8f);
+        r.draw_text(flux::Rect{cb_x - 6.0f, y + h - 14.0f, 30.0f, 12.0f}, L"-110",
+                    9.0f, pal.text_secondary, false, flux::Align::start, 0.8f);
     };
     return flux::view(std::move(p));
 }

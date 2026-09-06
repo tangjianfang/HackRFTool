@@ -36,12 +36,18 @@ flux::ElementPtr audio_level_strip(const flux::Palette& pal,
         }
         wchar_t lab[24];
         swprintf(lab, 24, L"人声 %+.0f dB", cur_db);
-        r.draw_text(flux::Rect{x + 8.0f, y + 2.0f, 120.0f, 14.0f}, lab, 10.0f,
+        r.draw_text(flux::Rect{x + 8.0f, y + 2.0f, 140.0f, 16.0f}, lab, 12.0f,
                     pal.text_secondary, false, flux::Align::start);
-        r.draw_text(flux::Rect{x + w - 60.0f, y_of(0.0f) - 7.0f, 40.0f, 14.0f},
-                    L"0", 10.0f, pal.text_secondary, false, flux::Align::start);
-        r.draw_text(flux::Rect{x + w - 60.0f, y_of(-60.0f) - 7.0f, 40.0f, 14.0f},
-                    L"-60", 10.0f, pal.text_secondary, false, flux::Align::start);
+        // 网格刻度（#90：逐线标注，右端对齐；-60 为网格最深线）
+        for (float db = -15.0f; db > -60.0f; db -= 15.0f) {
+            wchar_t gl[8];
+            swprintf(gl, 8, L"%d", int(db));
+            r.draw_text(flux::Rect{x + w - 44.0f, y_of(db) - 7.0f, 38.0f, 12.0f},
+                        gl, 9.0f, pal.text_secondary, false, flux::Align::start,
+                        0.8f);
+        }
+        r.draw_text(flux::Rect{x + w - 44.0f, y_of(0.0f) - 7.0f, 38.0f, 12.0f},
+                    L"0 dB", 9.0f, pal.text_secondary, false, flux::Align::start);
         if (hist_db.empty()) {
             r.draw_text(flux::Rect{x, y, w, h}, L"等待音频…", 14.0f,
                         pal.text_secondary, false, flux::Align::center);
@@ -79,12 +85,18 @@ flux::ElementPtr audio_spectrum_strip(
             const float gy = y_of(db);
             r.draw_line(x + 8.0f, gy, x + w - 8.0f, gy, pal.divider, 1.0f, 0.5f);
         }
-        r.draw_text(flux::Rect{x + w - 46.0f, y_of(-10.0f) - 7.0f, 36.0f, 14.0f},
-                    L"-10", 10.0f, pal.text_secondary, false, flux::Align::start);
-        r.draw_text(flux::Rect{x + w - 46.0f, y_of(-90.0f) - 7.0f, 36.0f, 14.0f},
-                    L"-90", 10.0f, pal.text_secondary, false, flux::Align::start);
-        // 横轴刻度 0/6k/12k/18k/24k
-        for (int khz = 6; khz <= 24; khz += 6) {
+        // 纵轴刻度（#90：与网格线同源标注；原 -10/-90 两值不落在网格线上）
+        const auto ylab = [&](float db, bool unit = false) {
+            wchar_t lab[12];
+            swprintf(lab, 12, unit ? L"%d dB" : L"%d", int(db));
+            r.draw_text(flux::Rect{x + w - 46.0f, y_of(db) - 7.0f, 40.0f, 14.0f},
+                        lab, 9.0f, pal.text_secondary, false, flux::Align::start,
+                        0.8f);
+        };
+        ylab(-20.0f, true);
+        for (float db = -40.0f; db > -90.0f; db -= 20.0f) ylab(db);
+        // 横轴刻度 0/6k/12k/18k/24k（#90 补 0 起点）
+        for (int khz = 0; khz <= 24; khz += 6) {
             const float gx = x_of(double(khz) * 1000.0);
             r.draw_line(gx, bot, gx, bot + 4.0f, pal.divider, 1.0f, 0.5f);
             wchar_t lab[12];
@@ -97,8 +109,8 @@ flux::ElementPtr audio_spectrum_strip(
         r.draw_line(px, top, px, bot, pal.divider, 1.0f, 0.5f);
         r.draw_text(flux::Rect{px - 20.0f, top + 2.0f, 40.0f, 12.0f}, L"19k 导频",
                     9.0f, pal.text_secondary, false, flux::Align::center);
-        r.draw_text(flux::Rect{x + 8.0f, y + 2.0f, 160.0f, 14.0f},
-                    L"音频频谱 0–24 kHz", 10.0f, pal.text_secondary, false,
+        r.draw_text(flux::Rect{x + 8.0f, y + 2.0f, 160.0f, 16.0f},
+                    L"音频频谱 0–24 kHz", 12.0f, pal.text_secondary, false,
                     flux::Align::start);
         if (spec_db.empty()) {
             r.draw_text(flux::Rect{x, y, w, h}, L"等待音频…", 14.0f,
@@ -150,18 +162,19 @@ flux::ElementPtr rssi_strip(const flux::Palette& pal,
         }
         r.draw_polyline(pts, pal.accent, 2.0f, 1.0f);
 
-        // 左侧刻度
-        const auto ylab = [&](float db) {
+        // 左侧刻度（#90：与 20dB 网格同源逐线标注，顶格带单位；-100 底界不标）
+        const auto ylab = [&](float db, bool unit = false) {
+            wchar_t lab[12];
+            swprintf(lab, 12, unit ? L"%d dB" : L"%d", int(db));
             // 底衬防止波形穿越刻度文字
             r.fill_rect(flux::Rect{x, db_to_y(db, y, h) - 8.0f, 40.0f, 16.0f},
                         pal.surface);
-            r.draw_text(flux::Rect{x, db_to_y(db, y, h) - 7.0f, 34.0f, 14.0f},
-                        std::to_wstring(int(db)), 10.0f, pal.text_secondary, false,
+            r.draw_text(flux::Rect{x, db_to_y(db, y, h) - 7.0f, 44.0f, 14.0f},
+                        lab, 10.0f, pal.text_secondary, false,
                         flux::Align::start, 0.7f);
         };
-        ylab(0.0f);
-        ylab(-50.0f);
-        ylab(-100.0f);
+        ylab(kDbTop, true);
+        for (float db = -20.0f; db > kDbFloor + 1.0f; db -= 20.0f) ylab(db);
     };
     return flux::view(std::move(p));
 }

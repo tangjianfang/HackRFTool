@@ -957,7 +957,7 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
             {}));
         const std::vector<hackrftool::ui::SpectrumTick> ticks = {
             {2400.0, L"2400"}, {2420.0, L"2420"}, {2440.0, L"2440"},
-            {2460.0, L"2460"}, {2480.0, L"2480"},
+            {2460.0, L"2460"}, {2480.0, L"2480"}, {2483.5, L"2483.5"},
         };
         page_el->children.push_back(hackrftool::ui::spectrum_view(
             pal, app.pano.panorama(), {}, kSweepLoMhz, kSweepHiMhz, ticks,
@@ -975,7 +975,7 @@ flux::ElementPtr monitor_display(App& app, const flux::Palette& pal) {
         (st.count == 0)
             ? L"暂无统计（等待数据）"
             : L"均值 " + wd1(st.mean) + L" dB / 峰值 " + wd1(st.peak) + L" dB / 方差 " +
-                  wd1(st.variance) + L" / 占空比 " +
+                  wd1(st.variance) + L" dB² / 占空比 " +
                   std::to_wstring(unsigned(st.duty * 100.0f + 0.5f)) + L"% / 样本 " +
                   std::to_wstring(st.count) + L" / 跟踪 bin " +
                   std::to_wstring(app.monitor.tracked_bin());
@@ -1249,9 +1249,12 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
         app.squelch_open.load() ? L"● 信号正常" : L"● 无信号"));
     {
         wchar_t buf[48];
-        swprintf(buf, 48, L"导频 %.3f｜峰值 %+.1f dB",
-                 app.fm_pilot.load(),
-                 20.0f * std::log10(std::max(app.fm_peak.load(), 1e-6f)));
+        const float peak_db =
+            20.0f * std::log10(std::max(app.fm_peak.load(), 1e-6f));
+        swprintf(buf, 48, peak_db <= -119.0f
+                              ? L"导频 %.3f｜峰值 <−120 dB"
+                              : L"导频 %.3f｜峰值 %+.1f dB",
+                 app.fm_pilot.load(), peak_db);   // 静默魔数 -120 可读化（#90）
         head->children.push_back(flux::ui::caption(pal, buf, {}));
     }
     page_el->children.push_back(std::move(head));
