@@ -1339,6 +1339,18 @@ static void test_settings_roundtrip() {
           "越界/坏值字段保留默认");
     check(mix->fm_bw == 1, "好行照常解析");
     check(mix->threshold == -70.0, "nan 拒绝");
+    // #91：轨道页 page=5 可持久化；2.4G 中心频率不再被 24..1800 值域拒收
+    {
+        Settings p5;
+        p5.page = 5;
+        p5.center_mhz = 2420.0;
+        const auto b5 = hackrftool::app::deserialize(hackrftool::app::serialize(p5));
+        check(b5.has_value() && b5->page == 5, "page=5 往返（kPageMax=5）");
+        check(b5->center_mhz == 2420.0, "2.4G 中心频率往返（2400..2483.5 值域）");
+        const auto bad = hackrftool::app::deserialize("vol\t55\ncenter_mhz\t2500\npage\t6\n");
+        check(bad.has_value() && bad->page == 0 && bad->center_mhz == 2450.0,
+              "page>5 / 频段外频率仍拒绝");
+    }
     check(!hackrftool::app::deserialize("").has_value(), "空文本→nullopt");
     check(!hackrftool::app::deserialize("no tabs here").has_value(),
           "无有效行→nullopt");

@@ -9,7 +9,7 @@ namespace hackrftool::app {
 namespace {
 
 // 值域约束（与 App 字段同源）：越界值回退默认，防手改文件把 UI 搞瘫
-constexpr int kPageMax = 4;
+constexpr int kPageMax = 5;   // #91：轨道页（#83）一并持久化
 constexpr int kRateMax = 4;
 constexpr int kFmBwMax = 2;
 constexpr int kSigCatMax = 3;
@@ -85,7 +85,11 @@ std::optional<Settings> deserialize(std::string_view text) {
         if (key == "page") {
             if (clamp_int(std::llround(d), 0, kPageMax, i)) { s.page = i; any = true; }
         } else if (key == "center_mhz") {
-            if (finite_double(d, 24.0, 1800.0, s.center_mhz)) any = true;
+            // #91：宽频收音频段 + 2.4G 工具频段（原 24..1800 拒收 2.4G
+            // 保存值，恢复被静默落回 2450）
+            if (finite_double(d, 24.0, 1800.0, s.center_mhz) ||
+                finite_double(d, 2400.0, 2483.5, s.center_mhz))
+                any = true;
         } else if (key == "radio_mhz") {
             if (finite_double(d, 24.0, 1800.0, s.radio_mhz)) any = true;
         } else if (key == "rate_index") {
