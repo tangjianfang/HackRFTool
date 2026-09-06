@@ -271,6 +271,7 @@ struct App {
         HWND h;
         int w;
         bool drop = false;
+        bool hidden = false;   // 页显隐由调用方 ShowWindow 管理（place 守卫复判）
     };
     std::vector<CtlSlot> row_common;    // 所有页可见
     std::vector<CtlSlot> row_monitor;   // 仅监测页
@@ -2384,14 +2385,14 @@ void create_settings_row(App& app) {
                             ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0, IDC_EDIT_MON);
     slot(app.row_monitor, app.edit_mon, 80);
     slot(app.row_monitor,
-         make_ctl(app, WC_STATICW, L"活动阈值", SS_LEFT | SS_CENTERIMAGE, 0, 0), 60);
+         make_ctl(app, WC_STATICW, L"阈值", SS_LEFT | SS_CENTERIMAGE, 0, 0), 40);
     app.track_threshold = make_ctl(app, TRACKBAR_CLASSW, nullptr,
                                    TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP, 0,
                                    IDC_TRACK_THR);
     SendMessageW(app.track_threshold, TBM_SETRANGE, TRUE, MAKELPARAM(-100, -40));
     SendMessageW(app.track_threshold, TBM_SETTICFREQ, 10, 0);
     SendMessageW(app.track_threshold, TBM_SETPOS, TRUE, LPARAM(int(app.threshold)));
-    slot(app.row_monitor, app.track_threshold, 120);
+    slot(app.row_monitor, app.track_threshold, 104);
     app.lbl_thr = make_ctl(app, WC_STATICW, L"-70 dB", SS_LEFT | SS_CENTERIMAGE, 0, 0);
     slot(app.row_monitor, app.lbl_thr, 44);
 
@@ -2469,7 +2470,7 @@ void create_settings_row(App& app) {
     slot(app.row_radio, app.lbl_vol, 56);
     app.check_mute = make_ctl(app, WC_BUTTONW, L"静音", BS_AUTOCHECKBOX | WS_TABSTOP,
                               0, IDC_CHECK_MUTE);
-    slot(app.row_radio, app.check_mute, 52);
+    slot(app.row_radio2, app.check_mute, 52);   // B4 二次布局审计：行1 超宽回挪
     app.check_afc = make_ctl(app, WC_BUTTONW, L"自动微调", BS_AUTOCHECKBOX | WS_TABSTOP,
                              0, IDC_CHECK_AFC);
     SendMessageW(app.check_afc, BM_SETCHECK, BST_CHECKED, 0);
@@ -2569,11 +2570,18 @@ void layout(App& app) {
         const int py = row_y + line * 34 * s;
         for (const auto& c : v) {
             const int ch = c.drop ? 130 * s : ctl_h;   // 组合框高度含下拉列表
-            MoveWindow(c.h, px, py, c.w * s, ch, FALSE);
+            // 越界守卫（#86 布局审计）：控件左缘超客户区 → 藏起不摆，
+            // 防压到内容区上方形成"组件叠在一起"的观感
+            if (px + c.w * s <= w) {
+                MoveWindow(c.h, px, py, c.w * s, ch, FALSE);
+                if (!c.hidden) ShowWindow(c.h, SW_SHOW);
+            } else {
+                ShowWindow(c.h, SW_HIDE);
+            }
             px += c.w * s + 6 * s;
         }
     };
-    place(app.row_common, 0);
+    // 页显隐先行 → place 在其上做越界守卫（place 会 ShowWindow 复位可见控件）
     const bool mon = app.page == 1, cap = app.page == 2;
     const bool rad = app.page == 3, wx = app.page >= 4;   // 云图+轨道共用卫星行
     for (const auto& c : app.row_monitor)
@@ -2586,6 +2594,7 @@ void layout(App& app) {
         ShowWindow(c.h, rad ? SW_SHOW : SW_HIDE);
     for (const auto& c : app.row_weather)
         ShowWindow(c.h, wx ? SW_SHOW : SW_HIDE);
+    place(app.row_common, 0);
     if (mon) place(app.row_monitor, 0);
     if (cap) place(app.row_capture, 0);
     if (rad) {
