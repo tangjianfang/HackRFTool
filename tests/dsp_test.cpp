@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "dsp/analyzer.hpp"
@@ -1025,8 +1027,7 @@ static void test_voice_level() {
 // 遥测日志（#59）：JSON 转义/序列化/环形缓冲/计数——验收走日志不走截图
 static void test_telemetry() {
     using hackrftool::log::Event;
-    using hackrftool::log::Level;
-    using hackrftool::log::json_escape;
+    using hackrftool::log::Level;    using hackrftool::log::json_escape;
     using hackrftool::log::to_jsonl;
     check(json_escape("a\"b\\c") == "a\\\"b\\\\c", "JSON 引号反斜杠转义");
     check(json_escape(std::string("x\ny\tz")) == "x\\ny\\tz", "控制字符转义");
@@ -1080,6 +1081,33 @@ static void test_telemetry() {
     check(main_nonempty, "轮转后主文件重写非空");
     _wremove((tmp + L".1").c_str());
     _wremove(tmp.c_str());
+}
+
+// 遥测并发压测（#97，T2.5 基准）：8 线程 × 500 条写独立实例——
+// 计数一致性（total/count_event 无丢条）+ 环形缓冲不越界
+static void test_telemetry_concurrent() {
+    using hackrftool::log::Level;
+    hackrftool::log::Logger lg;   // 独立实例，不进文件
+    constexpr int kThreads = 8, kPer = 500;
+    std::vector<std::thread> ts;
+    for (int t = 0; t < kThreads; ++t)
+        ts.emplace_back([&lg, t] {
+            for (int k = 0; k < kPer; ++k)
+                lg.write(Level::info, "STRESS", "ev",
+                         {{"t", std::to_string(t)}, {"k", std::to_string(k)}});
+        });
+    for (auto& th : ts) th.join();
+    check(lg.count() == std::size_t(kThreads * kPer),
+          "并发计数一致：8×500 条无丢失");
+    // count_event 统计环形缓冲（kRing=600 封顶）——并发下 ring 内计数完整
+    check(lg.count_event("STRESS", "ev") == 600,
+          "并发 cat/event 计数一致（ring 封顶 600）");
+    const auto tail = lg.tail(kThreads * kPer);
+    check(tail.size() == 600, "环形快照封顶 kRing=600 不越界");
+    std::size_t sum = 0;
+    for (const auto& e : tail)
+        if (e.cat == "STRESS") ++sum;
+    check(sum == tail.size(), "环形快照内容完整（全为 STRESS 事件）");
 }
 
 // Meteor QPSK 解调（#70）：合成 72ksym QPSK（Sps≈6.67@480k 抽取域）加噪，
@@ -1617,6 +1645,7 @@ int main() {
     test_meteor_frame();
     test_orbit_passes();
     test_telemetry();
+    test_telemetry_concurrent();
     test_audio_spectrum();
     test_fm_decimator_stopband();
     test_apt_decode();
