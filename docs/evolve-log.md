@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: METEOR-M2 3 过境实测（17:50 北京 70°——ASM 命中/帧流/倒计时核对）
-- rounds done: 37（#82 过境倒计时+在役预设）
+- pointer: 大陆轮廓线（轨道页地图升级）或 METEOR 过境实测
+- rounds done: 38（#83 轨道页）
 - status: active
 - metrics: findings 46 | fixes 56 | regressions 0（E4 按轮次行累加；本 run +8/+16/0）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
@@ -64,6 +64,7 @@
 #80（EP-1.2） | Meteor 帧层（去随机化+帧装配，切片 2/4） | findings(1) | actions(1) | result(green+progress, 5 ctest/242 断言) | diff(+~180) | CCSDS PN 自反+128B 帧结构（头 8B+载荷 120B）；去交错参数留真机校准（不确定规格不臆造）。坑：bit 累积漏打包（payload 1016B 实锤）
 #81（EP-1.3’） | Meteor 全链接线+帧流捕获（解压前置） | findings(1) | actions(1) | result(green+progress, 5 ctest/243 断言) | diff(+~90) | QPSK→维特比→帧装配→meteor-frames.bin 落盘；帧率实测 73/s 与码率吻合；EP-1.3 解压显式后置（无权威规格不臆造，等过境数据对照校准）
 #82 | 卫星过境倒计时（北京时间·深圳）+ NOAA 全系退役发现 | findings(2) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+~600) | orbit 纯函数（J2）+Celestrak 自动 TLE（71 条）+云图页倒计时；重大发现：NOAA 15/18/19 已退役（云图等不到的根因）——预设切 METEOR-M2 系（在役，QPSK 链已就绪）；pass_check 独立验证 M2-3 今日 17:50 北京 70° 过境
+#83 | 轨道页：全球卫星地图实时显示（用户指令） | findings(1) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+~250) | 等距圆柱投影网格图+71 颗气象卫星灰点+预设高亮+深圳标记+型号经纬高列表；sat_subpoint 公共函数。坑：WinFlux 无 fill_circle（polygon 八边形近似）；heredoc 转义连环坑（本会话第十+次——python 内联一律 Edit 的纪律再验证）
 
 ## 运行总结（#1–#4，用户指令停止）
 
