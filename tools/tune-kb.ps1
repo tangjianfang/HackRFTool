@@ -1,4 +1,7 @@
-# Real keyboard tune: click edit, Ctrl+A, type digits, apply via WM_COMMAND 111.
+# Real keyboard tune: click edit, Ctrl+A, type digits, apply via WM_COMMAND.
+# ID 对照 src/app/main.cpp 控件枚举（#93 修正：旧值 115/111 已漂移成
+# IDC_EDIT_MON/IDC_CLEAR——旧脚本会点监测页频率框并误触「清空」）：
+#   IDC_EDIT_FREQ=114（通用行中心频率框）  IDC_APPLYFREQ=112（应用按钮）
 param([string]$Mhz = "107.1")
 $ErrorActionPreference = "Stop"
 Add-Type @"
@@ -23,7 +26,7 @@ $p = Get-Process HackRFTool -ErrorAction Stop
 $main = $p.MainWindowHandle
 $script:hit = [IntPtr]::Zero
 $cb = [Kb+EnumProc]{ param($h, $l)
-  if ([Kb]::GetDlgCtrlID($h) -eq 115) { $script:hit = $h; return $false }
+  if ([Kb]::GetDlgCtrlID($h) -eq 114) { $script:hit = $h; return $false }
   return $true }
 [Kb]::EnumChildWindows($main, $cb, [IntPtr]::Zero) | Out-Null
 if ($script:hit -eq [IntPtr]::Zero) { Write-Error "edit not found"; exit 1 }
@@ -50,5 +53,5 @@ foreach ($c in $Mhz.ToCharArray()) {
   [Kb]::keybd_event($vk,0,2,[UIntPtr]::Zero); Start-Sleep -Milliseconds 60
 }
 Start-Sleep -Milliseconds 200
-[Kb]::SendMessage($main, 0x111, [IntPtr]111, [IntPtr]::Zero) | Out-Null
+[Kb]::SendMessage($main, 0x111, [IntPtr]112, [IntPtr]::Zero) | Out-Null
 Write-Host "typed $Mhz + applied"
