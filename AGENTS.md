@@ -28,7 +28,7 @@ cmake --build --preset x64-release && ctest --preset x64-release
 
 ## UI 架构（#52 原生 Win32 骨架）
 
-- 骨架 = 原生主窗口（类 `HackRFToolMain`）：顶部 **ToolbarWindow32**（图标按钮：启停/页签×3 单选组/全频段/录制/锁定/导出/清空/应用频率；图标为 GDI 运行时自绘 24px、洋红键转 alpha）+ 设置行原生控件（EDIT/COMBOBOX/TRACKBAR/CHECKBOX，随页签显隐；**组合框 MoveWindow 高度必须含下拉列表**——Win32 契约，ctl_h 只给静态高度会展不开）+ 底部 **msctls_statusbar32** 六分段（文本来自 `status_parts` 纯函数）
+- 骨架 = 原生主窗口（类 `HackRFToolMain`）：顶部 **ToolbarWindow32**（#88 三级架构：一级工具栏只放全局动作——启停/页签×6 单选组/全频段/录制 IQ/日志；页特有动作按钮归位各页二级行，命令 ID 不变：应用→通用行、锁定/导出 CSV→监测行、清空→抓包行、扫描信号/随机收听→收音行1、信号库→收音行2；图标为 GDI 运行时自绘 24px、洋红键转 alpha）+ 设置行原生控件（**行0=通用设置常驻、行1=页特有、收音行2=筛选/音频**——#87 根因修复：place 按行摆放，严禁页特有行与通用行同线叠放；轨道页隐藏云图专属「记录/保存 PNG」；EDIT/COMBOBOX/TRACKBAR/CHECKBOX，随页签显隐；**组合框 MoveWindow 高度必须含下拉列表**——Win32 契约，ctl_h 只给静态高度会展不开）+ 底部 **msctls_statusbar32** 六分段（文本来自 `status_parts` 纯函数）
 - 中间内容区 = WinFlux Host **重父化子窗口**（`Host::create` 后清 WS_POPUP 家族、加 WS_CHILD，SetParent 进主窗）：只渲染图表（D2D/DComp 管线不变），控件值是 App 普通字段（每帧重建，无 flux::State——set-收尾铁律随之退役，见 lessons L4 注记）
 - 外层 GetMessage 泵（非 `host.run()`）；WM_QUIT 来自主窗销毁或 selftest 线程；`sync_chrome` 在 build 心跳里同步工具栏态（有缓存去重）与状态栏分段
 - comctl32 v6 清单内嵌于 `src/app/app.rc`（CMake 已设 `/MANIFEST:NO` 防重复）；DPI 感知靠 `flux::enable_per_monitor_dpi_v2()`（**wWinMain 里、任何窗口创建前**——重写 main.cpp 时误删过一次，整窗模糊，L7）

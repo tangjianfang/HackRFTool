@@ -69,6 +69,7 @@
 #85 | 应用图标（用户指令：exe/任务栏/标题栏三处） | findings(1) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+31KB ico/+8 代码) | Pillow 程序化 7 尺寸 ICO（天线+电波，深蓝圆角底）；rc 资源 ID1+窗口类 hIcon/hIconSm；三处验证：标题栏截图已渲染/exe ExtractAssociatedIcon 已返回/任务栏=系统 ShellCache 旧图（重启 explorer 自愈，非代码问题）
 #86 | 设置行布局重叠审计+修复（用户报告组件叠加） | findings(2) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+~40/-~10) | 静态审计法：slot 声明宽度累加 vs 窗口宽——监测页 1214/收音行1 1266 超宽实锤（place 顺序累加无边界检查，溢出控件压内容区=用户看到的"叠加"）；修：标签缩短+静音回挪+place 越界 SW_HIDE 守卫+ShowWindow 先行。审计脚本可复用（正则提 slot 宽度）
 #87 | 用户优先：设置行组件重叠根因修复（#86 审计口径错位——place 每次调用重置 px=8，特有行与通用行同线叠放；截图+git 溯源 #58 引入，#86 修宽度未触及） | findings(1) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+9/-7) | 特有行挪 line1（收音第二特有行 line2）+settings_rows 按页 2/3 行；六页前台截图复核无叠放（out/e87-*.png，真机在线）；对抗检查员 5/5 PASS（行分配/行数一致/云图卡带累加/看门狗同算法/显隐闭环）。新 findings 移交 #90：监测"自动跟踪最强"与收音"带宽/频率 MHz/类别"标签裁字、RSSI 轴标签与 20dB 网格错位、收音频谱无 X 刻度、LNA/VGA 滑条刻度过密
+#88 | 用户优先：三级架构落地——一级工具栏瘦身+页特有动作归位二级行 | findings(2) | actions(3) | result(green+progress, 5 ctest/251 断言) | diff(+~70/-~14) | 工具栏只留全局动作（启停/页签×6/全频段/录制 IQ/日志）；应用→通用行频率框旁、锁定+导出 CSV→监测行、清空→抓包行、扫描信号+随机收听→收音行1、信号库→收音行2（全部复用原命令 ID，遥测/命令路由零改动）；轨道页隐藏云图专属「记录/保存 PNG」（hidden+ShowWindow 先行契约）；顺修 #87 裁字 findings（自动跟踪最强 96→108/目标频率 56→64/带宽 36→48/频率 MHz 60→72）+连带 bug：类别标签误挂 row_radio 与其 combo 异行。六页截图复核（out/e88-*.png）+遥测 101-106 链路断言；AGENTS.md UI 架构段同步三级模型
 
 ## 运行总结（#1–#4，用户指令停止）
 

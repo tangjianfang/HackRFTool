@@ -2317,13 +2317,8 @@ void create_toolbar(App& app) {
         tb_btn(ICON_SWEEP, IDC_SWEEP, BTNS_CHECK | BTNS_AUTOSIZE, L"全频段"),
         tb_btn(ICON_REC, IDC_RECORD, BTNS_CHECK | BTNS_AUTOSIZE, L"录制 IQ"),
         tb_btn(0, 0, BTNS_SEP, nullptr),
-        tb_btn(ICON_LOCK, IDC_LOCK, BTNS_AUTOSIZE, L"锁定"),
-        tb_btn(ICON_EXPORT, IDC_EXPORT, BTNS_AUTOSIZE, L"导出 CSV"),
-        tb_btn(ICON_CLEAR, IDC_CLEAR, BTNS_AUTOSIZE, L"清空"),
-        tb_btn(ICON_APPLY, IDC_APPLYFREQ, BTNS_AUTOSIZE, L"应用频率"),
-        tb_btn(ICON_SAT, IDC_SCAN, BTNS_AUTOSIZE, L"扫描信号"),
-        tb_btn(ICON_DICE, IDC_RANDOM, BTNS_AUTOSIZE, L"随机收听"),
-        tb_btn(ICON_SAT, IDC_SIGDB, BTNS_CHECK | BTNS_AUTOSIZE, L"信号库"),
+        // #88 三级架构：一级工具栏只留全局动作；页特有动作（锁定/导出/
+        // 清空/应用/扫描/随机/信号库）下放到各页二级行（命令 ID 不变）
         tb_btn(ICON_DICE, IDC_LOGVIEW, BTNS_CHECK | BTNS_AUTOSIZE, L"日志"),
     };
     SendMessageW(app.toolbar, TB_ADDBUTTONS, WPARAM(sizeof(btns) / sizeof(btns[0])),
@@ -2343,6 +2338,11 @@ void create_settings_row(App& app) {
                              ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0,
                              IDC_EDIT_FREQ);
     slot(app.row_common, app.edit_freq, 80);
+    // #88：「应用频率」从工具栏归位到频率框旁（只作用于该框）
+    slot(app.row_common,
+         make_ctl(app, WC_BUTTONW, L"应用", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                  IDC_APPLYFREQ),
+         52);
     slot(app.row_common,
          make_ctl(app, WC_STATICW, L"采样率", SS_LEFT | SS_CENTERIMAGE, 0, 0), 52);
     app.combo_rate = make_ctl(app, WC_COMBOBOXW, nullptr,
@@ -2378,9 +2378,9 @@ void create_settings_row(App& app) {
                                    BS_AUTOCHECKBOX | WS_TABSTOP, 0,
                                    IDC_CHECK_AUTOTRACK);
     SendMessageW(app.check_autotrack, BM_SETCHECK, BST_CHECKED, 0);
-    slot(app.row_monitor, app.check_autotrack, 96);
+    slot(app.row_monitor, app.check_autotrack, 108);   // #87 裁字：96→108
     slot(app.row_monitor,
-         make_ctl(app, WC_STATICW, L"目标频率", SS_LEFT | SS_CENTERIMAGE, 0, 0), 56);
+         make_ctl(app, WC_STATICW, L"目标频率", SS_LEFT | SS_CENTERIMAGE, 0, 0), 64);
     app.edit_mon = make_ctl(app, WC_EDITW, L"2450",
                             ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0, IDC_EDIT_MON);
     slot(app.row_monitor, app.edit_mon, 80);
@@ -2395,6 +2395,15 @@ void create_settings_row(App& app) {
     slot(app.row_monitor, app.track_threshold, 104);
     app.lbl_thr = make_ctl(app, WC_STATICW, L"-70 dB", SS_LEFT | SS_CENTERIMAGE, 0, 0);
     slot(app.row_monitor, app.lbl_thr, 44);
+    // #88：监测特有动作归位（原工具栏「锁定」「导出 CSV」）
+    slot(app.row_monitor,
+         make_ctl(app, WC_BUTTONW, L"锁定", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                  IDC_LOCK),
+         52);
+    slot(app.row_monitor,
+         make_ctl(app, WC_BUTTONW, L"导出 CSV", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                  IDC_EXPORT),
+         76);
 
     // 抓包页：突发阈值 / 符号率
     slot(app.row_capture,
@@ -2416,18 +2425,24 @@ void create_settings_row(App& app) {
         SendMessageW(app.combo_symrate, CB_ADDSTRING, 0, LPARAM(r));
     SendMessageW(app.combo_symrate, CB_SETCURSEL, WPARAM(app.symrate_idx), 0);
     slot(app.row_capture, app.combo_symrate, 80, true);
+    // #88：抓包特有动作归位（原工具栏「清空」）
+    slot(app.row_capture,
+         make_ctl(app, WC_BUTTONW, L"清空", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                  IDC_CLEAR),
+         52);
 
     // 收音机页（#53/#55）：频段类别/在线/排序筛选 + 频率（后备）+ 音量/静音
     slot(app.row_radio,
-         make_ctl(app, WC_STATICW, L"带宽", SS_LEFT | SS_CENTERIMAGE, 0, 0), 36);
+         make_ctl(app, WC_STATICW, L"带宽", SS_LEFT | SS_CENTERIMAGE, 0, 0), 48);
     app.combo_bw = make_ctl(app, WC_COMBOBOXW, nullptr,
                             CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_BW);
     for (const wchar_t* b : {L"±120k 广播", L"±80k", L"±50k 窄带"})
         SendMessageW(app.combo_bw, CB_ADDSTRING, 0, LPARAM(b));
     SendMessageW(app.combo_bw, CB_SETCURSEL, 0, 0);
     slot(app.row_radio, app.combo_bw, 84, true);
-    slot(app.row_radio,
-         make_ctl(app, WC_STATICW, L"类别", SS_LEFT | SS_CENTERIMAGE, 0, 0), 36);
+    slot(app.row_radio2,
+         make_ctl(app, WC_STATICW, L"类别", SS_LEFT | SS_CENTERIMAGE, 0, 0),
+         48);   // #88 修正：标签原误挂 row_radio（行1），与其 combo 异行
     app.combo_sigcat = make_ctl(app, WC_COMBOBOXW, nullptr,
                                 CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_SIGCAT);
     for (const wchar_t* s : {L"FM 广播", L"NOAA 卫星", L"2.4G ISM", L"全部"})
@@ -2456,7 +2471,7 @@ void create_settings_row(App& app) {
     SendMessageW(app.combo_audio, CB_SETCURSEL, 0, 0);
     slot(app.row_radio2, app.combo_audio, 150, true);
     slot(app.row_radio,
-         make_ctl(app, WC_STATICW, L"频率 MHz", SS_LEFT | SS_CENTERIMAGE, 0, 0), 60);
+         make_ctl(app, WC_STATICW, L"频率 MHz", SS_LEFT | SS_CENTERIMAGE, 0, 0), 72);
     app.edit_radio = make_ctl(app, WC_EDITW, L"98.0",
                               ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0,
                               IDC_EDIT_RADIO);
@@ -2468,6 +2483,15 @@ void create_settings_row(App& app) {
     slot(app.row_radio, app.track_vol, 100);
     app.lbl_vol = make_ctl(app, WC_STATICW, L"音量 80", SS_LEFT | SS_CENTERIMAGE, 0, 0);
     slot(app.row_radio, app.lbl_vol, 56);
+    // #88：收音特有动作归位（原工具栏「扫描信号」「随机收听」「信号库」）
+    slot(app.row_radio,
+         make_ctl(app, WC_BUTTONW, L"扫描信号", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                  IDC_SCAN),
+         76);
+    slot(app.row_radio,
+         make_ctl(app, WC_BUTTONW, L"随机收听", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                  IDC_RANDOM),
+         76);
     app.check_mute = make_ctl(app, WC_BUTTONW, L"静音", BS_AUTOCHECKBOX | WS_TABSTOP,
                               0, IDC_CHECK_MUTE);
     slot(app.row_radio2, app.check_mute, 52);   // B4 二次布局审计：行1 超宽回挪
@@ -2480,6 +2504,10 @@ void create_settings_row(App& app) {
                                 BS_AUTOCHECKBOX | WS_TABSTOP, 0, IDC_CHECK_STEREO);
     SendMessageW(app.check_stereo, BM_SETCHECK, BST_CHECKED, 0);
     slot(app.row_radio2, app.check_stereo, 62);
+    slot(app.row_radio2,
+         make_ctl(app, WC_BUTTONW, L"信号库", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                  IDC_SIGDB),
+         64);
     // 「扫描电台」为动作按钮，归工具栏行 1（布局契约：按钮在工具栏）
 
     // 云图页（#54）：卫星预设 + 记录 + 保存
@@ -2602,6 +2630,12 @@ void layout(App& app) {
     if (rad) {
         place(app.row_radio, 1);
         place(app.row_radio2, 2);   // 收音页第三行：筛选/音频选项（B4）
+    }
+    // #88：轨道页只留卫星选择——「记录/保存 PNG」是云图专属动作
+    //（hidden 供 place 守卫复判；显隐本身在此先行，同页行显隐次序契约）
+    for (std::size_t i = 2; i < app.row_weather.size(); ++i) {
+        app.row_weather[i].hidden = (app.page == 5);
+        ShowWindow(app.row_weather[i].h, app.page == 5 ? SW_HIDE : SW_SHOW);
     }
     if (wx) place(app.row_weather, 1);
 
