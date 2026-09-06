@@ -10,6 +10,7 @@
 #include "dsp/analyzer.hpp"
 #include "app/settings.hpp"
 #include "dsp/meteor.hpp"
+#include "dsp/meteor_vitab.hpp"
 #include "app/telemetry.hpp"
 #include "dsp/burst_detector.hpp"
 #include "dsp/channel_monitor.hpp"
@@ -1151,6 +1152,54 @@ static void test_meteor_qpsk() {
     check(pos2 >= 0 || q < 0.9, "随机流不误报 ASM（或质量阈值外）");
 }
 
+// 维特比译码（EP-1.1）：CCSDS r=1/2 K=7 回环——无噪 BER=0、加噪显著纠错
+static void test_viterbi_roundtrip() {
+    using hackrftool::dsp::ConvolutionalEncoder;
+    using hackrftool::dsp::ViterbiDecoder;
+    const int N = 4000;
+    unsigned rng = 424242;
+    const auto rnd = [&rng] {
+        rng = rng * 1664525u + 1013904223u;
+        return int((rng >> 16) & 1u);
+    };
+    std::vector<int> bits;
+    ConvolutionalEncoder enc;
+    std::vector<std::pair<int, int>> syms;
+    for (int k = 0; k < N; ++k) {
+        bits.push_back(rnd());
+        syms.push_back(enc.push(bits.back()));
+    }
+    // 无噪：跳过头部 72（填充）与尾部 72（回溯尾巴）比对
+    {
+        ViterbiDecoder dec;
+        long err = 0, cmp = 0;
+        for (int k = 0; k < N; ++k) {
+            const int out = dec.push(float(syms[k].first), float(syms[k].second));
+            if (k >= 72 && k < N - 72) {
+                ++cmp;
+                if (out != bits[k - 72]) ++err;   // 输出对齐：k 时刻吐 k-72 比特
+            }
+        }
+        check(err == 0, "维特比无噪回环零误码");
+    }
+    // 加噪 σ=0.9（软判决）：BER 应 <2%（维特比增益 vs 裸判 ~12%）
+    {
+        ViterbiDecoder dec;
+        long err = 0, cmp = 0;
+        for (int k = 0; k < N; ++k) {
+            const float n1 = float((double((rng >> 8) & 0xFFFF) / 65536.0) - 0.5) * 1.8f;
+            const float n2 = float((double((rng >> 4) & 0xFFFF) / 65536.0) - 0.5) * 1.8f;
+            const int out = dec.push(syms[k].first + n1, syms[k].second + n2);
+            if (k >= 72 && k < N - 72) {
+                ++cmp;
+                if (out != bits[k - 72]) ++err;
+            }
+        }
+        check(double(err) / double(cmp) < 0.02, "加噪维特比纠错（BER<2%）");
+        check(dec.metric_spread() > 5.0f, "高置信路径分离（spread>5）");
+    }
+}
+
 static void test_settings_roundtrip() {
     using hackrftool::app::Settings;
     Settings s;
@@ -1459,6 +1508,7 @@ int main() {
     test_voice_level();
     test_settings_roundtrip();
     test_meteor_qpsk();
+    test_viterbi_roundtrip();
     test_telemetry();
     test_audio_spectrum();
     test_fm_decimator_stopband();
