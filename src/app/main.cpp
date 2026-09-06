@@ -3555,6 +3555,15 @@ LRESULT CALLBACK main_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             layout(*app);
         }
         return 0;
+    case WM_GETMINMAXINFO: {
+        // 最小可用窗口（#94）：工具栏按钮+两行设置行的最低可用宽度——
+        // 更窄时 place 越界守卫只会整片藏控件，不如直接拦住不缩
+        const int s = int(GetDpiForWindow(wnd)) / 96;
+        auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
+        mmi->ptMinTrackSize.x = 880 * s;
+        mmi->ptMinTrackSize.y = 520 * s;
+        return 0;
+    }
     case WM_DPICHANGED: {
         const auto* r = reinterpret_cast<RECT*>(lp);
         SetWindowPos(wnd, nullptr, r->left, r->top, r->right - r->left,

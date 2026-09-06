@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 254 断言
-- pointer: 用户指令 run（08:00 收尾）：#94 最小窗口尺寸 → #95 静默失败遥测 → 灰块占位待查 → 回顾
-- rounds done: 46（…/#93 tools 失效脚本修复）
+- pointer: 用户指令 run（08:00 收尾）：#95 静默失败遥测 → 灰块占位待查 → 回顾
+- rounds done: 47（…/#94 最小窗口尺寸）
 - status: active
 - metrics: findings 55 | fixes 67 | regressions 0（E4 按轮次行累加；本 run +9/+11/0）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
@@ -75,6 +75,7 @@
 #91 | 持久化收口：kPageMax=5 轨道页可恢复 + center_mhz 值域扩 2.4G（red→green） | findings(2) | actions(2) | result(green+progress, 5 ctest/254 断言) | diff(+~25) | 先写测试看红（page=5 往返 FAIL/2420 往返 FAIL）再修 settings.cpp：kPageMax 4→5；center_mhz 反序列化 24..1800 ∪ 2400..2483.5（原拒收 2.4G 保存值静默落 2450）；负例 page>6/2500 仍拒绝；测试自查纠错一处（负例文本无合法键→nullopt）。断言 251→254
 #92 | 深挖 P1：云图过境倒计时整行不可见（带高 46px vs 实际 ≥72px，apt_view 压盖）+ 连带 UTF-8 乱码潜伏 bug | findings(3) | actions(2) | result(green+progress, 5 ctest/254 断言) | diff(+~30) | weather_strip_px 46→96（与 weather_display 子元素同源：padding 12+head 36+gap 8+倒计时 24+余量）；倒计时行露出后暴露第二 bug——`wstring(pt.begin(),pt.end())` 逐字节 widen 对 UTF-8 中文产生乱码（#82 起潜伏，一直被遮挡未暴露），连同轨道页卫星名同型改 widen()。截图 out/e92b-wx.png："下次过境 04:41:13 北京时间起（剩 1:25:58，峰 23°）"完整可读。池刷新轮：探索代理全库深挖 12 项（3×P1/6×P2/3×P3），余项入池 #93-#95；文档漂移顺修（AGENTS 断言数脱钩/evolve-log EP-1 状态/acceptance-report #58 快照注记）；新待查 P3：状态卡带上方一排灰块占位（e87-e92 截图持续存在，疑 WinFlux 旧帧/空态徽章）
 #93 | 深挖 P1/P3：tools 失效脚本修复（tune-kb ID 漂移会误触清空/repro-click 退役/repro-crash 存在性检查） | findings(3) | actions(3) | result(green+progress, 5 ctest/254 断言) | diff(+~40/-~20) | tune-kb.ps1：CtrlID 115→114（IDC_EDIT_FREQ，旧值指向监测页 edit_mon）、WM_COMMAND 111→112（IDC_APPLYFREQ，旧值是 IDC_CLEAR=清空突发！）+头部 ID 对照注释绑定 main.cpp 枚举；真机验证：脚本调谐 107.1 → jsonl "UI applyfreq" 命中；repro-click.sh 标注退役（selfclick 已移除）exit 2；repro-crash.sh 加 cdb/exe/目录存在性检查
+#94 | 深挖 P2：主窗最小尺寸约束（WM_GETMINMAXINFO） | findings(1) | actions(1) | result(green+progress, 5 ctest/254 断言) | diff(+~12) | 880×520×DPI 下限——窄于此前会整片触发 place 越界守卫藏控件；跨进程 MoveWindow 实测 500×400 请求 → 实际 880×520
 
 ## 运行总结（#1–#4，用户指令停止）
 
