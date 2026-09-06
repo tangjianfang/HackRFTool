@@ -28,6 +28,8 @@
 #include "dsp/analyzer.hpp"
 #include "dsp/apt.hpp"
 #include "dsp/meteor.hpp"
+#include "dsp/meteor_frame.hpp"
+#include "dsp/meteor_vitab.hpp"
 #include "app/settings.hpp"
 #include "app/telemetry.hpp"
 #include "dsp/channel_monitor.hpp"
@@ -155,8 +157,12 @@ struct App {
     unsigned sigdb_stamp = 0;   // 上次刷新的库版本（signals 大小+首条频率）
     // Meteor LRPT（#71）：QPSK 直解（不走 FM 音频链），fm 数据线程读环喂入
     std::unique_ptr<hackrftool::dsp::QpskDemod> meteor_demod;
+    std::unique_ptr<hackrftool::dsp::ViterbiDecoder> meteor_vit;
+    hackrftool::dsp::MeteorFrameAssembler meteor_asm_bl;
     std::vector<float> meteor_soft;      // 滑窗软比特（ASM 搜索）
     unsigned long meteor_asm_hits = 0;   // CCSDS ASM 命中计数
+    unsigned long meteor_frames = 0;    // 装配完成的 1024bit 帧数
+    std::FILE* meteor_dump = nullptr;   // 帧载荷落盘（过境后离线解压校准）
     int meteor_on = 0;                   // 1=云图页选了 Meteor
     // 日志查看器（#64）：遥测 tail 弹窗——云图排查/问题分析在应用内直接读
     HWND logview_wnd = nullptr;
@@ -615,6 +621,21 @@ void fm_loop(App& app) {
                         hackrftool::dsp::qpsk_soft_bits(sym->first, sym->second);
                     app.meteor_soft.push_back(bits.first);
                     app.meteor_soft.push_back(bits.second);
+                    // EP-1.2 接线：软比特对 → 维特比 → 帧装配 → 落盘
+                    if (app.meteor_vit) {
+                        const int bit = app.meteor_vit->push(bits.first,
+                                                            bits.second);
+                        if (auto frame = app.meteor_asm_bl.push(
+                                std::uint8_t(bit > 0 ? 1 : 0))) {
+                            ++app.meteor_frames;
+                            if (app.meteor_dump != nullptr) {
+                                std::fwrite(frame->payload.data(), 1,
+                                            frame->payload.size(),
+                                            app.meteor_dump);
+                                std::fflush(app.meteor_dump);
+                            }
+                        }
+                    }
                 }
             }
             if (app.meteor_soft.size() >= 16384) {   // 滑窗搜帧头
@@ -1324,10 +1345,9 @@ flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
 
     wchar_t txt[96];
     if (app.meteor_on) {   // Meteor LRPT：眼图/频偏/ASM 命中（QPSK 直解）
-        swprintf(txt, 96, L"眼图 %.2f｜频偏 %.4f｜ASM 命中 %lu",
+        swprintf(txt, 96, L"眼图 %.2f｜ASM %lu｜帧 %lu",
                  app.meteor_demod ? app.meteor_demod->eye_quality() : 0.0,
-                 app.meteor_demod ? app.meteor_demod->freq_offset_hz() : 0.0,
-                 app.meteor_asm_hits);
+                 app.meteor_asm_hits, app.meteor_frames);
     } else {
         swprintf(txt, 96, L"子载波 %.3f｜同步 %u/s｜累计行 %llu",
                  double(sub), sps, (unsigned long long)lines);
@@ -1490,7 +1510,8 @@ flux::ElementPtr build(App& app) {
                 hackrftool::log::log_telemetry(
                     hackrftool::log::Level::info, "METEOR", "diag",
                     {{"eye", eye},
-                     {"asm", std::to_string(app.meteor_asm_hits)}});
+                     {"asm", std::to_string(app.meteor_asm_hits)},
+                     {"frames", std::to_string(app.meteor_frames)}});
             }
             if (app.apt_on.load()) {
                 // APT 链路诊断（#61）：云图排查三要素——子载波幅度/行同步率/
@@ -2852,10 +2873,27 @@ void on_command(App& app, int id, int code, HWND from) {
                     app.meteor_demod =
                         std::make_unique<hackrftool::dsp::QpskDemod>(
                             kRatesMsps[size_t(app.rate_index)] * 1e6 / 72000.0);
+                    app.meteor_vit =
+                        std::make_unique<hackrftool::dsp::ViterbiDecoder>();
                     app.meteor_soft.clear();
                     app.meteor_asm_hits = 0;
+                    app.meteor_frames = 0;
+                    if (app.meteor_dump != nullptr) {
+                        std::fclose(app.meteor_dump);
+                        app.meteor_dump = nullptr;
+                    }
+                    app.meteor_dump = _wfopen(
+                        exe_dir_path("meteor-frames.bin").c_str(), L"wb");
+                    hackrftool::log::log_telemetry(
+                        hackrftool::log::Level::info, "METEOR", "capture.on",
+                        {{"path", "meteor-frames.bin"}});
                 } else if (!want_meteor) {
                     app.meteor_demod.reset();
+                    app.meteor_vit.reset();
+                    if (app.meteor_dump != nullptr) {
+                        std::fclose(app.meteor_dump);
+                        app.meteor_dump = nullptr;
+                    }
                 }
                 app.meteor_on = want_meteor ? 1 : 0;
             }
