@@ -3739,8 +3739,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     // 在控件创建后、auto_start 配置前：restore 只写字段/控件，设备侧由
     // auto_start 的 apply_radio 或用户点「开始」时按 App 字段生效。
     if (!auto_start && !selftest) {
-        if (auto st = hackrftool::app::deserialize(
-                read_text_file(exe_dir_path("settings.tsv")))) {
+        const std::string txt = read_text_file(exe_dir_path("settings.tsv"));
+        if (auto st = hackrftool::app::deserialize(txt)) {
             restore_settings(app, *st);
             auto_start = true;   // 打开即回到上次工作状态（含自动开始接收）
             hackrftool::log::log_telemetry(
@@ -3748,6 +3748,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                 {{"page", std::to_string(st->page)},
                  {"center", std::to_string(st->center_mhz)},
                  {"radio", std::to_string(st->radio_mhz)}});
+        } else if (!txt.empty()) {
+            // #95：文件存在但解析失败（损坏/全非法行）不再静默——与
+            // RADIO apply.fail 对齐，排障时日志可判"设置没恢复"；
+            // 文件不存在（txt 空）属首次运行，保持静默
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::warn, "SETTINGS", "restore.fail",
+                {{"bytes", std::to_string(txt.size())}});
+            app.status = L"设置文件解析失败，已用默认参数";
         }
     }
     // APT 云图原生窗（云图页覆盖内容区；位于 WinFlux host 之上）
@@ -3882,6 +3890,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                     }
                 }
                 std::fclose(rp);
+            } else {
+                // #95：报告写失败不再静默——读端拿不到报告按 42 记 SKIP，
+                // 会把磁盘满/权限问题伪装成"无设备"；stderr+遥测双通道留痕
+                std::fprintf(stderr, "selftest 报告写失败: %ls\n",
+                             report_path.c_str());
+                hackrftool::log::log_telemetry(hackrftool::log::Level::error,
+                                               "LIFE", "selftest.report_fail", {});
             }
             PostThreadMessage(ui_tid, WM_QUIT, 0, 0);
         }).detach();
