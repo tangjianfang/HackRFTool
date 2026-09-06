@@ -35,6 +35,7 @@ add_executable(HackRFTool WIN32
     src/dsp/meteor.cpp
     src/dsp/meteor_vitab.cpp
     src/dsp/meteor_frame.cpp
+    src/dsp/orbit.cpp
     src/dsp/panorama.cpp
     src/dsp/sigdb.cpp
     src/dsp/waterfall.cpp
@@ -46,7 +47,7 @@ add_executable(HackRFTool WIN32
     src/ui/status_text.cpp
     src/ui/views.cpp)
 target_include_directories(HackRFTool PRIVATE src ${MSYS2_UCRT64_INCLUDE})
-target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32 Dbghelp Comctl32 Winmm Gdiplus)
+target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32 Dbghelp Comctl32 Winmm Gdiplus Urlmon)
 # 清单由 app.rc 内嵌（RT_MANIFEST），关闭链接器自动生成避免 CVT1100 重复
 set_target_properties(HackRFTool PROPERTIES LINK_FLAGS "/MANIFEST:NO")
 flux_apply_compiler_options(HackRFTool)
@@ -96,6 +97,10 @@ target_include_directories(HackRFAnalyze PRIVATE src)
 flux_apply_compiler_options(HackRFAnalyze)
 
 enable_testing()
+add_executable(PassCheck tools/pass_check.cpp src/dsp/orbit.cpp)
+target_include_directories(PassCheck PRIVATE src)
+flux_apply_compiler_options(PassCheck)
+
 add_executable(HackRFToolTest tests/dsp_test.cpp src/app/settings.cpp src/app/telemetry.cpp src/dsp/analyzer.cpp
                               src/dsp/apt.cpp
                               src/dsp/burst_detector.cpp src/dsp/channel_monitor.cpp
@@ -105,6 +110,7 @@ add_executable(HackRFToolTest tests/dsp_test.cpp src/app/settings.cpp src/app/te
                               src/dsp/meteor.cpp
                               src/dsp/meteor_vitab.cpp
                               src/dsp/meteor_frame.cpp
+                              src/dsp/orbit.cpp
                               src/dsp/waterfall.cpp src/radio/iq_recorder.cpp
                               src/ui/status_text.cpp)
 target_include_directories(HackRFToolTest PRIVATE src)

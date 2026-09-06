@@ -12,6 +12,7 @@
 #include "dsp/meteor.hpp"
 #include "dsp/meteor_vitab.hpp"
 #include "dsp/meteor_frame.hpp"
+#include "dsp/orbit.hpp"
 #include "app/telemetry.hpp"
 #include "dsp/burst_detector.hpp"
 #include "dsp/channel_monitor.hpp"
@@ -1247,6 +1248,51 @@ static void test_meteor_frame() {
     }
 }
 
+// 轨道/过境预测（#82）：TLE 解析 + 传播半径自洽 + 深圳过境合理性
+static void test_orbit_passes() {
+    using hackrftool::dsp::GroundSite;
+    using hackrftool::dsp::parse_tle;
+    using hackrftool::dsp::predict_passes;
+    // NOAA 15 结构真实的历史 TLE（2024-01-01 历元）
+    const std::string l1 =
+        "1 25338U 98030A   24001.00000000  .00000040  00000+0  27430-3 0  9990";
+    const std::string l2 =
+        "2 25338  98.7010 130.0000 0014500 120.0000 240.0000 14.26000000000000";
+    const auto t = parse_tle("NOAA 15", l1, l2);
+    check(t.valid(), "TLE 解析有效（倾角/偏心/平均运动域内）");
+    check(std::abs(t.incl_deg - 98.7010) < 0.01, "倾角解析");
+    check(std::abs(t.ecc - 0.00145) < 1e-5, "偏心率解析（隐小数点）");
+    check(std::abs(t.mean_motion - 14.26) < 0.001, "平均运动解析");
+    check(std::abs(hackrftool::dsp::unix_to_jd(0) - 2440587.5) < 1e-9,
+          "JD 历元换算");
+    // 传播半径自洽：任意时刻 |r| ≈ a(±e·a)——LEO 700-730km 高度
+    {
+        bool ok = true;
+        for (double dt = 0.0; dt <= 1.0; dt += 0.125) {
+            const auto r = hackrftool::dsp::propagate_eci(t, dt);
+            const double mag = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+            if (mag < 6700.0 || mag > 7500.0) ok = false;
+        }
+        check(ok, "传播半径在 LEO 域（6700-7500km）");
+    }
+    // 深圳过境：24h 窗口、仰角 10°——14.26 圈/天极轨必有过境；
+    // 窗口长 5-20 分钟、峰仰角 ≥10°、起<峰<止 单调
+    {
+        const GroundSite sz{22.5431, 114.0579, 0.0};
+        const auto ps = predict_passes(t, sz, 1704067200, 24.0, 10.0);  // 2024-01-01
+        check(!ps.empty(), "深圳 24h 内有过境（极轨每天多圈）");
+        bool sane = true;
+        for (const auto& e : ps) {
+            const long dur = long(e.end_unix - e.start_unix);
+            if (dur < 240 || dur > 1500) sane = false;
+            if (!(e.start_unix <= e.peak_unix && e.peak_unix <= e.end_unix))
+                sane = false;
+            if (e.peak_elev_deg < 10.0 || e.peak_elev_deg > 90.0) sane = false;
+        }
+        check(sane, "过境窗口合理（4-25 分钟、时间单调、仰角域内）");
+    }
+}
+
 static void test_settings_roundtrip() {
     using hackrftool::app::Settings;
     Settings s;
@@ -1557,6 +1603,7 @@ int main() {
     test_meteor_qpsk();
     test_viterbi_roundtrip();
     test_meteor_frame();
+    test_orbit_passes();
     test_telemetry();
     test_audio_spectrum();
     test_fm_decimator_stopband();

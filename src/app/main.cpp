@@ -3,7 +3,9 @@
 // + 中间内容区（WinFlux Host 重父化为子窗口，D2D/DComp 渲染图表）
 // + 底部原生状态栏。全部按钮/设置/图标状态在工具栏，内容区纯显示。
 #include <windows.h>
+#include <urlmon.h>
 #include <dbghelp.h>
+#include <ctime>
 #include <minidumpapiset.h>
 
 #include <commctrl.h>
@@ -29,6 +31,7 @@
 #include "dsp/apt.hpp"
 #include "dsp/meteor.hpp"
 #include "dsp/meteor_frame.hpp"
+#include "dsp/orbit.hpp"
 #include "dsp/meteor_vitab.hpp"
 #include "app/settings.hpp"
 #include "app/telemetry.hpp"
@@ -155,6 +158,13 @@ struct App {
     HWND sigdb_wnd = nullptr;
     HWND sigdb_list = nullptr;
     unsigned sigdb_stamp = 0;   // 上次刷新的库版本（signals 大小+首条频率）
+    // 过境预测（#82）：TLE 缓存+后台刷新（7 天），云图页倒计时显示
+    std::vector<hackrftool::dsp::TleElements> tles;
+    std::int64_t tle_fetched_unix = 0;
+    std::atomic<bool> tle_fetching{false};
+    std::vector<hackrftool::dsp::PassEvent> tle_passes;   // 选中卫星的过境
+    std::string tle_pass_name;                             // 预测对象名
+    std::int64_t tle_pass_until = 0;   // 预测有效期（过期/换预设重算）
     // Meteor LRPT（#71）：QPSK 直解（不走 FM 音频链），fm 数据线程读环喂入
     std::unique_ptr<hackrftool::dsp::QpskDemod> meteor_demod;
     std::unique_ptr<hackrftool::dsp::ViterbiDecoder> meteor_vit;
@@ -1327,6 +1337,8 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
 
 // ---- 云图页（#54）：原生 GDI 云图窗覆盖内容区（此 WinFlux 占位被覆盖） ------
 
+std::string next_pass_text(App& app);  // 过境倒计时（#82，定义见过境节）
+
 flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
     // 状态卡（#65）：链路判读直接上 UI——用户"云图没法用不知道哪错"
     // 的答案在这里（判读规则与 APT diag 日志同源）：
@@ -1370,6 +1382,17 @@ flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
         pal, L"（NOAA 每天过境数次，每次 10–15 分钟；无信号时属正常等待）",
         {}));
     page_el->children.push_back(std::move(head));
+    // 过境倒计时（#82）：北京时间窗口 + 剩余时间（每心跳刷新）
+    {
+        const std::string txt = next_pass_text(app);
+        const std::wstring wtxt(txt.begin(), txt.end());   // ASCII/UTF-8 混合
+        flux::Props pp;
+        pp.height = 24.0f;
+        auto row = flux::view(std::move(pp));
+        row->children.push_back(flux::ui::caption(
+            pal, std::wstring(wtxt.begin(), wtxt.end()), {}));
+        page_el->children.push_back(std::move(row));
+    }
     return page_el;   // 图像区由 apt_view（原生窗）覆盖显示（状态卡下方起）
 }
 
@@ -1379,6 +1402,7 @@ void sync_chrome(App& app);   // 定义在原生骨架节（工具栏态 + 状�
 void save_settings_tick(App& app);   // 设置缓存心跳保存（#57，定义见设置节）
 void sigdb_refresh(App& app);   // 信号库弹窗刷新（#62，定义见弹窗节）
 void logview_refresh(App& app);  // 日志查看器刷新（#64）
+
 void layout(App& app);        // 定义在原生骨架节（几何摆放；看门狗共用）
 bool host_target(App& app, RECT* out);   // 内容区目标矩形
 
@@ -2311,10 +2335,12 @@ void create_settings_row(App& app) {
          make_ctl(app, WC_STATICW, L"卫星", SS_LEFT | SS_CENTERIMAGE, 0, 0), 40);
     app.combo_sat = make_ctl(app, WC_COMBOBOXW, nullptr,
                              CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_SAT);
-    for (const wchar_t* s : {L"NOAA 19 · 137.100", L"NOAA 15 · 137.620",
-                             L"NOAA 18 · 137.9125", L"Meteor M2 · 137.900"})
+    for (const wchar_t* s :
+         {L"METEOR-M2 3 · 137.100", L"METEOR-M2 4 · 137.900",
+          L"METEOR-M 2 · 137.900", L"NOAA 19 · 137.100（已退役）",
+          L"NOAA 18 · 137.9125（已退役）"})
         SendMessageW(app.combo_sat, CB_ADDSTRING, 0, LPARAM(s));
-    SendMessageW(app.combo_sat, CB_SETCURSEL, 1, 0);   // 默认 NOAA 15
+    SendMessageW(app.combo_sat, CB_SETCURSEL, 0, 0);   // 默认 M2-3（在役）
     slot(app.row_weather, app.combo_sat, 130, true);
     app.check_apt = make_ctl(app, WC_BUTTONW, L"记录", BS_AUTOCHECKBOX | WS_TABSTOP,
                              0, IDC_CHECK_APT);
@@ -2452,6 +2478,147 @@ void layout(App& app) {
             ShowWindow(app.apt_view.hwnd(), app.page == 4 ? SW_SHOW : SW_HIDE);
         }
     }
+}
+
+// ---- 过境预测（#82）：TLE 拉取/缓存/预测 ------------------------------------
+// TLE 有时效（LEO 每天漂移十余分钟）：7 天自动刷新；无网用缓存并提示龄期。
+// 观测点固定深圳（22.5431N 114.0579E——单站工具定位）。
+
+static const wchar_t* kTleUrl =
+    L"https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle";
+
+void tle_load_cache(App& app) {
+    app.tles.clear();
+    std::FILE* f = _wfopen(exe_dir_path("weather-tle.txt").c_str(), L"rb");
+    if (f == nullptr) return;
+    std::string txt;
+    char buf[512];
+    for (size_t g; (g = std::fread(buf, 1, sizeof buf, f)) > 0;) txt.append(buf, g);
+    std::fclose(f);
+    std::vector<std::string> ls;
+    std::size_t pos = 0;
+    while (pos <= txt.size()) {
+        auto e = txt.find('\n', pos);
+        ls.push_back(txt.substr(pos, (e == std::string::npos ? txt.size() : e) - pos));
+        if (e == std::string::npos) break;
+        pos = e + 1;
+    }
+    for (std::size_t i = 0; i + 2 < ls.size() + 1; ++i) {
+        if (i + 2 >= ls.size() + 1) break;
+        if (ls[i].size() > 2 && ls[i + 1].size() > 60 && ls[i + 1][0] == '1' &&
+            ls[i + 2].size() > 60 && ls[i + 2][0] == '2') {
+            auto t = hackrftool::dsp::parse_tle(ls[i], ls[i + 1], ls[i + 2]);
+            if (t.valid()) app.tles.push_back(std::move(t));
+            i += 2;
+        }
+    }
+    // 缓存时间=文件修改时刻
+    WIN32_FILE_ATTRIBUTE_DATA fa{};
+    if (GetFileAttributesExW(exe_dir_path("weather-tle.txt").c_str(),
+                             GetFileExInfoStandard, &fa) &&
+        app.tles.size() > 0) {
+        app.tle_fetched_unix =
+            std::int64_t(fa.ftLastWriteTime.dwHighDateTime) << 32 |
+            fa.ftLastWriteTime.dwLowDateTime;
+        // FILETIME(100ns, 1601 纪元) → Unix
+        app.tle_fetched_unix = (app.tle_fetched_unix - 116444736000000000LL) /
+                               10000000LL;
+    }
+}
+
+void tle_fetch_async(App& app) {
+    if (app.tle_fetching.load()) return;
+    app.tle_fetching.store(true);
+    std::thread([&app] {
+        const std::wstring dst = exe_dir_path("weather-tle.txt");
+        // URLDownloadToFile 需绝对路径与 CoInitialize（工作线程）
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        const HRESULT hr = URLDownloadToFileW(nullptr, kTleUrl, dst.c_str(), 0,
+                                              nullptr);
+        CoUninitialize();
+        if (SUCCEEDED(hr)) {
+            tle_load_cache(app);
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::info, "ORBIT", "tle.fetched",
+                {{"entries", std::to_string(app.tles.size())}});
+        } else {
+            hackrftool::log::log_telemetry(hackrftool::log::Level::warn,
+                                           "ORBIT", "tle.fetch.fail",
+                                           {{"hr", std::to_string(long(hr))}});
+        }
+        app.tle_fetching.store(false);
+    }).detach();
+}
+
+// 选中的卫星预设 → TLE 匹配名（前缀匹配；2026 在役 METEOR-M2 系优先）
+[[nodiscard]] std::string sat_tle_name(int sat_idx) {
+    switch (sat_idx) {
+    case 0: return "METEOR-M2 3";
+    case 1: return "METEOR-M2 4";
+    case 2: return "METEOR-M 2";
+    case 3: return "NOAA 19";
+    case 4: return "NOAA 18";
+    default: return {};
+    }
+}
+
+// 云图页心跳：选中卫星下次过境预测（缓存至过期/换预设）
+[[nodiscard]] std::string next_pass_text(App& app) {
+    if (app.tles.empty()) return "无 TLE（自动联网获取中/检查 weather-tle.txt）";
+    const int sel = int(SendMessageW(app.combo_sat, CB_GETCURSEL, 0, 0));
+    const std::string want = sat_tle_name(sel);
+    const std::int64_t now = std::int64_t(std::time(nullptr));
+    // 重新预测条件：换预设 / 预测过期（当前窗口结束+600s）
+    if (app.tle_pass_name != want || now > app.tle_pass_until) {
+        app.tle_pass_name = want;
+        app.tle_passes.clear();
+        for (const auto& t : app.tles) {
+            if (t.name.rfind(want, 0) == 0) {
+                const hackrftool::dsp::GroundSite sz{22.5431, 114.0579, 0.0};
+                app.tle_passes = hackrftool::dsp::predict_passes(
+                    t, sz, now, 24.0, 10.0);
+                app.tle_pass_until = now + 6 * 3600;   // 6h 重算
+                break;
+            }
+        }
+        if (!app.tle_passes.empty())
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::info, "ORBIT", "predict",
+                {{"sat", want},
+                 {"passes_24h", std::to_string(app.tle_passes.size())}});
+    }
+    if (app.tle_passes.empty())
+        return want + (want.rfind("NOAA", 0) == 0
+                           ? "：卫星已退役（2026 在役：METEOR-M2 系列）"
+                           : "：24h 内无 10° 过境");
+    // 找当前/下次
+    for (const auto& e : app.tle_passes) {
+        if (e.end_unix > now) {
+            const std::int64_t st = e.start_unix + 8 * 3600;   // 北京时间
+            const std::int64_t pk = e.peak_unix + 8 * 3600;
+            std::tm stm{}, pkm{};
+            gmtime_s(&stm, &st);
+            gmtime_s(&pkm, &pk);
+            char buf[128];
+            if (now < e.start_unix) {
+                const long left = long(e.start_unix - now);
+                std::snprintf(buf, sizeof buf,
+                              "下次过境 %02d:%02d:%02d 北京时间起（剩 %ld:%02ld:%02ld，"
+                              "峰 %d°）",
+                              stm.tm_hour, stm.tm_min, stm.tm_sec,
+                              left / 3600, (left / 60) % 60, left % 60,
+                              int(e.peak_elev_deg));
+            } else {
+                const long left = long(e.end_unix - now);
+                std::snprintf(buf, sizeof buf,
+                              "过境中！至 %02d:%02d 北京（剩 %ld:%02ld，峰 %d°）",
+                              pkm.tm_hour, pkm.tm_min, left / 60, left % 60,
+                              int(e.peak_elev_deg));
+            }
+            return buf;
+        }
+    }
+    return want + "：今日窗口已过，6h 后自动重算";
 }
 
 // ---- 信号库非模态弹窗（#62）：任意页快速选台，双击行=调谐 -------------
@@ -2868,7 +3035,7 @@ void on_command(App& app, int id, int code, HWND from) {
             {
                 const int sel =
                     int(SendMessageW(app.combo_sat, CB_GETCURSEL, 0, 0));
-                const bool want_meteor = sel == 3;
+                const bool want_meteor = sel < 3;   // METEOR 系走 QPSK 链
                 if (want_meteor && !app.meteor_demod) {
                     app.meteor_demod =
                         std::make_unique<hackrftool::dsp::QpskDemod>(
@@ -2897,16 +3064,16 @@ void on_command(App& app, int id, int code, HWND from) {
                 }
                 app.meteor_on = want_meteor ? 1 : 0;
             }
-            // NOAA 19/15/18 下行频率（#54 起配合 APT 解码）
-            static const double kSatMhz[4] = {137.100, 137.620, 137.9125,
-                                             137.900};
+            // 下行频率（2026 在役：METEOR-M2 系；NOAA 19/18 已退役标注）
+            static const double kSatMhz[5] = {137.100, 137.900, 137.900,
+                                             137.100, 137.9125};
             const int i = int(SendMessageW(app.combo_sat, CB_GETCURSEL, 0, 0));
-            if (i >= 0 && i < 4 && app.running) {
+            if (i >= 0 && i < 5 && app.running) {
                 (void)app.radio.set_center_hz(kSatMhz[i] * 1e6);
                 app.center_mhz = kSatMhz[i];
                 app.radio_mhz = kSatMhz[i];
                 app.status = L"已调谐 " + wd1(kSatMhz[i]) +
-                            (i == 3 ? L" MHz（Meteor LRPT）" : L" MHz（NOAA APT）");
+                            (i < 3 ? L" MHz（Meteor LRPT）" : L" MHz（NOAA APT）");
             }
         }
         break;
@@ -3212,6 +3379,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     // 信号库加载（上次扫描结果开机即用，#55）
     app.signals = hackrftool::dsp::load_signals(
         exe_dir_path("signals.tsv").c_str());
+    // TLE 缓存加载 + 龄期检查（#82）：>7 天或为空 → 后台拉取
+    tle_load_cache(app);
+    {
+        const std::int64_t now = std::int64_t(std::time(nullptr));
+        if (app.tles.empty() || now - app.tle_fetched_unix > 7 * 86400)
+            tle_fetch_async(app);
+    }
 
     // 命令行：auto=接收+频谱页；autom=+监测页；autos=+全频段；autocap=+抓包页；
     // autosc=+全频段+抓包页；selftest/selftestsweep=自测模式（跑 N 秒→断言→
