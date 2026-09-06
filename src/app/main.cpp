@@ -426,9 +426,16 @@ void apply_radio(App& app) {
 // 设备打开失败的统一提示：两大最常见原因直接给用户（多实例占用 / 固件已知
 // bug 需软复位——README 2.1）。
 void device_open_failed(App& app, const std::string& err) {
+    // #96：DLL 加载失败（部署问题）与设备未插（用户可自行解决）区分指向
+    const bool dll =
+        err.find("LoadLibrary") != std::string::npos ||
+        err.find("缺函数") != std::string::npos;
     app.status = L"打开失败: " + widen(err) +
-                 L" ｜ 排查：① 是否已有 HackRFTool 在运行（独占设备）"
-                 L"② 设备重插后先 hackrf_spiflash -R 软复位";
+                 (dll ? L" ｜ libhackrf.dll 加载失败（部署问题）：exe 同目录需有 "
+                        L"libhackrf/libusb-1.0/libwinpthread 三个 DLL（构建后步骤"
+                        L"会从 C:/msys64/ucrt64/bin 复制），缺失或被杀软隔离时重装/恢复"
+                      : L" ｜ 排查：① 是否已有 HackRFTool 在运行（独占设备）"
+                        L"② 设备重插后先 hackrf_spiflash -R 软复位");
 }
 
 void ensure_fm(App& app, bool on);   // 收音机音频链开关（定义在收音机节）
