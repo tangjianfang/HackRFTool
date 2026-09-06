@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 258 断言
-- pointer: 用户指令 run（08:00 收尾）：回顾轮（余池：灰块占位 P3 上游疑/FMDUMP 归档 P3/T2.3 esb 基准/T4.2 --csv）
-- rounds done: 51（#87-#97 见下；#98 README 运行指引+状态行）
+- pointer: 下一会话从 #100 起（余池：T2.3 esb 基准/T4.2 --csv/灰块占位 P3 上游疑/FMDUMP 归档 P3）；本 run 按 08:00 时间盒收尾，pool 非空未收敛
+- rounds done: 52（#87-#98 见下；#99 回顾）
 - status: active
 - metrics: findings 59 | fixes 72 | regressions 0（E4 按轮次行累加；本 run #87-#97 +13/+17/0）
 - checkpoint（#97 后，10 轮节点）: 本 run=用户优先 UI 三级架构（#87 重叠根因 place 同线叠放/#88 动作归位/#89 频谱条上移/#90 轴刻度规范/#91 持久化收口 red→green/#92 云图倒计时+UTF-8 乱码/#93 tools ID 漂移误触清空/#94 最小窗口/#95 静默失败遥测/#96 设备错误分流/#97 遥测并发压测）全部 green+progress，断言 251→258；深挖轮入库 12 findings（3P1 已清/6P2 已清/P3 记池）；下一段 #98 README（T4.4/T4.6）→ #99 回顾（重放审计+报告）；灰块占位=WinFlux 上游疑（仅云图页内容顶一排空灰卡，e87-e92 截图持续，本仓库不可修只记录）
@@ -89,3 +89,13 @@
 - 池剩余：T2.3 esb 性能基准、T4.2 --csv、T4.5 低采样率档、Tier 3 模块轮转（src/app/main.cpp 最大未轮转）
 - 经验库：docs/lessons.md 立 4 条（L1 陈旧二进制假绿 / L2 期望值用脚本算 / L3 并行会话碰撞 / L4 set-收尾铁律）
 
+
+#99 | 回顾轮：重放审计（#91/#97 父提交无新测试符号、本轮齐备，两轮均当场看过红）+ L15-L17 入库 + 运行总结 | findings(0) | actions(2) | result(green+progress（经验捕获即迭代）, 5 ctest/258 断言) | diff(+~40) | 新经验：L15 布局审计按几何不按累加（#86 口径教训）/L16 修遮挡必查其下首露内容（UTF-8 乱码潜伏）/L17 脚本 ID 绑定枚举（误触清空）；L14 verified+1（本轮全程日志断言+截图仅核布局）
+
+## 运行总结（#87–#99，用户指令 run：08:00 时间盒收尾）
+
+- 结果：13 轮全 green（12 green+progress + 1 文档轮），0 red 收尾 / 0 regression；单测断言 251→258；每轮均过「构建零 error → ctest 5/5 → 截图/遥测/检查员」验证链
+- 用户三项优先全部落地：① UI 组件重叠——#87 根因修复（place 同线叠放，#58 引入、#86 审计口径未触及）+ #94 最小窗口兜底；② 字体/轴刻度层级——#90（网格与标签同源、单位补齐、瀑布色标、字号三级）；③ 设置项布局交互——#88/#89 三级架构（一级全局工具栏、二级通用+页特有行、内容区纯显示、动作按钮归位）
+- 深挖收益：全库扫描 12 findings（3×P1 全清：重叠根因/倒计时遮挡+UTF-8 乱码/脚本误触清空；6×P2 全清：repro-click 死路/设置损坏静默/selftest 误报 SKIP/文档漂移×3/最小窗口；3×P3 记池）；对抗检查员两轮（#87 5 PASS、#89 4 PASS+1 实锤即修）
+- 经验库：+L15/L16/L17；L14 verified+1
+- 未完成移交（下一会话从 #100 起）：T2.3 esb_scan 大输入基准、T4.2 gfsk_analyze --csv、P3 灰块占位（云图状态卡上方空灰卡，WinFlux 上游疑）、P3 FMDUMP/rx_check 临时工具归档、T1.5/T1.6 待真机场景、EP-1.3 Meteor 解压待过境数据校准

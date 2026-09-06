@@ -28,6 +28,9 @@ Entry template: `| id | one-sentence lesson | how to apply (an executable action
 | L3 | 并行会话在同一工作树会互相踩（增量构建竞速、文件被改、Edit 锚点失配） | 开工前 ListAgents 查邻居；发现文件被外部修改立即重读再改；构建"成功"但 mtime 未变即 touch 强制重链；会话压缩/中断恢复先 `git diff` + todo 对账在制工作，勿盲目重做或回滚 | 2026-09-05 与 evolve-07 会话碰撞全程；evolve#50 压缩恢复对账 | 2 |
 | L13 | 跨进程 UI 驱动验证三坑：① PS pinvoke 字符串参数（string 入/字符串出）marshalling 静默失败——SetWindowText 返 True 但没写入、WM_GETTEXT 读回陈旧值；② 应用内周期写控件的逻辑（AFC 每 tick 写回频率框）会覆盖外部写入；③ BM_CLICK 是 toggle，不查 BM_GETCHECK 直接点会反向切换 | 跨进程只信数值消息（WM_COMMAND/BM_GETCHECK）；写控件前先关掉周期写回的自动逻辑（AFC 等）再写；状态判定以截图/二进制字符串为准绳（写盘前 grep 二进制确认新代码在产物里） | 2026-09-05 人声波形真机验证排障（调谐一度“不生效”實为假读假写+陈旧 exe 叠加） | 3 |
 | L14 | 视觉识别验收不可靠（本 run 两次实证：LNA 40 幻觉、未开接收报"波形有数据"），日志断言确定性 100%；但埋点有三个坑：程序性通知刷屏（AFC 每帧写频率框触发 EN_CHANGE——code 白名单 0/1 滤掉）、kv 键与 JSON 顶层字段撞名（cat 键覆盖分类——语义化键名）、埋点插在变量声明前（C2065 连锁） | UI 行为验证走 hackrftool.jsonl+tools/log-assert.py（--order 断言顺序）；截图仅核对布局；新埋点检查：键名不撞 ts/level/cat/event、位置在变量声明后 | 2026-09-06 evolve #59-#66 全程 | 2 |
+| L15 | 布局审计口径错位：按"slot 宽度累加"审计发现不了"起点被重置"的叠放——#86 宽度审计判 1214px 超宽，真因是 place() 每次调用重置 x=8（#58 引入）致两行控件同线叠放，#86 缩宽度治标未治本 | 布局审计按"几何"不按"累加"：逐行核对每控件的绝对起点/终点；截图审计逐行比对控件清单（谁压住谁、谁该在不在） | 2026-09-07 evolve #87（git 溯源 #58 + 六页截图实锤） | 1 |
+| L16 | 被遮挡的 UI bug 不暴露：云图过境倒计时行被 apt_view 压盖 10 轮（#82 引入），修遮挡时才暴露第二层 bug——UTF-8 逐字节 widen 乱码（`wstring(s.begin(),s.end())` 对中文必然乱码） | 修掉一个遮挡/覆盖 bug 后必须复查其下首次露出的内容（截图+读文本）；跨编码字符串一律走 widen()/MultiByteToWideChar，禁迭代器区间构造 | 2026-09-07 evolve #92 | 1 |
+| L17 | 脚本引用控件 ID 会随枚举插行漂移：tune-kb.ps1 的 115/111 在枚举扩展后变成 edit_mon/CLEAR——旧脚本"调谐"实际会清空突发列表（数据破坏） | 脚本头部注释绑定枚举含义+含义名（非裸数字）；改枚举时 grep tools/ 下的 ID 引用；破坏性命令（清空/停止）的 ID 变更要当 P1 对待 | 2026-09-07 evolve #93 | 1 |
 
 ## WinFlux UI
 
