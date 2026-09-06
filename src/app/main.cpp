@@ -3597,6 +3597,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = &main_wndproc;
     wc.hInstance = instance;
+    // 应用图标（#85）：标题栏小图标 + Alt-Tab 大图标（资源 ID=1）
+    wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
+    wc.hIconSm = wc.hIcon;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
     wc.lpszClassName = L"HackRFToolMain";
