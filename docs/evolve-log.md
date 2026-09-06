@@ -1,10 +1,10 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 251 断言
-- pointer: 用户指令 run（08:00 收尾）：#88 动作按钮归位 → #89 频谱控制条上移 → #90 轴/dB/字体层级
-- rounds done: 41（#85 图标/#86 布局审计/#87 重叠根因修复）
+- pointer: 用户指令 run（08:00 收尾）：#90 轴/dB/字体层级 → #91 持久化剩余缺口（kPageMax/center_mhz 范围）→ 深层需求挖掘/池刷新
+- rounds done: 42（#85 图标/#86 布局审计/#87 重叠根因/#88 三级架构/#89 频谱条上移）
 - status: active
-- metrics: findings 47 | fixes 57 | regressions 0（E4 按轮次行累加；本 run +1/+1/0）
+- metrics: findings 49 | fixes 60 | regressions 0（E4 按轮次行累加；本 run +3/+4/0）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
 - checkpoint（#65 后，会话压缩预防）: 本 run=日志替代视觉识别（#59 核心+#60 数据面+#61 APT/扫描+#62 信号库弹窗+#63 Y轴档+#64 日志查看器+#65 云图状态卡，全部 green+progress）；下一目标 #66=数据面覆盖缺口（非 fm 页 DSP frame 1Hz/ESB 命中沿/SETTINGS restore/apply 失败路径）；末轮 #78=回顾（重放审计+经验库+报告）。工作树 clean
 - epics pending: EP-1（Meteor LRPT 解压缩，proposed——待用户决策）
@@ -70,6 +70,7 @@
 #86 | 设置行布局重叠审计+修复（用户报告组件叠加） | findings(2) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+~40/-~10) | 静态审计法：slot 声明宽度累加 vs 窗口宽——监测页 1214/收音行1 1266 超宽实锤（place 顺序累加无边界检查，溢出控件压内容区=用户看到的"叠加"）；修：标签缩短+静音回挪+place 越界 SW_HIDE 守卫+ShowWindow 先行。审计脚本可复用（正则提 slot 宽度）
 #87 | 用户优先：设置行组件重叠根因修复（#86 审计口径错位——place 每次调用重置 px=8，特有行与通用行同线叠放；截图+git 溯源 #58 引入，#86 修宽度未触及） | findings(1) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+9/-7) | 特有行挪 line1（收音第二特有行 line2）+settings_rows 按页 2/3 行；六页前台截图复核无叠放（out/e87-*.png，真机在线）；对抗检查员 5/5 PASS（行分配/行数一致/云图卡带累加/看门狗同算法/显隐闭环）。新 findings 移交 #90：监测"自动跟踪最强"与收音"带宽/频率 MHz/类别"标签裁字、RSSI 轴标签与 20dB 网格错位、收音频谱无 X 刻度、LNA/VGA 滑条刻度过密
 #88 | 用户优先：三级架构落地——一级工具栏瘦身+页特有动作归位二级行 | findings(2) | actions(3) | result(green+progress, 5 ctest/251 断言) | diff(+~70/-~14) | 工具栏只留全局动作（启停/页签×6/全频段/录制 IQ/日志）；应用→通用行频率框旁、锁定+导出 CSV→监测行、清空→抓包行、扫描信号+随机收听→收音行1、信号库→收音行2（全部复用原命令 ID，遥测/命令路由零改动）；轨道页隐藏云图专属「记录/保存 PNG」（hidden+ShowWindow 先行契约）；顺修 #87 裁字 findings（自动跟踪最强 96→108/目标频率 56→64/带宽 36→48/频率 MHz 60→72）+连带 bug：类别标签误挂 row_radio 与其 combo 异行。六页截图复核（out/e88-*.png）+遥测 101-106 链路断言；AGENTS.md UI 架构段同步三级模型
+#89 | 用户优先：频谱页内容区控制条上移二级行（内容区纯显示，"1倍2倍/DB值"观感问题根治） | findings(2) | actions(3) | result(green+progress, 5 ctest/251 断言) | diff(+~120/-~45) | 新二级行 row_spec：缩放 combo/Y 档 combo/◄►平移/显示范围标签（IDC_COMBO_ZOOM/Y+IDC_PANLEFT/RIGHT，CBN_SELCHANGE 写同字段下一帧生效）；kSpecZooms/kSpecYFloor 文件级共享表（绘制与控件同源防漂移）；settings_rows 按页：频谱单窗 2 行/扫描 1 行（row_spec 随 sweep 显隐，看门狗兜底重铺）；sync_chrome 缓存去重更新范围标签；对抗检查员 5 项：4 PASS+1 实锤——restore_settings 不回写 combo_zoom/y（重启后显示与行为分裂）即修；顺修 spec_y_idx 持久化缺口（schema 有键但 capture/restore 均未搬运）。截图 out/e89-spectrum.png、e89b-spectrum.png
 
 ## 运行总结（#1–#4，用户指令停止）
 

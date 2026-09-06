@@ -188,6 +188,10 @@ struct App {
     bool stereo_opt = true;                // 立体声选项（不勾=强制单声，B4）
     int spec_zoom_idx = 0;                // 频谱 X 轴缩放档（×1/2/4/8，3c）
     int spec_y_idx = 0;                   // 频谱 Y 轴动态档（0 全/1 中/2 细，#63）
+    HWND combo_zoom = nullptr;            // 频谱页二级行（#89 自内容区上移）
+    HWND combo_y = nullptr;
+    HWND lbl_range = nullptr;
+    std::wstring range_cache;
     HWND check_stereo = nullptr;
     HWND combo_bw = nullptr;
     unsigned long long afc_pause_until = 0;   // 显式调谐后 AFC 暂停期限
@@ -278,6 +282,7 @@ struct App {
     std::vector<CtlSlot> row_capture;   // 仅抓包页
     std::vector<CtlSlot> row_radio;     // 仅收音机页（#53）
     std::vector<CtlSlot> row_radio2;    // 收音机页第二行（筛选/音频选项，B4）
+    std::vector<CtlSlot> row_spec;      // 仅频谱页单窗模式（X 缩放/Y 档/平移，#89）
     std::vector<CtlSlot> row_weather;   // 仅云图页（#54）
     // 工具栏状态同步缓存（避免每帧重复 TB_SETSTATE 消息）
     int sync_run = -1, sync_page = -1, sync_sweep = -1, sync_rec = -1;
@@ -311,6 +316,10 @@ double clamp_center(double mhz) noexcept { return std::clamp(mhz, 2400.0, 2483.5
 
 // 频谱窗半宽（MHz）随采样率（#53 前 20 Msps 硬编码，低速档频标会错位）
 double half_bw_mhz(const App& app) noexcept { return kRatesMsps[size_t(app.rate_index)] / 2.0; }
+
+// 频谱页缩放/Y 档共享表（#89：内容区绘制与二级行控件同源，防两处漂移）
+static const double kSpecZooms[4] = {1.0, 2.0, 4.0, 8.0};
+static const float kSpecYFloor[3] = {-100.0f, -60.0f, -40.0f};
 
 // 收音机/卫星段频率（不受 2.4G 限幅约束）
 double clamp_radio(double mhz) noexcept { return std::clamp(mhz, 24.0, 1800.0); }
@@ -902,36 +911,10 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
     const double half = half_bw_mhz(app);   // 窗宽随采样率（#53：低速档不再错位）
     if (app.sweep_on == 0) {
         // 3c：X 轴缩放（×1/×2/×4/×8——256bin 基础上 8 倍仍余 32bin 连线；
-        // 更窄需降采样率）+ 左右平移（步长=显示半窗）；瀑布保持全窗（时基不变）
-        static const double kZooms[4] = {1.0, 2.0, 4.0, 8.0};
-        const double zoom = kZooms[size_t(app.spec_zoom_idx)];
+        // 更窄需降采样率）。#89：缩放/Y 档/平移控件上移频谱页二级行，
+        // 内容区只画图；瀑布保持全窗（时基不变）
+        const double zoom = kSpecZooms[size_t(app.spec_zoom_idx)];
         const double vhalf = half / zoom;
-        {
-            flux::Props bar_p;
-            bar_p.direction = flux::Direction::row;
-            bar_p.align = flux::Align::center;
-            bar_p.gap = 8.0f;
-            auto bar = flux::view(std::move(bar_p));
-            bar->children.push_back(flux::ui::caption(pal, L"X 轴缩放", {}));
-            bar->children.push_back(flux::ui::segmented(
-                pal, {L"×1", L"×2", L"×4", L"×8"}, app.spec_zoom_idx,
-                [&app](int i) { app.spec_zoom_idx = i; }, {}));
-            bar->children.push_back(flux::ui::caption(pal, L"Y 轴", {}));
-            bar->children.push_back(flux::ui::segmented(
-                pal, {L"100dB", L"60dB", L"40dB"}, app.spec_y_idx,
-                [&app](int i) { app.spec_y_idx = i; }, {}));
-            bar->children.push_back(flux::ui::icon_button(
-                pal, flux::IconKind::chevron_left, L"左移半窗",
-                [&app, vhalf] { tune_to(app, app.center_mhz - vhalf); }));
-            bar->children.push_back(flux::ui::icon_button(
-                pal, flux::IconKind::chevron_right, L"右移半窗",
-                [&app, vhalf] { tune_to(app, app.center_mhz + vhalf); }));
-            wchar_t zt[48];
-            swprintf(zt, 48, L"显示 %.3f–%.3f MHz（步进 %.1f M）",
-                     app.center_mhz - vhalf, app.center_mhz + vhalf, vhalf);
-            bar->children.push_back(flux::ui::caption(pal, zt, {}));
-            page_el->children.push_back(std::move(bar));
-        }
         // 显示窗切片（spectrum_view 语义：db 覆盖 [lo,hi]——切片免改组件）
         std::vector<float> sub, subpk;
         const double vlo = app.center_mhz - vhalf, vhi = app.center_mhz + vhalf;
@@ -961,11 +944,10 @@ flux::ElementPtr spectrum_display(App& app, const flux::Palette& pal) {
             swprintf(lab, 16, L"%.6g", f);
             ticks.push_back({f, lab});
         }
-        static const float kYFloor[3] = {-100.0f, -60.0f, -40.0f};
         page_el->children.push_back(hackrftool::ui::spectrum_view(
             pal, sub, subpk, vlo, vhi, ticks, app.frame.seq, &app.spec_geom,
             [&app] { on_spectrum_click(app); },
-            kYFloor[size_t(app.spec_y_idx)]));
+            kSpecYFloor[size_t(app.spec_y_idx)]));
         page_el->children.push_back(
             hackrftool::ui::waterfall_view(pal, app.waterfall, app.waterfall.seq()));
     } else {
@@ -1818,6 +1800,10 @@ enum : int {
     IDC_CHECK_STEREO,
     IDC_SIGDB,
     IDC_LOGVIEW,
+    IDC_COMBO_ZOOM,
+    IDC_COMBO_Y,
+    IDC_PANLEFT,
+    IDC_PANRIGHT,
     IDC_PAGE_MAX,
 };
 
@@ -1842,6 +1828,13 @@ void tune_to(App& app, double mhz) {
                                    "tune",
                                    {{"mhz", std::to_string(mhz)},
                                     {"band", std::to_string(int(cat))}});
+}
+
+// 频谱页左右平移（#89：步长=当前缩放档显示半窗，原内容区箭头语义）
+void pan_spectrum(App& app, int dir) {
+    const double vhalf =
+        half_bw_mhz(app) / kSpecZooms[size_t(app.spec_zoom_idx)];
+    tune_to(app, app.center_mhz + dir * vhalf);
 }
 
 // 进入页面时若中心不在该页频段 → 落到场景默认值（#55：不同场景默认中心）
@@ -1872,6 +1865,7 @@ void apply_page_default(App& app) {
     s.afc_on = app.afc_on;
     s.stereo_opt = app.stereo_opt;
     s.spec_zoom_idx = app.spec_zoom_idx;
+    s.spec_y_idx = app.spec_y_idx;   // #89 补：此前 schema 有键但从不写
     s.threshold = app.threshold;
     s.burst_thr = app.burst_thr;
     s.symrate_idx = app.symrate_idx;
@@ -1897,6 +1891,7 @@ void restore_settings(App& app, const hackrftool::app::Settings& s) {
     app.afc_on = s.afc_on;
     app.stereo_opt = s.stereo_opt;
     app.spec_zoom_idx = s.spec_zoom_idx;
+    app.spec_y_idx = s.spec_y_idx;   // #89 补：schema 有键此前未搬运
     app.threshold = s.threshold;
     app.burst_thr = s.burst_thr;
     app.symrate_idx = s.symrate_idx;
@@ -1910,6 +1905,8 @@ void restore_settings(App& app, const hackrftool::app::Settings& s) {
     SetWindowTextW(app.edit_radio, wd1(app.radio_mhz).c_str());
     SendMessageW(app.combo_rate, CB_SETCURSEL, app.rate_index, 0);
     SendMessageW(app.combo_symrate, CB_SETCURSEL, app.symrate_idx, 0);
+    SendMessageW(app.combo_zoom, CB_SETCURSEL, app.spec_zoom_idx, 0);   // #89 检查员补
+    SendMessageW(app.combo_y, CB_SETCURSEL, app.spec_y_idx, 0);
     SendMessageW(app.track_lna, TBM_SETPOS, TRUE, LPARAM(app.lna));
     SendMessageW(app.track_vga, TBM_SETPOS, TRUE, LPARAM(app.vga));
     SetWindowTextW(app.lbl_lna, (L"LNA " + std::to_wstring(app.lna)).c_str());
@@ -2373,6 +2370,34 @@ void create_settings_row(App& app) {
     app.lbl_vga = make_ctl(app, WC_STATICW, L"VGA 16", SS_LEFT | SS_CENTERIMAGE, 0, 0);
     slot(app.row_common, app.lbl_vga, 52);
 
+    // 频谱页特有（#89 自内容区控制条上移）：X 缩放 / Y 档 / 平移 / 显示范围
+    slot(app.row_spec,
+         make_ctl(app, WC_STATICW, L"缩放", SS_LEFT | SS_CENTERIMAGE, 0, 0), 36);
+    app.combo_zoom = make_ctl(app, WC_COMBOBOXW, nullptr,
+                              CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_ZOOM);
+    for (const wchar_t* z : {L"×1", L"×2", L"×4", L"×8"})
+        SendMessageW(app.combo_zoom, CB_ADDSTRING, 0, LPARAM(z));
+    SendMessageW(app.combo_zoom, CB_SETCURSEL, WPARAM(app.spec_zoom_idx), 0);
+    slot(app.row_spec, app.combo_zoom, 64, true);
+    slot(app.row_spec,
+         make_ctl(app, WC_STATICW, L"Y 档", SS_LEFT | SS_CENTERIMAGE, 0, 0), 40);
+    app.combo_y = make_ctl(app, WC_COMBOBOXW, nullptr,
+                           CBS_DROPDOWNLIST | WS_TABSTOP, 0, IDC_COMBO_Y);
+    for (const wchar_t* y : {L"-100 dB", L"-60 dB", L"-40 dB"})
+        SendMessageW(app.combo_y, CB_ADDSTRING, 0, LPARAM(y));
+    SendMessageW(app.combo_y, CB_SETCURSEL, WPARAM(app.spec_y_idx), 0);
+    slot(app.row_spec, app.combo_y, 76, true);
+    slot(app.row_spec,
+         make_ctl(app, WC_BUTTONW, L"◄", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                  IDC_PANLEFT),
+         32);
+    slot(app.row_spec,
+         make_ctl(app, WC_BUTTONW, L"►", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                  IDC_PANRIGHT),
+         32);
+    app.lbl_range = make_ctl(app, WC_STATICW, L"", SS_LEFT | SS_CENTERIMAGE, 0, 0);
+    slot(app.row_spec, app.lbl_range, 220);
+
     // 监测页：自动跟踪 / 目标频率 / 活动阈值
     app.check_autotrack = make_ctl(app, WC_BUTTONW, L"自动跟踪最强",
                                    BS_AUTOCHECKBOX | WS_TABSTOP, 0,
@@ -2541,8 +2566,12 @@ void create_statusbar(App& app) {
 // 内容区目标矩形（layout 与几何看门狗共用——判定与摆放必须同一算法）
 // 设置行行数（host_target 与 layout 共用——几何看门狗铁律：同一算法）。
 // 行 0=通用设置，行 1=页签特有（#87 重叠根因修复：特有行不得与通用行同线
-// 叠放）；收音页特有控件拆两行 → 共 3 行。
-int settings_rows(const App& app) { return app.page == 3 ? 3 : 2; }
+// 叠放）；收音页特有控件拆两行 → 共 3 行；频谱页特有行仅单窗模式（#89，
+// 全频段扫描时该行隐藏，内容区顶到工具栏下）。
+int settings_rows(const App& app) {
+    if (app.page == 0) return app.sweep_on == 0 ? 2 : 1;
+    return app.page == 3 ? 3 : 2;
+}
 
 // 云图页状态卡带高（#65）：host_target/layout/appt_view 共用
 int weather_strip_px(const App& app) { return app.page == 4 ? 46 : 0; }
@@ -2624,7 +2653,11 @@ void layout(App& app) {
         ShowWindow(c.h, rad ? SW_SHOW : SW_HIDE);
     for (const auto& c : app.row_weather)
         ShowWindow(c.h, wx ? SW_SHOW : SW_HIDE);
+    const bool spec = app.page == 0 && app.sweep_on == 0;   // 频谱二级行（#89）
+    for (const auto& c : app.row_spec)
+        ShowWindow(c.h, spec ? SW_SHOW : SW_HIDE);
     place(app.row_common, 0);
+    if (spec) place(app.row_spec, 1);
     if (mon) place(app.row_monitor, 1);
     if (cap) place(app.row_capture, 1);
     if (rad) {
@@ -3113,6 +3146,19 @@ void sync_chrome(App& app) {
         }
     }
 
+    // 频谱页显示范围标签（#89；文本变化才写，防每帧 SetWindowText）
+    {
+        const double vhalf =
+            half_bw_mhz(app) / kSpecZooms[size_t(app.spec_zoom_idx)];
+        wchar_t zt[48];
+        swprintf(zt, 48, L"显示 %.3f–%.3f MHz（步进 %.1f M）",
+                 app.center_mhz - vhalf, app.center_mhz + vhalf, vhalf);
+        if (app.lbl_range != nullptr && app.range_cache != zt) {
+            app.range_cache = zt;
+            SetWindowTextW(app.lbl_range, zt);
+        }
+    }
+
     if (app.statusbar != nullptr && sb_due) {
         app.last_sb_ms = now;
         // 分段 0：基础状态（接收中时由动态段首词接续，避免与分段 1 重复）
@@ -3309,6 +3355,20 @@ void on_command(App& app, int id, int code, HWND from) {
             }
         }
         break;
+    case IDC_COMBO_ZOOM:   // 频谱 X 缩放（#89 二级行，原内容区 segmented）
+        if (code == CBN_SELCHANGE) {
+            const int i = int(SendMessageW(app.combo_zoom, CB_GETCURSEL, 0, 0));
+            if (i >= 0 && i < 4) app.spec_zoom_idx = i;
+        }
+        break;
+    case IDC_COMBO_Y:      // 频谱 Y 档（#63 语义不变）
+        if (code == CBN_SELCHANGE) {
+            const int i = int(SendMessageW(app.combo_y, CB_GETCURSEL, 0, 0));
+            if (i >= 0 && i < 3) app.spec_y_idx = i;
+        }
+        break;
+    case IDC_PANLEFT: pan_spectrum(app, -1); break;
+    case IDC_PANRIGHT: pan_spectrum(app, +1); break;
     case IDC_CHECK_AMP:
         if (code == BN_CLICKED) {
             app.amp = SendMessageW(app.check_amp, BM_GETCHECK, 0, 0) == BST_CHECKED;
