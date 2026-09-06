@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
-- pointer: #81（EP-1.3 MCW 解析+压缩解压——反 DCT 灰度行重建）
-- rounds done: 35（EP-1.1/1.2 完成）
+- pointer: 过境实测（NOAA APT 出图/Meteor ASM 命中+帧流录制）——无过境时池内 T4.2/T4.4
+- rounds done: 36（EP-1.1/1.2/1.3’ 完成；1.3 解压/1.4 成像待过境数据）
 - status: active
 - metrics: findings 46 | fixes 56 | regressions 0（E4 按轮次行累加；本 run +8/+16/0）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
@@ -62,6 +62,7 @@
 #78 | 回顾轮：重放审计 #59/#70 通过（父提交缺新测试、本提交齐备——无 gamed）；L14 verified+1、L1/L13 +1；docs/evolve-report.md 总结（20 轮 findings 8/fixes 16/regressions 0，断言 217→235） | findings(0) | actions(0) | result(green+progress（经验捕获即迭代）, 5 ctest/235 断言) | diff(+~80) | run 完结：日志替代视觉识别全面落地，EP-1 待决策
 #79（EP-1.1） | Meteor 维特比译码器（approved epic 切片 1/4） | findings(2) | actions(1) | result(green+progress, 5 ctest/238 断言) | diff(+~250) | CCSDS K=7 维特比：无噪零误码/加噪 <2%/spread 诊断。根因坑：多项式 bit6 抽头（当前输入位）——7bit 窗两入边独立度量，首版同度量=网格丢区分度（python 同构对照定位，纯 C++ 调试走了弯路）
 #80（EP-1.2） | Meteor 帧层（去随机化+帧装配，切片 2/4） | findings(1) | actions(1) | result(green+progress, 5 ctest/242 断言) | diff(+~180) | CCSDS PN 自反+128B 帧结构（头 8B+载荷 120B）；去交错参数留真机校准（不确定规格不臆造）。坑：bit 累积漏打包（payload 1016B 实锤）
+#81（EP-1.3’） | Meteor 全链接线+帧流捕获（解压前置） | findings(1) | actions(1) | result(green+progress, 5 ctest/243 断言) | diff(+~90) | QPSK→维特比→帧装配→meteor-frames.bin 落盘；帧率实测 73/s 与码率吻合；EP-1.3 解压显式后置（无权威规格不臆造，等过境数据对照校准）
 
 ## 运行总结（#1–#4，用户指令停止）
 
