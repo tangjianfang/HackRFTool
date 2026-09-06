@@ -50,6 +50,15 @@ struct TleElements {
 [[nodiscard]] std::int64_t jd_to_unix(double jd) noexcept;
 [[nodiscard]] double now_jd() noexcept;   // 系统时钟
 
+// 星下点：传播 + GMST → 大地经纬（度）与高度（km）——地图显示用
+struct SubPoint {
+    double lat_deg = 0.0;
+    double lon_deg = 0.0;
+    double alt_km = 0.0;
+};
+[[nodiscard]] SubPoint sat_subpoint(const TleElements& tle,
+                                    std::int64_t unix_sec) noexcept;
+
 // 过境事件：仰角越过门限的窗口
 struct PassEvent {
     std::int64_t start_unix = 0;   // 仰角升过门限

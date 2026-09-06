@@ -116,6 +116,25 @@ std::array<double, 3> propagate_eci(const TleElements& tle, double dt_days) {
             y1 * sinc};
 }
 
+SubPoint sat_subpoint(const TleElements& tle, std::int64_t unix_sec) noexcept {
+    SubPoint sp;
+    if (!tle.valid()) return sp;
+    const double jd = unix_to_jd(unix_sec);
+    const auto r = propagate_eci(tle, jd - tle.epoch_jd);
+    const double d = jd - 2451545.0;
+    const double gmst = rad(280.46061837 + 360.98564736629 * d);
+    const double lon_orb = std::atan2(r[1], r[0]) - gmst;
+    double lon = deg(lon_orb);
+    lon = std::fmod(lon + 540.0, 360.0) - 180.0;   // 归一 ±180
+    const double rxy = std::sqrt(r[0] * r[0] + r[1] * r[1]);
+    const double gclat = std::atan2(r[2], rxy);    // 地心纬度
+    const double rmag = std::sqrt(rxy * rxy + r[2] * r[2]);
+    sp.lat_deg = deg(gclat);   // 地心≈大地（LEO 扁率差 <0.2°，地图级足够）
+    sp.lon_deg = lon;
+    sp.alt_km = rmag - kReKm;
+    return sp;
+}
+
 std::vector<PassEvent> predict_passes(const TleElements& tle,
                                       const GroundSite& site,
                                       std::int64_t t0_unix,

@@ -1379,18 +1379,17 @@ flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
                       : L"○ 等待卫星过境"));
     head->children.push_back(flux::ui::caption(pal, txt, {}));
     head->children.push_back(flux::ui::caption(
-        pal, L"（NOAA 每天过境数次，每次 10–15 分钟；无信号时属正常等待）",
+        pal, L"（METEOR-M2 系列每天过深圳 2-4 次，每次 3-15 分钟；选已退役 NOAA 无信号属预期）",
         {}));
     page_el->children.push_back(std::move(head));
     // 过境倒计时（#82）：北京时间窗口 + 剩余时间（每心跳刷新）
     {
-        const std::string txt = next_pass_text(app);
-        const std::wstring wtxt(txt.begin(), txt.end());   // ASCII/UTF-8 混合
+        const std::string pt = next_pass_text(app);
+        const std::wstring wpt(pt.begin(), pt.end());
         flux::Props pp;
         pp.height = 24.0f;
         auto row = flux::view(std::move(pp));
-        row->children.push_back(flux::ui::caption(
-            pal, std::wstring(wtxt.begin(), wtxt.end()), {}));
+        row->children.push_back(flux::ui::caption(pal, wpt, {}));
         page_el->children.push_back(std::move(row));
     }
     return page_el;   // 图像区由 apt_view（原生窗）覆盖显示（状态卡下方起）
@@ -1405,6 +1404,142 @@ void logview_refresh(App& app);  // 日志查看器刷新（#64）
 
 void layout(App& app);        // 定义在原生骨架节（几何摆放；看门狗共用）
 bool host_target(App& app, RECT* out);   // 内容区目标矩形
+
+// ---- 轨道页（#83）：全球卫星地图（等距圆柱投影）+ 实时星下点 -----------
+// 网格 30°/赤道本初子午线强调；全部气象组 TLE 灰点、预设卫星高亮+名注、
+// 深圳站标记；下方列表=预设卫星实时经纬高（北京时间）。
+
+[[nodiscard]] std::string sat_tle_name(int sat_idx);  // 定义见过境节
+
+flux::ElementPtr orbit_display(App& app, const flux::Palette& pal) {
+    flux::Props page_p;
+    page_p.direction = flux::Direction::column;
+    page_p.align = flux::Align::stretch;
+    page_p.gap = 8.0f;
+    page_p.flex_grow = 1.0f;
+    auto page_el = flux::view(std::move(page_p));
+
+    const std::int64_t now = std::int64_t(std::time(nullptr));
+    // 预设卫星的实时星下点（文本行）
+    const int sel = app.combo_sat != nullptr
+                        ? int(SendMessageW(app.combo_sat, CB_GETCURSEL, 0, 0))
+                        : 0;
+    // 地图卡（paint 全自绘）
+    {
+        const std::size_t n = app.tles.size();
+        // 预计算全部星下点（拷贝进 lambda）
+        std::vector<std::array<double, 2>> pts;
+        pts.reserve(n);
+        for (const auto& t : app.tles) {
+            const auto sp = hackrftool::dsp::sat_subpoint(t, now);
+            pts.push_back({sp.lon_deg, sp.lat_deg});
+        }
+        std::vector<std::array<double, 2>> hi_pts;   // 预设高亮
+        for (int i = 0; i < 5; ++i) {
+            for (const auto& t : app.tles)
+                if (t.name.rfind(sat_tle_name(i), 0) == 0) {
+                    hi_pts.push_back(
+                        {hackrftool::dsp::sat_subpoint(t, now).lon_deg,
+                         hackrftool::dsp::sat_subpoint(t, now).lat_deg});
+                    break;
+                }
+        }
+        flux::Props mp;
+        mp.flex_grow = 1.0f;
+        mp.background = pal.surface;
+        mp.radius = 10.0f;
+        mp.paint = [pal, pts, hi_pts](flux::D2DRenderer& r, float x, float y,
+                                      float w, float h, bool, float,
+                                      float) {
+            const auto px_of = [&](double lon, double lat) {
+                return std::pair<float, float>(
+                    x + float((lon + 180.0) / 360.0) * w,
+                    y + float((90.0 - lat) / 180.0) * h);
+            };
+            // 经纬网 30°（暗）；赤道/子午线（亮）
+            for (int lon = -150; lon <= 150; lon += 30) {
+                const auto [gx, _] = px_of(lon, 0);
+                r.draw_line(gx, y, gx, y + h, pal.divider, 1.0f, 0.4f);
+            }
+            for (int lat = -60; lat <= 60; lat += 30) {
+                const auto [_, gy] = px_of(0, lat);
+                r.draw_line(x, gy, x + w, gy, pal.divider, 1.0f, 0.4f);
+            }
+            {
+                const auto [_, eq] = px_of(0, 0);
+                r.draw_line(x, eq, x + w, eq, pal.text_secondary, 1.0f, 0.6f);
+                const auto [pm, _2] = px_of(0, 0);
+                r.draw_line(pm, y, pm, y + h, pal.text_secondary, 1.0f, 0.6f);
+            }
+            // 圆点辅助（WinFlux 无 fill_circle——8 边形近似）
+            const auto dot = [&r](float cx, float cy, float rad, flux::Color c) {
+                std::vector<std::pair<float, float>> oct;
+                for (int k = 0; k < 8; ++k) {
+                    const double a = k * 3.14159265358979 / 4.0;
+                    oct.push_back({cx + float(std::cos(a)) * rad,
+                                   cy + float(std::sin(a)) * rad});
+                }
+                r.draw_polygon(oct, c);
+            };
+            // 深圳站（洋红点+标签）
+            const std::pair<float,float> sz_pt = px_of(114.0579, 22.5431);
+            dot(sz_pt.first, sz_pt.second, 4.0f, pal.danger);
+            r.draw_text(flux::Rect{sz_pt.first + 6.0f, sz_pt.second - 7.0f, 40.0f, 14.0f}, L"深圳",
+                        10.0f, pal.text_secondary, false, flux::Align::start);
+            // 全部气象卫星（灰点）
+            for (const auto& pt : pts) {
+                const std::pair<float,float> cp = px_of(pt[0], pt[1]);
+                dot(cp.first, cp.second, 2.5f, pal.text_secondary);
+            }
+            // 预设卫星（高亮+名注）
+            for (std::size_t k = 0; k < hi_pts.size(); ++k) {
+                const std::pair<float,float> cp2 = px_of(hi_pts[k][0], hi_pts[k][1]);
+                dot(cp2.first, cp2.second, 4.5f, pal.accent);
+                wchar_t nm[4];
+                swprintf(nm, 4, L"M%zu", k + 2);
+                r.draw_text(flux::Rect{cp2.first + 6.0f, cp2.second - 7.0f, 36.0f, 14.0f}, nm,
+                            10.0f, pal.accent, false, flux::Align::start);
+            }
+        };
+        page_el->children.push_back(flux::view(std::move(mp)));
+    }
+    // 列表（预设卫星实时经纬高）
+    {
+        std::vector<std::wstring> rows;
+        for (int i = 0; i < 5; ++i) {
+            const std::string name = sat_tle_name(i);
+            const hackrftool::dsp::TleElements* hit = nullptr;
+            for (const auto& t : app.tles)
+                if (t.name.rfind(name, 0) == 0) { hit = &t; break; }
+            wchar_t row[96];
+            if (hit != nullptr) {
+                const auto sp = hackrftool::dsp::sat_subpoint(*hit, now);
+                const std::wstring nm(hit->name.begin(),
+                                      hit->name.begin() +
+                                          std::min<std::size_t>(
+                                              hit->name.size(), 12));
+                swprintf(row, 96, L"%-13s 经 %7.2f° 纬 %6.2f° 高 %5.0f km%s",
+                         nm.c_str(), sp.lon_deg, sp.lat_deg, sp.alt_km,
+                         i == sel ? L"  ◀ 当前" : L"");
+            } else {
+                const std::wstring nm(name.begin(), name.end());
+                swprintf(row, 96, L"%-13s（无 TLE/已退役）%s", nm.c_str(),
+                         i == sel ? L"  ◀ 当前" : L"");
+            }
+            rows.push_back(row);
+        }
+        flux::Props lp;
+        lp.height = 150.0f;
+        lp.background = pal.surface;
+        lp.radius = 10.0f;
+        lp.padding = flux::EdgeInsets{10.0f, 8.0f, 10.0f, 8.0f};
+        auto card = flux::view(std::move(lp));
+        for (const auto& row : rows)
+            card->children.push_back(flux::ui::caption(pal, row, {}));
+        page_el->children.push_back(std::move(card));
+    }
+    return page_el;
+}
 
 flux::ElementPtr build(App& app) {
     // 心跳续期：每次 build 续 400ms——首帧冷启动（D2D/字体初始化）可能超
@@ -1620,6 +1755,7 @@ flux::ElementPtr build(App& app) {
     case 2: content->children.push_back(capture_display(app, pal)); break;
     case 3: content->children.push_back(radio_display(app, pal)); break;
     case 4: content->children.push_back(weather_display(app, pal)); break;
+    case 5: content->children.push_back(orbit_display(app, pal)); break;
     default: content->children.push_back(spectrum_display(app, pal)); break;
     }
     return content;
@@ -1669,6 +1805,7 @@ enum : int {
     IDC_CHECK_STEREO,
     IDC_SIGDB,
     IDC_LOGVIEW,
+    IDC_PAGE5,
 };
 
 // ---- 统一调谐与页面默认频率（#55） ------------------------------------------
@@ -2161,6 +2298,8 @@ void create_toolbar(App& app) {
         tb_btn(ICON_PAGE2, IDC_PAGE2, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"抓包"),
         tb_btn(ICON_RADIO, IDC_PAGE3, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"收音"),
         tb_btn(ICON_SAT, IDC_PAGE4, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE, L"云图"),
+        tb_btn(ICON_SAT, IDC_PAGE5, BTNS_CHECK | BTNS_GROUP | BTNS_AUTOSIZE,
+               L"轨道"),
         tb_btn(0, 0, BTNS_SEP, nullptr),
         tb_btn(ICON_SWEEP, IDC_SWEEP, BTNS_CHECK | BTNS_AUTOSIZE, L"全频段"),
         tb_btn(ICON_REC, IDC_RECORD, BTNS_CHECK | BTNS_AUTOSIZE, L"录制 IQ"),
@@ -2424,7 +2563,7 @@ void layout(App& app) {
     };
     place(app.row_common, 0);
     const bool mon = app.page == 1, cap = app.page == 2;
-    const bool rad = app.page == 3, wx = app.page == 4;
+    const bool rad = app.page == 3, wx = app.page >= 4;   // 云图+轨道共用卫星行
     for (const auto& c : app.row_monitor)
         ShowWindow(c.h, mon ? SW_SHOW : SW_HIDE);
     for (const auto& c : app.row_capture)
@@ -2968,8 +3107,9 @@ void on_command(App& app, int id, int code, HWND from) {
         break;
     case IDC_PAGE3:
     case IDC_PAGE4:
+    case IDC_PAGE5:
         app.page = id - IDC_PAGE0;
-        ensure_fm(app, app.running);
+        ensure_fm(app, app.running && app.page < 5);   // 轨道页无需音频链
         update_apt_on(app);
         apply_page_default(app);
         layout(app);
