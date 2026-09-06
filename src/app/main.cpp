@@ -2511,8 +2511,10 @@ void create_statusbar(App& app) {
 }
 
 // 内容区目标矩形（layout 与几何看门狗共用——判定与摆放必须同一算法）
-// 设置行行数（host_target 与 layout 共用——几何看门狗铁律：同一算法）
-int settings_rows(const App& app) { return app.page == 3 ? 2 : 1; }
+// 设置行行数（host_target 与 layout 共用——几何看门狗铁律：同一算法）。
+// 行 0=通用设置，行 1=页签特有（#87 重叠根因修复：特有行不得与通用行同线
+// 叠放）；收音页特有控件拆两行 → 共 3 行。
+int settings_rows(const App& app) { return app.page == 3 ? 3 : 2; }
 
 // 云图页状态卡带高（#65）：host_target/layout/appt_view 共用
 int weather_strip_px(const App& app) { return app.page == 4 ? 46 : 0; }
@@ -2595,13 +2597,13 @@ void layout(App& app) {
     for (const auto& c : app.row_weather)
         ShowWindow(c.h, wx ? SW_SHOW : SW_HIDE);
     place(app.row_common, 0);
-    if (mon) place(app.row_monitor, 0);
-    if (cap) place(app.row_capture, 0);
+    if (mon) place(app.row_monitor, 1);
+    if (cap) place(app.row_capture, 1);
     if (rad) {
-        place(app.row_radio, 0);
-        place(app.row_radio2, 1);   // 收音页第二行：筛选/音频选项（B4）
+        place(app.row_radio, 1);
+        place(app.row_radio2, 2);   // 收音页第三行：筛选/音频选项（B4）
     }
-    if (wx) place(app.row_weather, 0);
+    if (wx) place(app.row_weather, 1);
 
     // 状态栏（先自适应高，再贴底 + 分段右缘）
     SendMessageW(app.statusbar, WM_SIZE, 0, 0);
