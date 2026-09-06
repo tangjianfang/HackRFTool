@@ -1372,7 +1372,7 @@ flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
     // 过境倒计时（#82）：北京时间窗口 + 剩余时间（每心跳刷新）
     {
         const std::string pt = next_pass_text(app);
-        const std::wstring wpt(pt.begin(), pt.end());
+        const std::wstring wpt = widen(pt);   // #92：逐字节 widen 对 UTF-8 中文产生乱码
         flux::Props pp;
         pp.height = 24.0f;
         auto row = flux::view(std::move(pp));
@@ -1519,7 +1519,7 @@ flux::ElementPtr orbit_display(App& app, const flux::Palette& pal) {
                          nm.c_str(), sp.lon_deg, sp.lat_deg, sp.alt_km,
                          i == sel ? L"  ◀ 当前" : L"");
             } else {
-                const std::wstring nm(name.begin(), name.end());
+                const std::wstring nm = widen(name);   // #92：同倒计时行乱码修正
                 swprintf(row, 96, L"%-13s（无 TLE/已退役）%s", nm.c_str(),
                          i == sel ? L"  ◀ 当前" : L"");
             }
@@ -2576,8 +2576,11 @@ int settings_rows(const App& app) {
     return app.page == 3 ? 3 : 2;
 }
 
-// 云图页状态卡带高（#65）：host_target/layout/appt_view 共用
-int weather_strip_px(const App& app) { return app.page == 4 ? 46 : 0; }
+// 云图页状态卡带高（#65）：host_target/layout/appt_view 共用。
+// #92 修正：46px 是 head 行高，把 #82 过境倒计时行（24px）压进了 apt_view
+// 图窗之下（倒计时整行不可见）；按实际内容取值：顶 padding 12+head 36+
+// 行距 8+倒计时 24+余量 16 = 96，与 weather_display 子元素高度同源
+int weather_strip_px(const App& app) { return app.page == 4 ? 96 : 0; }
 
 bool host_target(App& app, RECT* out) {
     if (app.main_wnd == nullptr || app.toolbar == nullptr ||

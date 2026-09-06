@@ -1,13 +1,13 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 254 断言
-- pointer: 用户指令 run（08:00 收尾）：深层需求挖掘/池刷新 → 文档同步
-- rounds done: 44（#85 图标/#86 布局审计/#87 重叠根因/#88 三级架构/#89 频谱条上移/#90 轴刻度/#91 持久化收口）
+- pointer: 用户指令 run（08:00 收尾）：#93 tools 失效脚本 → #94 最小窗口尺寸 → #95 静默失败遥测 → 灰块占位待查 → 回顾
+- rounds done: 45（…/#92 云图倒计时可见性+UTF-8 乱码）
 - status: active
 - metrics: findings 55 | fixes 67 | regressions 0（E4 按轮次行累加；本 run +9/+11/0）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
 - checkpoint（#65 后，会话压缩预防）: 本 run=日志替代视觉识别（#59 核心+#60 数据面+#61 APT/扫描+#62 信号库弹窗+#63 Y轴档+#64 日志查看器+#65 云图状态卡，全部 green+progress）；下一目标 #66=数据面覆盖缺口（非 fm 页 DSP frame 1Hz/ESB 命中沿/SETTINGS restore/apply 失败路径）；末轮 #78=回顾（重放审计+经验库+报告）。工作树 clean
-- epics pending: EP-1（Meteor LRPT 解压缩，proposed——待用户决策）
+- epics pending: none（EP-1 approved，切片 #79-#81 已落地，EP-1.3 解压待过境数据校准）
 
 ## Target pool
 
@@ -73,6 +73,7 @@
 #89 | 用户优先：频谱页内容区控制条上移二级行（内容区纯显示，"1倍2倍/DB值"观感问题根治） | findings(2) | actions(3) | result(green+progress, 5 ctest/251 断言) | diff(+~120/-~45) | 新二级行 row_spec：缩放 combo/Y 档 combo/◄►平移/显示范围标签（IDC_COMBO_ZOOM/Y+IDC_PANLEFT/RIGHT，CBN_SELCHANGE 写同字段下一帧生效）；kSpecZooms/kSpecYFloor 文件级共享表（绘制与控件同源防漂移）；settings_rows 按页：频谱单窗 2 行/扫描 1 行（row_spec 随 sweep 显隐，看门狗兜底重铺）；sync_chrome 缓存去重更新范围标签；对抗检查员 5 项：4 PASS+1 实锤——restore_settings 不回写 combo_zoom/y（重启后显示与行为分裂）即修；顺修 spec_y_idx 持久化缺口（schema 有键但 capture/restore 均未搬运）。截图 out/e89-spectrum.png、e89b-spectrum.png
 #90 | 用户优先：坐标轴/dB 值/字体层级规范（三级内容区图内元素统一） | findings(6) | actions(6) | result(green+progress, 5 ctest/251 断言) | diff(+~110/-~30) | 频谱 Y 轴：网格步进改整十值（100/60/40 档→20/15/10dB）逐线标注+顶格带单位（原 span/5 碎值且只标 2 处）；RSSI 图标签对齐 20dB 网格（原 0/-50/-100 与网格错位）；音频频谱 Y 标签落网格线（原 -10/-90 悬空）+X 补 0k 起点；人声条逐线标注；瀑布右缘 16 级色标+端值（颜色↔dB 可对读，映射窗 [-110,-30]）；全景谱补 2483.5 尾部刻度；统计行方差补 dB² 单位；收音静默峰值魔数 -120.0 → "<−120 dB"；图内标题字号 10→12（层级：标题/刻度/提示三级）。截图 out/e90-{spectrum,monitor,radio}.png 真机在线验证
 #91 | 持久化收口：kPageMax=5 轨道页可恢复 + center_mhz 值域扩 2.4G（red→green） | findings(2) | actions(2) | result(green+progress, 5 ctest/254 断言) | diff(+~25) | 先写测试看红（page=5 往返 FAIL/2420 往返 FAIL）再修 settings.cpp：kPageMax 4→5；center_mhz 反序列化 24..1800 ∪ 2400..2483.5（原拒收 2.4G 保存值静默落 2450）；负例 page>6/2500 仍拒绝；测试自查纠错一处（负例文本无合法键→nullopt）。断言 251→254
+#92 | 深挖 P1：云图过境倒计时整行不可见（带高 46px vs 实际 ≥72px，apt_view 压盖）+ 连带 UTF-8 乱码潜伏 bug | findings(3) | actions(2) | result(green+progress, 5 ctest/254 断言) | diff(+~30) | weather_strip_px 46→96（与 weather_display 子元素同源：padding 12+head 36+gap 8+倒计时 24+余量）；倒计时行露出后暴露第二 bug——`wstring(pt.begin(),pt.end())` 逐字节 widen 对 UTF-8 中文产生乱码（#82 起潜伏，一直被遮挡未暴露），连同轨道页卫星名同型改 widen()。截图 out/e92b-wx.png："下次过境 04:41:13 北京时间起（剩 1:25:58，峰 23°）"完整可读。池刷新轮：探索代理全库深挖 12 项（3×P1/6×P2/3×P3），余项入池 #93-#95；文档漂移顺修（AGENTS 断言数脱钩/evolve-log EP-1 状态/acceptance-report #58 快照注记）；新待查 P3：状态卡带上方一排灰块占位（e87-e92 截图持续存在，疑 WinFlux 旧帧/空态徽章）
 
 ## 运行总结（#1–#4，用户指令停止）
 
