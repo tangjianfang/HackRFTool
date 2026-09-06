@@ -2,7 +2,7 @@
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 228 断言
 - pointer: METEOR-M2 3 过境实测（ASM 命中/帧流核对）
-- rounds done: 39（#84 世界地图背景）
+- rounds done: 40（#85 图标/#86 布局审计修复）
 - status: active
 - metrics: findings 46 | fixes 56 | regressions 0（E4 按轮次行累加；本 run +8/+16/0）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
@@ -67,6 +67,7 @@
 #83 | 轨道页：全球卫星地图实时显示（用户指令） | findings(1) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+~250) | 等距圆柱投影网格图+71 颗气象卫星灰点+预设高亮+深圳标记+型号经纬高列表；sat_subpoint 公共函数。坑：WinFlux 无 fill_circle（polygon 八边形近似）；heredoc 转义连环坑（本会话第十+次——python 内联一律 Edit 的纪律再验证）
 #84 | 世界地图背景（Natural Earth 110m 大陆形状）+ 页签切页修复 | findings(3) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+57KB 数据/+40 代码) | 内嵌 ne110land 海岸线（128 环量化 0.1°，公有领域）draw_polygon 填充；修两 bug：①IDC_PAGE5 枚举连号（id-IDC_PAGE0 契约——插尾部致 page=39）②sat_subpoint 经度负值归一（fmod 保符号——两次取模安全式）。真机截图：大陆/网格/71 卫星点/深圳/列表经纬全渲染
 #85 | 应用图标（用户指令：exe/任务栏/标题栏三处） | findings(1) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+31KB ico/+8 代码) | Pillow 程序化 7 尺寸 ICO（天线+电波，深蓝圆角底）；rc 资源 ID1+窗口类 hIcon/hIconSm；三处验证：标题栏截图已渲染/exe ExtractAssociatedIcon 已返回/任务栏=系统 ShellCache 旧图（重启 explorer 自愈，非代码问题）
+#86 | 设置行布局重叠审计+修复（用户报告组件叠加） | findings(2) | actions(1) | result(green+progress, 5 ctest/251 断言) | diff(+~40/-~10) | 静态审计法：slot 声明宽度累加 vs 窗口宽——监测页 1214/收音行1 1266 超宽实锤（place 顺序累加无边界检查，溢出控件压内容区=用户看到的"叠加"）；修：标签缩短+静音回挪+place 越界 SW_HIDE 守卫+ShowWindow 先行。审计脚本可复用（正则提 slot 宽度）
 
 ## 运行总结（#1–#4，用户指令停止）
 
