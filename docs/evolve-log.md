@@ -99,3 +99,4 @@
 - 深挖收益：全库扫描 12 findings（3×P1 全清：重叠根因/倒计时遮挡+UTF-8 乱码/脚本误触清空；6×P2 全清：repro-click 死路/设置损坏静默/selftest 误报 SKIP/文档漂移×3/最小窗口；3×P3 记池）；对抗检查员两轮（#87 5 PASS、#89 4 PASS+1 实锤即修）
 - 经验库：+L15/L16/L17；L14 verified+1
 - 未完成移交（下一会话从 #100 起）：T2.3 esb_scan 大输入基准、T4.2 gfsk_analyze --csv、P3 灰块占位（云图状态卡上方空灰卡，WinFlux 上游疑）、P3 FMDUMP/rx_check 临时工具归档、T1.5/T1.6 待真机场景、EP-1.3 Meteor 解压待过境数据校准
+#100 | 用户专项：采样率切换崩溃修复（收音中切率=use-after-free：fm 线程正解引用 fm_rx 时 unique_ptr 被直接覆盖） | findings(2) | actions(2) | result(green+progress, 5 ctest/258 断言) | diff(+~35/-~20) | 双保险：①IDC_COMBO_RATE 分支——fm_on 时拒绝切换（回弹 2Msps+提示，B2 同款；ensure_fm(true) 本就强制 2Msps，原"按新率重建"既 UAF 又无意义）；②接收中 combo_rate 置灰（EnableWindow+sync_rate_en 缓存，IsWindowEnabled 实测 False）。排障：LNK1104 残留进程锁 exe（L1：带锁 ctest"全绿"=陈旧二进制，已清进程重建重跑）

@@ -286,6 +286,7 @@ struct App {
     std::vector<CtlSlot> row_weather;   // 仅云图页（#54）
     // 工具栏状态同步缓存（避免每帧重复 TB_SETSTATE 消息）
     int sync_run = -1, sync_page = -1, sync_sweep = -1, sync_rec = -1;
+    int sync_rate_en = -1;   // 采样率下拉置灰态（#100）
     std::wstring sync_sb[6];   // 状态栏分段文本缓存（相同文本不重发 SB_SETTEXT）
     DWORD last_sb_ms = 0;     // 状态栏上次文本刷新时刻（4Hz 节流）
     // 拖拽拉伸进行中（WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE）：内容区冻结旧尺寸，
@@ -3172,6 +3173,17 @@ void sync_chrome(App& app) {
         }
     }
 
+    // 采样率下拉置灰（#100）：接收中不可切换（音频链锁 2Msps/扫描锁 20Msps，
+    // 且切换需停流重配）——带缓存只在变化时 EnableWindow
+    {
+        const bool en = !app.running;
+        if (app.sync_rate_en != int(en)) {
+            app.sync_rate_en = int(en);
+            if (app.combo_rate != nullptr)
+                EnableWindow(app.combo_rate, en ? TRUE : FALSE);
+        }
+    }
+
     if (app.statusbar != nullptr && sb_due) {
         app.last_sb_ms = now;
         // 分段 0：基础状态（接收中时由动态段首词接续，避免与分段 1 重复）
@@ -3399,6 +3411,14 @@ void on_command(App& app, int id, int code, HWND from) {
     case IDC_COMBO_RATE:
         if (code == CBN_SELCHANGE) {
             const int i = int(SendMessageW(app.combo_rate, CB_GETCURSEL, 0, 0));
+            if (app.fm_on.load()) {
+                // #100：音频链要求 2 Msps（ensure_fm(true) 本就会强制回 0 档），
+                // 原实现此处按新率直接覆盖 fm_rx——fm 线程正解引用旧对象，
+                // use-after-free 崩溃。收音中拒绝切换（B2 同款回弹+提示）
+                SendMessageW(app.combo_rate, CB_SETCURSEL, 0, 0);
+                app.status = L"收音中采样率锁定 2 Msps（音频链要求），先停止收音再切换";
+                break;
+            }
             if (app.sweep_on == 1 && i != 4) {
                 // B2：全景拼接按 20Msps 5 段设计，低档率频标全错——扫描中锁定
                 SendMessageW(app.combo_rate, CB_SETCURSEL, 4, 0);
@@ -3408,16 +3428,6 @@ void on_command(App& app, int id, int code, HWND from) {
             if (i >= 0 && i < 5) {
                 app.rate_index = i;
                 reconfigure_rx(app, current_radio_cfg(app));
-                // 收音链运行中换采样率：按新率重建解调器（带宽档保持——
-                // B1：漏传第 4 参会静默回 ±120k，与带宽下拉显示不一致）
-                if (app.fm_on.load()) {
-                    app.iq_ring.clear();
-                    static const double kBw[3] = {120e3, 80e3, 50e3};
-                    app.fm_rx = std::make_unique<hackrftool::dsp::FmReceiver>(
-                        kRatesMsps[size_t(i)] * 1e6, 80.0, !app.stereo_opt,
-                        kBw[size_t(app.fm_bw)]);
-                    app.fm_rx->set_audio_callback(&fm_audio_cb, &app);
-                }
             }
         }
         break;
