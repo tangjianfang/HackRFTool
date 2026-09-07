@@ -48,6 +48,9 @@ std::vector<EsbFrame> esb_scan(const std::vector<std::uint8_t>& bits) {
                     addr[b] = static_cast<std::uint8_t>(read_lsb(bits, p + b * 8, 8));
                 const unsigned payload_len = read_lsb(bits, pcf_off, 6);
                 if (payload_len > 32u) continue;
+                // PCF 9bit = 载荷长(6) + PID(2) + NO_ACK(1)（#101 补解析）
+                const unsigned pid = read_lsb(bits, pcf_off + 6, 2);
+                const unsigned no_ack = read_lsb(bits, pcf_off + 8, 1);
                 const std::size_t payload_off = pcf_off + 9;
                 const std::size_t crc_off = payload_off + payload_len * 8;
                 if (crc_off + 16 > n) continue;
@@ -57,6 +60,8 @@ std::vector<EsbFrame> esb_scan(const std::vector<std::uint8_t>& bits) {
                     if (crc16_lsb(bits, p, crc_off - p, init) != rx_crc) continue;
                     EsbFrame f;
                     f.address = addr;
+                    f.pid = std::uint8_t(pid);
+                    f.no_ack = no_ack != 0u;
                     f.payload.resize(payload_len);
                     for (unsigned b = 0; b < payload_len; ++b)
                         f.payload[b] = static_cast<std::uint8_t>(

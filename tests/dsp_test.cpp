@@ -450,13 +450,14 @@ static unsigned short esb_crc16(const std::vector<std::uint8_t>& bits, std::size
 }
 
 static std::vector<std::uint8_t> esb_pack(const std::vector<unsigned char>& address,
-                                          const std::vector<unsigned char>& payload) {
+                                          const std::vector<unsigned char>& payload,
+                                          unsigned pid = 1, unsigned no_ack = 0) {
     std::vector<std::uint8_t> bits;
     push_bits_lsb(bits, 0xAA, 8);   // 前导
     for (const unsigned char b : address) push_bits_lsb(bits, b, 8);
     push_bits_lsb(bits, unsigned(payload.size()) & 0x3Fu, 6);   // PCF 载荷长
-    push_bits_lsb(bits, 0x01, 2);                                // PID
-    push_bits_lsb(bits, 0, 1);                                   // NO_ACK
+    push_bits_lsb(bits, pid & 0x03u, 2);                         // PID
+    push_bits_lsb(bits, no_ack & 0x01u, 1);                      // NO_ACK
     for (const unsigned char b : payload) push_bits_lsb(bits, b, 8);
     const unsigned short crc =
         esb_crc16(bits, 8, bits.size() - 8);   // 覆盖地址+PCF+载荷
@@ -473,6 +474,21 @@ static void test_esb_roundtrip() {
     if (!frames.empty()) {
         check(frames[0].address == addr, "ESB 地址还原");
         check(frames[0].payload == payload, "ESB 载荷还原");
+    }
+}
+
+// PCF 字段解析（#101）：PID/NO_ACK 解帧侧补齐——打包 pid=2/no_ack=1 应原样还原
+static void test_esb_pcf() {
+    const std::vector<unsigned char> addr = {0x11, 0x22, 0x33, 0x44};
+    const std::vector<unsigned char> payload = {0xAA, 0x55};
+    for (const unsigned pid : {0u, 1u, 2u, 3u}) {
+        auto bits = esb_pack(addr, payload, pid, 1);
+        const auto frames = hackrftool::dsp::esb_scan(bits);
+        check(frames.size() == 1, "PCF 打包还原出帧");
+        if (!frames.empty()) {
+            check(frames[0].pid == pid, "PID 还原");
+            check(frames[0].no_ack, "NO_ACK 还原");
+        }
     }
 }
 
@@ -1621,6 +1637,7 @@ int main() {
     test_panorama_stitch();
     test_live_bursts();
     test_esb_roundtrip();
+    test_esb_pcf();
     test_esb_corruption_rejected();
     test_esb_noise();
     test_end_to_end_pipeline();

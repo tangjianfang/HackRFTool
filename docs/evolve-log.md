@@ -1,10 +1,10 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 258 断言
-- pointer: 下一会话从 #100 起（余池：T2.3 esb 基准/T4.2 --csv/灰块占位 P3 上游疑/FMDUMP 归档 P3）；本 run 按 08:00 时间盒收尾，pool 非空未收敛
-- rounds done: 52（#87-#98 见下；#99 回顾）
+- pointer: 用户指令抓包/收音专项 run：#102 地址过滤 → #104 信号库 → #105 音频谱/静噪 → 回顾
+- rounds done: 54（…/#101 ESB 帧存储+专用列表）
 - status: active
-- metrics: findings 59 | fixes 72 | regressions 0（E4 按轮次行累加；本 run #87-#97 +13/+17/0）
+- metrics: findings 64 | fixes 77 | regressions 0（E4 按轮次行累加；本 run +5/+5/0）
 - checkpoint（#97 后，10 轮节点）: 本 run=用户优先 UI 三级架构（#87 重叠根因 place 同线叠放/#88 动作归位/#89 频谱条上移/#90 轴刻度规范/#91 持久化收口 red→green/#92 云图倒计时+UTF-8 乱码/#93 tools ID 漂移误触清空/#94 最小窗口/#95 静默失败遥测/#96 设备错误分流/#97 遥测并发压测）全部 green+progress，断言 251→258；深挖轮入库 12 findings（3P1 已清/6P2 已清/P3 记池）；下一段 #98 README（T4.4/T4.6）→ #99 回顾（重放审计+报告）；灰块占位=WinFlux 上游疑（仅云图页内容顶一排空灰卡，e87-e92 截图持续，本仓库不可修只记录）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
 - checkpoint（#65 后，会话压缩预防）: 本 run=日志替代视觉识别（#59 核心+#60 数据面+#61 APT/扫描+#62 信号库弹窗+#63 Y轴档+#64 日志查看器+#65 云图状态卡，全部 green+progress）；下一目标 #66=数据面覆盖缺口（非 fm 页 DSP frame 1Hz/ESB 命中沿/SETTINGS restore/apply 失败路径）；末轮 #78=回顾（重放审计+经验库+报告）。工作树 clean
@@ -100,3 +100,4 @@
 - 经验库：+L15/L16/L17；L14 verified+1
 - 未完成移交（下一会话从 #100 起）：T2.3 esb_scan 大输入基准、T4.2 gfsk_analyze --csv、P3 灰块占位（云图状态卡上方空灰卡，WinFlux 上游疑）、P3 FMDUMP/rx_check 临时工具归档、T1.5/T1.6 待真机场景、EP-1.3 Meteor 解压待过境数据校准
 #100 | 用户专项：采样率切换崩溃修复（收音中切率=use-after-free：fm 线程正解引用 fm_rx 时 unique_ptr 被直接覆盖） | findings(2) | actions(2) | result(green+progress, 5 ctest/258 断言) | diff(+~35/-~20) | 双保险：①IDC_COMBO_RATE 分支——fm_on 时拒绝切换（回弹 2Msps+提示，B2 同款；ensure_fm(true) 本就强制 2Msps，原"按新率重建"既 UAF 又无意义）；②接收中 combo_rate 置灰（EnableWindow+sync_rate_en 缓存，IsWindowEnabled 实测 False）。排障：LNK1104 残留进程锁 exe（L1：带锁 ctest"全绿"=陈旧二进制，已清进程重建重跑）
+#101 | 用户专项：ESB 帧结构化存储 + 抓包页专用"有效数据"列表（red→green，断言 258→262） | findings(3) | actions(3) | result(green+progress, 5 ctest/262 断言) | diff(+~150) | ①dsp：EsbFrame 补 PCF PID(2bit)/NO_ACK(1bit) 解析（esb_pack 加参 red→green，4 组 pid 全还原）；②UI 侧 GFSK 解调补 ±半符号相位搜索 {0,5,10,15}（e2e 证明单点漏解），质量=逐符号 |f|/dev 钳位均值（真机首拍 269% 暴露未钳位，即修）；③App 新增 esb_records（上限 1000）+抓包页"ESB 有效帧"专用列表（时间/地址/len/pid/NA/质量%/载荷 hex，↻=同地址同 PID 重传，点行更新协议字段详情行），突发预览降 120px 辅助区，清空同步清帧存储。真机 15s 实拍：4 条 CRC16✓ 帧（addr:74F77017 len:28 等）+详情行全字段（out/e101-cap2.png）

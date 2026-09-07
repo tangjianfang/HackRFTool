@@ -109,6 +109,20 @@ struct App {
     std::wstring last_esb;              // 最新 ESB 关键帧描述（地址+载荷 hex，横幅用）
     unsigned demod_budget = 0;          // 每 build 解调预算（防突发风暴卡帧）
 
+    // ESB 有效帧结构化存储（#101）：懒解调检出即入账，专用列表/详情数据源
+    struct EsbRecord {
+        unsigned long long tick = 0;            // 检出时刻（GetTickCount64）
+        unsigned long long start_sample = 0;    // 突发起始样本号（时间换算用）
+        float peak_db = 0.f;                    // 突发峰值 dBFS
+        float quality = 0.f;                    // GFSK 符号质量均值（|频偏|/标称频偏，理想≈1，可 >1）
+        unsigned pid = 0;                       // PCF 包序号（重传同值）
+        bool no_ack = false;
+        std::vector<std::uint8_t> address;
+        std::vector<std::uint8_t> payload;
+    };
+    std::vector<EsbRecord> esb_records;         // 新在尾；上限 1000 淘汰最旧
+    int esb_sel = 0;                            // 详情选中（0=最新，列表行点击回写）
+
     // ---- 控件值（#52 起由原生控件持有；内容区每帧重建，普通字段即够） ----
     bool running = false;
     int page = 0;                 // 0=频谱 1=监测 2=抓包 3=收音 4=云图
@@ -561,6 +575,8 @@ void clear_bursts(App& app) {
     app.row_cache.clear();
     app.esb_hits.store(0);
     app.last_esb.clear();
+    app.esb_records.clear();   // #101：有效帧存储一并清
+    app.esb_sel = 0;
 }
 
 // ---- 收音机（#53）：fm 解调线程 / 音频开关 / 自动扫台 ------------------------
@@ -1076,14 +1092,33 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
             std::min<unsigned long long>(b.samples, 262144);
         std::vector<std::int8_t> slice;
         if (app.live.read_slice(b.start_sample, n_demod, slice)) {
-            std::vector<std::complex<float>> cmplx(n_demod);
-            for (unsigned long long i = 0; i < n_demod; ++i)
-                cmplx[static_cast<std::size_t>(i)] = {
-                    float(slice[static_cast<std::size_t>(i) * 2]),
-                    float(slice[static_cast<std::size_t>(i) * 2 + 1])};
             const hackrftool::dsp::GfskDemod demod(
                 sample_rate_hz, app.symrate_idx == 1 ? 2e6 : 1e6, 160e3);
-            const auto r = demod.demod(cmplx, 0);
+            // #101：±半符号相位搜索——突发检测起点与真实帧起始存在相位偏移
+            //（e2e 测试 {0,5,10,15} 四点重试可解出，单点会漏解），取符号
+            // 质量均值最高的相位
+            hackrftool::dsp::GfskResult r;
+            float best_q = -1.0f;
+            for (const unsigned off : {0u, 5u, 10u, 15u}) {
+                if (n_demod <= off) break;
+                const unsigned long long avail = n_demod - off;
+                std::vector<std::complex<float>> cmplx(avail);
+                for (unsigned long long i = 0; i < avail; ++i)
+                    cmplx[static_cast<std::size_t>(i)] = {
+                        float(slice[static_cast<std::size_t>((i + off) * 2)]),
+                        float(slice[static_cast<std::size_t>((i + off) * 2 + 1)])};
+                auto cand = demod.demod(cmplx, 0);
+                float q = 0.0f;
+                if (!cand.quality.empty()) {
+                    for (const float x : cand.quality)
+                        q += std::min(1.0f, std::abs(x));   // |f|/dev 可>1，钳到 0..1
+                    q /= float(cand.quality.size());
+                }
+                if (q > best_q) {
+                    best_q = q;
+                    r = std::move(cand);
+                }
+            }
             const std::size_t n_bits = std::min<std::size_t>(r.bits.size(), 64);
             wchar_t hex[64];
             std::size_t hx = 0;
@@ -1100,6 +1135,24 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
             const auto frames = hackrftool::dsp::esb_scan(r.bits);
             if (!frames.empty()) {
                 app.esb_hits.fetch_add(unsigned(frames.size()));
+                // #101：结构化入账——专用列表/详情的数据源（上限 1000 淘汰最旧）
+                for (const auto& fr : frames) {
+                    App::EsbRecord rec;
+                    rec.tick = GetTickCount64();
+                    rec.start_sample = b.start_sample;
+                    rec.peak_db = b.peak_db;
+                    rec.quality = best_q < 0.0f ? 0.0f : best_q;
+                    rec.pid = fr.pid;
+                    rec.no_ack = fr.no_ack;
+                    rec.address = fr.address;
+                    rec.payload = fr.payload;
+                    app.esb_records.push_back(std::move(rec));
+                }
+                constexpr std::size_t kEsbMax = 1000;
+                if (app.esb_records.size() > kEsbMax)
+                    app.esb_records.erase(app.esb_records.begin(),
+                                          app.esb_records.end() -
+                                              std::ptrdiff_t(kEsbMax));
                 text += L"  ESB✓";
                 for (const auto& fr : frames) {
                     text += L" addr:";
@@ -1132,6 +1185,32 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
         app.row_cache.erase(app.row_cache.begin(), cut);
     }
     return text;
+}
+
+// ESB 有效帧行文本（#101）：时间/地址/长度/PID/质量/载荷前段；与前一帧
+// 同地址同 PID 判定为重传（ESB PID 每 +1/新包）
+std::wstring esb_row_text(App& app, std::size_t idx_from_newest) {
+    const std::size_t n = app.esb_records.size();
+    const auto& r = app.esb_records[n - 1 - idx_from_newest];
+    wchar_t head[96];
+    swprintf(head, 96, L"t=%.1fs  ", double(r.tick % 1000000) / 1000.0);
+    std::wstring t = head;
+    t += L"addr:";
+    for (const unsigned char a : r.address) {
+        wchar_t ab[8];
+        swprintf(ab, 8, L"%02X", a);
+        t += ab;
+    }
+    wchar_t mid[80];
+    swprintf(mid, 80, L"  len:%u  pid:%u%s  q:%.2f  ", unsigned(r.payload.size()),
+             r.pid, r.no_ack ? L" NA" : L"", double(r.quality));
+    t += mid;
+    if (idx_from_newest + 1 < n) {
+        const auto& prev = app.esb_records[n - 2 - idx_from_newest];
+        if (prev.address == r.address && prev.pid == r.pid) t += L"↻重传  ";
+    }
+    t += widen(hackrftool::dsp::hex_dump(r.payload));
+    return t;
 }
 
 flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
@@ -1175,6 +1254,56 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
              L"整段连片，请下调 LNA/VGA",
         std::move(hint_p));
 
+    // ESB 有效帧专用列表（#101）：CRC 通过的结构化帧，新在上，点行看详情
+    flux::Props esb_head_p;
+    esb_head_p.text_align = flux::Align::start;
+    esb_head_p.bold = true;
+    auto esb_header = flux::label(
+        L"ESB 有效帧 " + std::to_wstring(app.esb_records.size()) +
+            L" 条（CRC16 已校验；↻=与上一帧同地址同 PID 的重传；点行看详情）",
+        std::move(esb_head_p));
+    flux::Props esb_list_p;
+    esb_list_p.direction = flux::Direction::column;
+    esb_list_p.gap = 2.0f;
+    auto esb_list = flux::view(std::move(esb_list_p));
+    const std::size_t n_esb = std::min<std::size_t>(app.esb_records.size(), 80);
+    for (std::size_t k = 0; k < n_esb; ++k) {
+        flux::Props row_p;
+        row_p.text_align = flux::Align::start;
+        row_p.font_size_pt = 12.0f;
+        const std::size_t sel =
+            app.esb_sel < 0 ? std::size_t(0)
+                            : std::min(std::size_t(app.esb_sel), n_esb - 1);
+        row_p.text_color = k == sel ? pal.accent : pal.text_secondary;
+        row_p.on_click = [&app, k] { app.esb_sel = int(k); };
+        esb_list->children.push_back(flux::label(esb_row_text(app, k), std::move(row_p)));
+    }
+    // 详情行：选中帧的协议字段与全量载荷（未选中=最新帧）
+    std::wstring detail = L"详情：暂无 ESB 帧（等待 nRF24 兼容设备发报）";
+    if (!app.esb_records.empty()) {
+        const std::size_t sel =
+            std::min<std::size_t>(std::max(app.esb_sel, 0), app.esb_records.size() - 1);
+        const auto& r = app.esb_records[app.esb_records.size() - 1 - sel];
+        std::wstring dt = L"详情 addr:";
+        for (const unsigned char a : r.address) {
+            wchar_t ab[8];
+            swprintf(ab, 8, L"%02X", a);
+            dt += ab;
+        }
+        wchar_t dhead[128];
+        swprintf(dhead, 128, L"（%u 字节）  CRC16✓  PID:%u  NO_ACK:%s  质量:%.2f  "
+                             L"峰值:%.1f dB   载荷[%u]: ",
+                 unsigned(r.address.size()), r.pid, r.no_ack ? L"是" : L"否",
+                 double(r.quality), r.peak_db,
+                 unsigned(r.payload.size()));
+        dt += dhead;
+        dt += widen(hackrftool::dsp::hex_dump(r.payload));
+        detail = std::move(dt);
+    }
+    flux::Props detail_p;
+    detail_p.text_align = flux::Align::start;
+    auto detail_el = flux::ui::caption(pal, detail, std::move(detail_p));
+
     // 列表（最新 60 条）：视口必须 flex_grow 占满剩余高度，否则塌 0 不渲染
     flux::Props list_p;
     list_p.direction = flux::Direction::column;
@@ -1203,10 +1332,17 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
     page_el->children.push_back(std::move(key));
     page_el->children.push_back(std::move(count_el));
     page_el->children.push_back(std::move(hint_el));
-    // 视口 flex_grow 占满剩余高度，否则列内视口高度塌 0 导致列表不渲染
-    flux::Props scroll_p;
-    scroll_p.flex_grow = 1.0f;
-    page_el->children.push_back(flux::scroll_view(std::move(list), std::move(scroll_p)));
+    // ESB 有效帧专用列表占主视口（#101），详情行随点击更新
+    page_el->children.push_back(std::move(esb_header));
+    flux::Props esb_scroll_p;
+    esb_scroll_p.flex_grow = 1.0f;
+    page_el->children.push_back(
+        flux::scroll_view(std::move(esb_list), std::move(esb_scroll_p)));
+    page_el->children.push_back(std::move(detail_el));
+    // 突发预览降为固定高度辅助区（能量突发含未解出 ESB 的，仍可观察增益状态）
+    flux::Props burst_scroll_p;
+    burst_scroll_p.height = 120.0f;
+    page_el->children.push_back(flux::scroll_view(std::move(list), std::move(burst_scroll_p)));
     return page_el;
 }
 

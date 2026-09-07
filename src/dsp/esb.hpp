@@ -15,6 +15,8 @@ struct EsbFrame {
     std::vector<std::uint8_t> address;   // 3-5 字节，发送端自然字节序
     std::vector<std::uint8_t> payload;   // 0-32 字节
     std::size_t bit_offset = 0;          // 帧起始在输入比特流中的下标
+    std::uint8_t pid = 0;                // PCF 2bit 包序号（+1/包，重传同值）
+    bool no_ack = false;                 // PCF 1bit NO_ACK 标志
 };
 
 [[nodiscard]] std::vector<EsbFrame> esb_scan(const std::vector<std::uint8_t>& bits);
