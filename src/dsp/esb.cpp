@@ -1,5 +1,8 @@
 #include "dsp/esb.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 namespace hackrftool::dsp {
 
 namespace {
@@ -85,6 +88,53 @@ bool addr_match(const std::vector<std::uint8_t>& address,
                 const std::vector<std::uint8_t>& filter) noexcept {
     if (filter.empty()) return true;
     return address == filter;
+}
+
+EsbInterp esb_interpret(
+    const std::vector<std::uint8_t>& address,
+    const std::vector<std::uint8_t>& payload,
+    const std::vector<std::vector<std::uint8_t>>& history) {
+    EsbInterp r;
+    // 已知地址表（公开常识，命中只做备注不做事判）
+    bool all_e7 = address.size() >= 3 &&
+                  std::all_of(address.begin(), address.end(),
+                              [](std::uint8_t b) { return b == 0xE7; });
+    if (all_e7) r.vendor = "nRF24 出厂默认地址（示例代码/未改地址的设备常用）";
+    else if (address.size() >= 2 && address[0] == 0xC5 && address[1] == 0x2E)
+        r.vendor = "Logitech（Unifying 常用地址前缀）";
+    // 全零
+    r.all_zero = !payload.empty() &&
+                 std::all_of(payload.begin(), payload.end(),
+                             [](std::uint8_t b) { return b == 0; });
+    // 香农熵（bit/字节）：短载荷的熵上限是 log2(n)，判加密须长度足够
+    if (!payload.empty()) {
+        unsigned hist[256] = {};
+        for (const std::uint8_t b : payload) ++hist[b];
+        float h = 0.f;
+        const float n = float(payload.size());
+        for (const unsigned c : hist)
+            if (c != 0) {
+                const float p = float(c) / n;
+                h -= p * std::log2(p);
+            }
+        r.entropy_bits = h;
+        r.looks_encrypted = payload.size() >= 12 && h >= 3.5f;
+    }
+    // 序号字节 + 差分（只对最近一帧，措辞保持"疑似"）
+    if (!history.empty()) {
+        const auto& prev = history.back();
+        if (prev.size() == payload.size() && !payload.empty()) {
+            for (std::size_t j = 0; j < payload.size(); ++j) {
+                if (payload[j] != prev[j]) r.diff_bytes.push_back(unsigned(j));
+                if (r.seq_byte < 0 &&
+                    payload[j] == std::uint8_t(prev[j] + 1u))
+                    r.seq_byte = int(j);   // 最小的 +1 字节视为疑似序号
+            }
+            if (r.diff_bytes.empty())
+                r.diff_bytes.clear();   // 全同=重传（↻ 标记已在行文本）
+        }
+    }
+    return r;
 }
 
 std::string hex_dump(const std::vector<std::uint8_t>& bytes) {

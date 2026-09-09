@@ -502,6 +502,58 @@ static void test_esb_addr_match() {
     check(!addr_match(addr, {0x74, 0xF7, 0x70, 0x18}), "尾字节不同不匹配");
 }
 
+// 载荷解读启发式（#103）：厂商地址表/熵/全零/序号字节/差分——全部可确定性单测
+static void test_esb_interpret() {
+    using hackrftool::dsp::esb_interpret;
+    const std::vector<std::uint8_t> e7x5 = {0xE7, 0xE7, 0xE7, 0xE7, 0xE7};
+    {
+        const auto r = esb_interpret(e7x5, {1, 2}, {});
+        check(r.vendor.find("nRF24") != std::string::npos,
+              "E7×5 识别为 nRF24 出厂默认地址");
+    }
+    {
+        const auto r =
+            esb_interpret({0xC5, 0x2E, 0x11, 0x87, 0x1E}, {1, 2}, {});
+        check(r.vendor.find("Logitech") != std::string::npos,
+              "C5:2E 前缀识别为 Logitech");
+    }
+    {
+        const auto r = esb_interpret({0x74, 0xF7, 0x70, 0x17},
+                                     {0, 0, 0, 0}, {});
+        check(r.all_zero && !r.looks_encrypted, "全零载荷=空保持包");
+    }
+    {
+        // 16 字节互异 → 熵=log2(16)=4 ≥3.5 且长度≥12 → 疑似加密
+        std::vector<std::uint8_t> p;
+        for (int i = 0; i < 16; ++i) p.push_back(std::uint8_t(i * 7 + 3));
+        const auto r = esb_interpret({1, 2, 3}, p, {});
+        check(r.looks_encrypted && r.entropy_bits > 3.5f,
+              "高熵互异载荷疑似加密");
+    }
+    {
+        // 常量载荷：熵 0，非加密非全零
+        const auto r = esb_interpret({1, 2, 3},
+                                     std::vector<std::uint8_t>(20, 0xA5), {});
+        check(!r.looks_encrypted && r.entropy_bits < 0.01f && !r.all_zero,
+              "常量载荷低熵非加密");
+    }
+    {
+        // 序号字节：上一帧字节0=0x09，本帧=0x0A → seq_byte=0；差异字节 {0,2}
+        const std::vector<std::uint8_t> prev = {0x09, 0xFF, 0x01, 0x00};
+        const std::vector<std::uint8_t> cur = {0x0A, 0xFF, 0x02, 0x00};
+        const auto r = esb_interpret({1, 2, 3}, cur, {prev});
+        check(r.seq_byte == 0, "字节0 跨帧+1 识别为疑似序号");
+        check(r.diff_bytes.size() == 2 && r.diff_bytes[0] == 0 &&
+                  r.diff_bytes[1] == 2,
+              "与上一帧差分字节集正确");
+    }
+    {
+        // 无历史：无序号无差分
+        const auto r = esb_interpret({1, 2, 3}, {1, 2, 3}, {});
+        check(r.seq_byte < 0 && r.diff_bytes.empty(), "无历史帧时不臆测");
+    }
+}
+
 static void test_esb_corruption_rejected() {
     const std::vector<unsigned char> addr = {0x12, 0x34, 0x56};
     const std::vector<unsigned char> payload = {0xDE, 0xAD};
@@ -1652,6 +1704,7 @@ int main() {
     test_esb_roundtrip();
     test_esb_pcf();
     test_esb_addr_match();
+    test_esb_interpret();
     test_esb_corruption_rejected();
     test_esb_noise();
     test_end_to_end_pipeline();

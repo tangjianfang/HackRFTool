@@ -127,11 +127,14 @@ struct App {
         float quality = 0.f;                    // GFSK 符号质量均值（|频偏|/标称频偏，理想≈1，可 >1）
         unsigned pid = 0;                       // PCF 包序号（重传同值）
         bool no_ack = false;
+        unsigned interval_ms = 0;               // 距同地址上一帧的间隔（首帧 0）
+        hackrftool::dsp::EsbInterp interp;      // 载荷解读（#103，入账时算好缓存）
         std::vector<std::uint8_t> address;
         std::vector<std::uint8_t> payload;
     };
     std::vector<EsbRecord> esb_records;         // 新在尾；上限 1000 淘汰最旧
     int esb_sel = 0;                            // 详情选中（0=最新，列表行点击回写）
+    const unsigned long long boot_ms = GetTickCount64();   // t= 显示基准（#103）
     std::wstring cap_addr_filter;               // 地址过滤 hex 文本（#102，每帧从控件读）
     bool cap_addr_only = false;                 // 仅存指定地址的帧
     HWND edit_addr = nullptr;
@@ -1188,6 +1191,24 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
                     rec.no_ack = fr.no_ack;
                     rec.address = fr.address;
                     rec.payload = fr.payload;
+                    // #103：入账即算解读（同地址最近 ≤4 帧作历史）+发包间隔
+                    {
+                        std::vector<std::vector<std::uint8_t>> hist;
+                        for (auto it = app.esb_records.rbegin();
+                             it != app.esb_records.rend() && hist.size() < 4;
+                             ++it) {
+                            if (it->address != fr.address) continue;
+                            if (hist.empty()) rec.interval_ms =
+                                unsigned(rec.tick > it->tick
+                                             ? rec.tick - it->tick
+                                             : 0);
+                            hist.push_back(it->payload);
+                        }
+                        // hist 目前新→旧，反转成旧→新（interpret 取 back() 为上一帧）
+                        std::reverse(hist.begin(), hist.end());
+                        rec.interp = hackrftool::dsp::esb_interpret(
+                            fr.address, fr.payload, hist);
+                    }
                     app.esb_records.push_back(std::move(rec));
                 }
                 constexpr std::size_t kEsbMax = 1000;
@@ -1235,7 +1256,9 @@ std::wstring esb_row_text(App& app, std::size_t idx_from_newest) {
     const std::size_t n = app.esb_records.size();
     const auto& r = app.esb_records[n - 1 - idx_from_newest];
     wchar_t head[96];
-    swprintf(head, 96, L"t=%.1fs  ", double(r.tick % 1000000) / 1000.0);
+    swprintf(head, 96, L"t=%llu.%01us  ",
+             (r.tick - app.boot_ms) / 1000,
+             unsigned((r.tick - app.boot_ms) % 1000) / 100);
     std::wstring t = head;
     t += L"addr:";
     for (const unsigned char a : r.address) {
@@ -1243,15 +1266,23 @@ std::wstring esb_row_text(App& app, std::size_t idx_from_newest) {
         swprintf(ab, 8, L"%02X", a);
         t += ab;
     }
-    wchar_t mid[80];
-    swprintf(mid, 80, L"  len:%u  pid:%u%s  q:%.2f  ", unsigned(r.payload.size()),
-             r.pid, r.no_ack ? L" NA" : L"", double(r.quality));
+    wchar_t mid[96];
+    swprintf(mid, 96, L"  len:%u  pid:%u%s  q:%u%%", unsigned(r.payload.size()),
+             r.pid, r.no_ack ? L" NA" : L"", unsigned(r.quality * 100.f + 0.5f));
     t += mid;
+    // #103：解读标签（优先级：加密 > 空包 > 序号 > 保持/重传）
+    if (r.interp.looks_encrypted) t += L"  [疑似加密]";
+    else if (r.interp.all_zero) t += L"  [空保持包]";
+    else if (r.interp.seq_byte >= 0)
+        t += L"  [序号B" + std::to_wstring(r.interp.seq_byte) + L"]";
     if (idx_from_newest + 1 < n) {
         const auto& prev = app.esb_records[n - 2 - idx_from_newest];
-        if (prev.address == r.address && prev.pid == r.pid) t += L"↻重传  ";
+        if (prev.address == r.address && prev.pid == r.pid) t += L"  ↻重传";
+        else if (prev.address == r.address && r.interp.diff_bytes.empty() &&
+                 !r.payload.empty())
+            t += L"  [内容未变]";
     }
-    t += widen(hackrftool::dsp::hex_dump(r.payload));
+    t += L"  " + widen(hackrftool::dsp::hex_dump(r.payload));
     return t;
 }
 
@@ -1333,31 +1364,127 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
         row_p.on_click = [&app, k] { app.esb_sel = int(k); };
         esb_list->children.push_back(flux::label(esb_row_text(app, k), std::move(row_p)));
     }
-    // 详情行：选中帧的协议字段与全量载荷（未选中=最新帧）
-    std::wstring detail = L"详情：暂无 ESB 帧（等待 nRF24 兼容设备发报）";
-    if (!app.esb_records.empty()) {
-        const std::size_t sel =
-            std::min<std::size_t>(std::max(app.esb_sel, 0), app.esb_records.size() - 1);
+    // 详情面板（#103）：四行结构化解读——帧结构/载荷解读/发包节奏/载荷 hex
+    // （选中帧；未选中=最新帧）
+    std::vector<std::wstring> detail_lines;
+    if (app.esb_records.empty()) {
+        detail_lines.push_back(L"详情：暂无 ESB 帧——等待 2.4G 设备发报"
+                               L"（nRF24/兼容芯片：鼠标/键盘/遥控/传感）");
+    } else {
+        const std::size_t sel = std::min<std::size_t>(
+            app.esb_sel < 0 ? std::size_t(0) : std::size_t(app.esb_sel),
+            app.esb_records.size() - 1);
         const auto& r = app.esb_records[app.esb_records.size() - 1 - sel];
-        std::wstring dt = L"详情 addr:";
+        std::wstring addr_hex;
         for (const unsigned char a : r.address) {
             wchar_t ab[8];
             swprintf(ab, 8, L"%02X", a);
-            dt += ab;
+            addr_hex += ab;
         }
-        wchar_t dhead[128];
-        swprintf(dhead, 128, L"（%u 字节）  CRC16✓  PID:%u  NO_ACK:%s  质量:%.2f  "
-                             L"峰值:%.1f dB   载荷[%u]: ",
-                 unsigned(r.address.size()), r.pid, r.no_ack ? L"是" : L"否",
-                 double(r.quality), r.peak_db,
+        // 行 1：帧结构逐字段（ESB 空口：前导+地址+PCF+载荷+CRC）
+        wchar_t l1[192];
+        swprintf(l1, 192,
+                 L"帧结构：前导 AA | 地址 %uB %s%s | PCF(长 %u/PID %u/"
+                 L"NO_ACK %s) | 载荷 %uB | CRC16 ✓",
+                 unsigned(r.address.size()), addr_hex.c_str(),
+                 r.interp.vendor.empty()
+                     ? L""
+                     : (L"（" + widen(r.interp.vendor) + L"）").c_str(),
+                 unsigned(r.payload.size()), r.pid, r.no_ack ? L"是" : L"否",
                  unsigned(r.payload.size()));
-        dt += dhead;
-        dt += widen(hackrftool::dsp::hex_dump(r.payload));
-        detail = std::move(dt);
+        detail_lines.push_back(l1);
+        // 行 2：载荷解读（启发式，全部"疑似"）
+        {
+            std::wstring l2 = L"载荷解读：";
+            if (r.payload.empty()) {
+                l2 += L"零长载荷（链路层保持/ACK 型，无应用数据）";
+            } else if (r.interp.looks_encrypted) {
+                wchar_t b[64];
+                swprintf(b, 64, L"熵 %.1f bit/B（高互异）→ 疑似加密/随机化载荷",
+                         double(r.interp.entropy_bits));
+                l2 += b;
+                l2 += L"，明文协议无法直接解读";
+            } else if (r.interp.all_zero) {
+                l2 += L"全零 → 空保持包（设备在线但无数据发送，常见于鼠标静止）";
+            } else {
+                wchar_t b[64];
+                swprintf(b, 64, L"熵 %.1f bit/B", double(r.interp.entropy_bits));
+                l2 += b;
+                if (r.interp.seq_byte >= 0) {
+                    wchar_t s[48];
+                    swprintf(s, 48, L"；字节 %u 疑似包序号（跨帧 +1）",
+                             unsigned(r.interp.seq_byte));
+                    l2 += s;
+                }
+                if (r.interval_ms == 0) {
+                    l2 += L"；该地址首帧，无差分样本";
+                } else if (!r.interp.diff_bytes.empty()) {
+                    l2 += L"；与上一帧差异字节：";
+                    for (const unsigned d : r.interp.diff_bytes) {
+                        wchar_t db[12];
+                        swprintf(db, 12, L"%u ", d);
+                        l2 += db;
+                    }
+                    l2 += L"（变化字节≈按键/移动/传感值）";
+                } else {
+                    l2 += L"；与上一帧内容相同";
+                }
+            }
+            detail_lines.push_back(std::move(l2));
+        }
+        // 行 3：发包节奏 + 同地址统计（回报率 → 设备类型推测）
+        {
+            unsigned same_total = 0, same_retx = 0;
+            for (const auto& e : app.esb_records) {
+                if (e.address != r.address) continue;
+                ++same_total;
+                if (&e != &r && e.pid == r.pid) ++same_retx;
+            }
+            std::wstring l3 = L"发包节奏：";
+            if (r.interval_ms > 0) {
+                const float hz = 1000.0f / float(r.interval_ms);
+                wchar_t b[96];
+                swprintf(b, 96, L"距上一帧 %u ms（≈%.0f Hz", r.interval_ms, hz);
+                l3 += b;
+                // 常见外设回报率：125/250/500/1000 Hz；<10 Hz 多为遥控/传感
+                if (hz >= 900) l3 += L"，满速回报";
+                else if (hz >= 400) l3 += L"，电竞外设常见";
+                else if (hz >= 100) l3 += L"，普通外设回报率";
+                else if (hz >= 30) l3 += L"，交互设备节奏";
+                else l3 += L"，低频发送（遥控/传感风格）";
+                l3 += L"）";
+            } else {
+                l3 += L"该地址首帧（无间隔样本）";
+            }
+            wchar_t tail[96];
+            swprintf(tail, 96, L" · 同地址累计 %u 帧 · 其中重传 %u",
+                     same_total, same_retx);
+            l3 += tail;
+            detail_lines.push_back(std::move(l3));
+        }
+        // 行 4：信号质量 + 载荷 hex
+        {
+            wchar_t l4[128];
+            swprintf(l4, 128, L"质量：GFSK 符号 %.0f%%  峰值 %.1f dBFS   载荷[%u]:",
+                     double(r.quality) * 100.0 + 0.5, double(r.peak_db),
+                     unsigned(r.payload.size()));
+            std::wstring l = l4;
+            l += widen(hackrftool::dsp::hex_dump(r.payload));
+            detail_lines.push_back(std::move(l));
+        }
     }
     flux::Props detail_p;
-    detail_p.text_align = flux::Align::start;
-    auto detail_el = flux::ui::caption(pal, detail, std::move(detail_p));
+    detail_p.direction = flux::Direction::column;
+    detail_p.gap = 2.0f;
+    auto detail_el = flux::view(std::move(detail_p));
+    for (auto& line : detail_lines) {
+        flux::Props lp;
+        lp.text_align = flux::Align::start;
+        lp.font_size_pt = 12.0f;
+        lp.text_color = pal.text;
+        detail_el->children.push_back(
+            flux::ui::caption(pal, line, std::move(lp)));
+    }
 
     // 列表（最新 60 条）：视口必须 flex_grow 占满剩余高度，否则塌 0 不渲染
     flux::Props list_p;
