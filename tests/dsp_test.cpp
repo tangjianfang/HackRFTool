@@ -12,6 +12,7 @@
 #include "dsp/analyzer.hpp"
 #include "app/settings.hpp"
 #include "dsp/meteor.hpp"
+#include "dsp/ble.hpp"
 #include "dsp/meteor_vitab.hpp"
 #include "dsp/meteor_frame.hpp"
 #include "dsp/orbit.hpp"
@@ -571,6 +572,124 @@ static void test_esb_noise() {
         b = (lcg >> 31) & 1u;
     }
     check(hackrftool::dsp::esb_scan(bits).empty(), "ESB 噪声无帧");
+}
+
+// ---- BLE 广播包链路（#108）--------------------------------------------------
+
+// 测试侧打包器：前导+AA（不白化）+ 白化(PDU+CRC24)——与生产 ble_scan 对偶
+static std::vector<std::uint8_t> ble_pack_adv(unsigned channel,
+                                              const std::vector<unsigned char>& adv_a,
+                                              const std::string& name,
+                                              const std::vector<unsigned char>& extra_ad) {
+    using hackrftool::dsp::ble_crc24;
+    using hackrftool::dsp::ble_whiten;
+    // PDU：头 2B（type=0 ADV_IND，TxAdd=1）+ AdvA + AD(0x01 flags) + AD(0x09 name)
+    std::vector<std::uint8_t> payload(adv_a.begin(), adv_a.end());
+    payload.push_back(2);      // AD len
+    payload.push_back(0x01);   // flags
+    payload.push_back(0x06);   // LE 一般可发现
+    if (!name.empty()) {
+        payload.push_back(unsigned char(name.size() + 1));
+        payload.push_back(0x09);   // Complete Local Name
+        for (const char c : name) payload.push_back(unsigned char(c));
+    }
+    payload.insert(payload.end(), extra_ad.begin(), extra_ad.end());
+    std::vector<std::uint8_t> frame;
+    frame.push_back(unsigned char(0x40));   // hdr0: type=0, TxAdd=1
+    frame.push_back(unsigned char(payload.size()));
+    frame.insert(frame.end(), payload.begin(), payload.end());
+    const std::uint32_t crc = ble_crc24(frame.data(), frame.size(), 0x555555);
+    frame.push_back(unsigned char(crc & 0xFF));
+    frame.push_back(unsigned char((crc >> 8) & 0xFF));
+    frame.push_back(unsigned char((crc >> 16) & 0xFF));
+    ble_whiten(frame.data(), frame.size(), channel);
+    std::vector<std::uint8_t> bits;
+    const auto push8 = [&bits](unsigned char b) {
+        for (int k = 0; k < 8; ++k) bits.push_back((b >> k) & 1u);   // LSB-first
+    };
+    push8(0xAA);   // 前导
+    push8(0xD6);   // 广播 AA 0x8E89BED6，空口 LSB 字节序
+    push8(0xBE);
+    push8(0x89);
+    push8(0x8E);
+    for (const std::uint8_t b : frame) push8(b);
+    return bits;
+}
+
+static void test_ble_roundtrip() {
+    using namespace hackrftool::dsp;
+    const std::vector<unsigned char> mac = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+    const std::string name = "HackRF-BLE";
+    const std::vector<unsigned char> mfr = {5, 0xFF, 0x59, 0x00, 0xAB, 0xCD};  // AD len5：type+company2B+数据2B
+    auto bits = ble_pack_adv(37, mac, name, mfr);
+    const auto frames = ble_scan(bits, 37);
+    check(frames.size() == 1, "BLE 广播包还原 1 帧");
+    if (!frames.empty()) {
+        const auto& f = frames[0].pdu;
+        check(f.type == 0, "ADV_IND 类型解析");
+        check(f.tx_add, "TxAdd 解析");
+        check(f.adv_a == mac, "AdvA（设备 MAC）还原");
+        check(f.name == name, "设备名（AD 0x09 Complete Local Name）还原");
+        check(f.flags == 0x06, "发现模式 flags 解析");
+        check(f.manufacturer.size() == 4 && f.manufacturer[0] == 0x59,
+              "厂商数据（AD 0xFF，Nordic company id）还原");
+        check(frames[0].bit_offset == 0, "帧起始位偏移");
+    }
+}
+
+static void test_ble_multi_channel_and_crc() {
+    using namespace hackrftool::dsp;
+    // 三个广播信道（37/38/39）各自白化种子都应解出
+    for (const unsigned ch : {37u, 38u, 39u}) {
+        auto bits = ble_pack_adv(ch, {1, 2, 3, 4, 5, 6}, "CH-Test", {});
+        const auto frames = ble_scan(bits, ch);
+        check(frames.size() == 1 && frames[0].pdu.name == "CH-Test",
+              "广播信道各自白化种子解码");
+    }
+    // 信道错配（用 37 白化、按 38 解）→ CRC 必然失败
+    auto bits = ble_pack_adv(37, {1, 2, 3, 4, 5, 6}, "X", {});
+    check(ble_scan(bits, 38).empty(), "白化信道错配被 CRC 拦截");
+    // 比特翻转 → CRC 拒绝
+    bits = ble_pack_adv(39, {1, 2, 3, 4, 5, 6}, "CRC", {});
+    bits[bits.size() / 2] ^= 1u;
+    check(ble_scan(bits, 39).empty(), "BLE 载荷比特错误被 CRC24 拒绝");
+    // CRC24 参考实现（位级 LSB-first 独立算式）交叉验证
+    {
+        const std::vector<std::uint8_t> data = {0x02, 0x01, 0x06, 0x0A};
+        std::uint32_t crc = 0x555555;
+        for (const std::uint8_t b : data)
+            for (int k = 0; k < 8; ++k) {
+                const unsigned bit = (b >> k) & 1u;
+                const unsigned fb = (crc & 1u) ^ bit;
+                crc >>= 1;
+                if (fb != 0u) crc ^= 0x00065B;
+            }
+        check(ble_crc24(data.data(), data.size(), 0x555555) == (crc & 0xFFFFFF),
+              "CRC24 与位级参考实现一致");
+    }
+}
+
+static void test_ble_noise_and_scan_rsp() {
+    using namespace hackrftool::dsp;
+    // 随机比特无帧
+    std::vector<std::uint8_t> bits(3000, 0);
+    unsigned lcg = 7u;
+    for (auto& b : bits) {
+        lcg = lcg * 1664525u + 1013904223u;
+        b = (lcg >> 31) & 1u;
+    }
+    check(ble_scan(bits, 37).empty(), "BLE 噪声无帧");
+    // 白化自逆
+    std::vector<std::uint8_t> d = {0xDE, 0xAD, 0xBE, 0xEF};
+    const auto orig = d;
+    ble_whiten(d.data(), d.size(), 37);
+    ble_whiten(d.data(), d.size(), 37);
+    check(d == orig, "白化自逆（加解扰同一 LFSR）");
+    // PDU 类型名（UI 显示）
+    check(std::string(ble_pdu_name(0)).find("可连接") != std::string::npos,
+          "ADV_IND 类型名");
+    check(std::string(ble_pdu_name(4)).find("扫描响应") != std::string::npos,
+          "SCAN_RSP 类型名");
 }
 
 // 合成射频波 → int8 交错字节（幅度缩放 + 前后垫静默）
@@ -1742,6 +1861,9 @@ int main() {
     test_esb_interpret();
     test_esb_corruption_rejected();
     test_esb_noise();
+    test_ble_roundtrip();
+    test_ble_multi_channel_and_crc();
+    test_ble_noise_and_scan_rsp();
     test_end_to_end_pipeline();
     test_iq_recorder_contract_edges();
     test_burst_detector_edges();

@@ -35,6 +35,7 @@ add_executable(HackRFTool WIN32
     src/app/telemetry.cpp
     src/dsp/analyzer.cpp
     src/dsp/apt.cpp
+    src/dsp/ble.cpp
     src/dsp/burst_detector.cpp
     src/dsp/channel_monitor.cpp
     src/dsp/esb.cpp
@@ -113,6 +114,7 @@ flux_apply_compiler_options(PassCheck)
 
 add_executable(HackRFToolTest tests/dsp_test.cpp src/app/settings.cpp src/app/telemetry.cpp src/dsp/analyzer.cpp
                               src/dsp/apt.cpp
+                              src/dsp/ble.cpp
                               src/dsp/burst_detector.cpp src/dsp/channel_monitor.cpp
                               src/dsp/esb.cpp src/dsp/fft.cpp src/dsp/fm.cpp
                               src/dsp/gfsk.cpp
