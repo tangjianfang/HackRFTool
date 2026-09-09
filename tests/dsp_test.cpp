@@ -492,6 +492,16 @@ static void test_esb_pcf() {
     }
 }
 
+// 地址过滤（#102）：空过滤器=全匹配；否则全字节精确匹配；长度不等不匹配
+static void test_esb_addr_match() {
+    using hackrftool::dsp::addr_match;
+    const std::vector<std::uint8_t> addr = {0x74, 0xF7, 0x70, 0x17};
+    check(addr_match(addr, {}), "空过滤器全匹配");
+    check(addr_match(addr, {0x74, 0xF7, 0x70, 0x17}), "全字节精确匹配");
+    check(!addr_match(addr, {0x74, 0xF7}), "长度不等不匹配（不做前缀匹配）");
+    check(!addr_match(addr, {0x74, 0xF7, 0x70, 0x18}), "尾字节不同不匹配");
+}
+
 static void test_esb_corruption_rejected() {
     const std::vector<unsigned char> addr = {0x12, 0x34, 0x56};
     const std::vector<unsigned char> payload = {0xDE, 0xAD};
@@ -1359,6 +1369,8 @@ static void test_settings_roundtrip() {
     s.sig_cat = 2;
     s.sig_online = 0;
     s.sig_sort = 1;
+    s.cap_addr_filter = "74F7";
+    s.cap_addr_only = true;
     const auto t = hackrftool::app::serialize(s);
     const auto back = hackrftool::app::deserialize(t);
     check(back.has_value(), "settings 序列化→反序列化成功");
@@ -1373,6 +1385,7 @@ static void test_settings_roundtrip() {
     check(b.sig_cat == 2 && !b.sig_online && b.sig_sort == 1 &&
               b.audio_dev == 1 && b.symrate_idx == 1,
           "筛选/设备/符号率往返");
+    check(b.cap_addr_filter == "74F7" && b.cap_addr_only, "抓包地址过滤往返（#102）");
     // 容错：垃圾行、越界值、未知键、缺字段（保留默认）
     const auto mix = hackrftool::app::deserialize(
         "# comment\njunk line no tab\n"
@@ -1638,6 +1651,7 @@ int main() {
     test_live_bursts();
     test_esb_roundtrip();
     test_esb_pcf();
+    test_esb_addr_match();
     test_esb_corruption_rejected();
     test_esb_noise();
     test_end_to_end_pipeline();

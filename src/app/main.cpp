@@ -62,6 +62,16 @@ std::wstring widen(const std::string& s) {
     return w;
 }
 
+std::string narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), int(w.size()),
+                                      nullptr, 0, nullptr, nullptr);
+    std::string s(size_t(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), int(w.size()), s.data(), n,
+                        nullptr, nullptr);
+    return s;
+}
+
 // 一位小数的宽字符串（统计展示用）
 std::wstring wd1(double v) {
     wchar_t buf[32];
@@ -122,6 +132,10 @@ struct App {
     };
     std::vector<EsbRecord> esb_records;         // 新在尾；上限 1000 淘汰最旧
     int esb_sel = 0;                            // 详情选中（0=最新，列表行点击回写）
+    std::wstring cap_addr_filter;               // 地址过滤 hex 文本（#102，每帧从控件读）
+    bool cap_addr_only = false;                 // 仅存指定地址的帧
+    HWND edit_addr = nullptr;
+    HWND check_addrf = nullptr;
 
     // ---- 控件值（#52 起由原生控件持有；内容区每帧重建，普通字段即够） ----
     bool running = false;
@@ -1067,6 +1081,27 @@ void record_toggle(App& app) {
 }
 
 // 突发行文本（懒生成 + 缓存）：时间/时长/峰值 + GFSK 前 8 字节 hex + ESB 帧识别
+// 地址过滤 hex 文本 → 字节序列（#102）：容忍空格/冒号/连字符分隔；
+// 非法字符 → 空序列（空=不过滤）；奇数位丢弃尾半字节
+std::vector<std::uint8_t> parse_hex_filter(const std::wstring& s) {
+    std::vector<std::uint8_t> out;
+    int nib = -1;
+    for (const wchar_t c : s) {
+        int v;
+        if (c >= L'0' && c <= L'9') v = int(c - L'0');
+        else if (c >= L'A' && c <= L'F') v = int(c - L'A') + 10;
+        else if (c >= L'a' && c <= L'f') v = int(c - L'a') + 10;
+        else if (c == L' ' || c == L':' || c == L'-') continue;
+        else return {};
+        if (nib < 0) nib = v;
+        else {
+            out.push_back(std::uint8_t((nib << 4) | v));
+            nib = -1;
+        }
+    }
+    return out;
+}
+
 std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
                             double sample_rate_hz) {
     if (const auto it = app.row_cache.find(b.start_sample); it != app.row_cache.end())
@@ -1135,8 +1170,15 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
             const auto frames = hackrftool::dsp::esb_scan(r.bits);
             if (!frames.empty()) {
                 app.esb_hits.fetch_add(unsigned(frames.size()));
-                // #101：结构化入账——专用列表/详情的数据源（上限 1000 淘汰最旧）
+                // #101：结构化入账——专用列表/详情的数据源（上限 1000 淘汰
+                // 最旧）；#102：仅此地址开启时按全字节精确匹配过滤
+                const std::vector<std::uint8_t> filt =
+                    app.cap_addr_only ? parse_hex_filter(app.cap_addr_filter)
+                                      : std::vector<std::uint8_t>{};
                 for (const auto& fr : frames) {
+                    if (app.cap_addr_only &&
+                        !hackrftool::dsp::addr_match(fr.address, filt))
+                        continue;
                     App::EsbRecord rec;
                     rec.tick = GetTickCount64();
                     rec.start_sample = b.start_sample;
@@ -1215,6 +1257,14 @@ std::wstring esb_row_text(App& app, std::size_t idx_from_newest) {
 
 flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
     const double fs_hz = kRatesMsps[size_t(app.rate_index)] * 1e6;
+    // #102：地址过滤文本每帧从控件读（输入即时生效，无需回车）
+    if (app.edit_addr != nullptr) {
+        wchar_t buf[48] = {};
+        GetWindowTextW(app.edit_addr, buf, 48);
+        app.cap_addr_filter = buf;
+    }
+    const bool filt_bad =
+        app.cap_addr_only && parse_hex_filter(app.cap_addr_filter).empty();
 
     // 关键信号横幅：ESB 帧计数 + 最新解出帧的地址/载荷实时显示（M5 教训：
     // ESB✓ 埋在 60 行文本里无法一眼识别关键信号）
@@ -1240,6 +1290,11 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
         key->children.push_back(flux::ui::caption(
             pal, L"检测到 nRF24 兼容帧时在此实时显示地址与载荷", std::move(key_text_p)));
     }
+    if (app.cap_addr_only)   // #102：过滤状态横幅提示
+        key->children.push_back(flux::ui::badge(
+            pal, filt_bad ? flux::ui::BadgeKind::warning : flux::ui::BadgeKind::info,
+            filt_bad ? L"地址过滤：hex 格式非法"
+                     : L"仅地址 " + app.cap_addr_filter));
 
     // 概览：计数加粗独立成段，操作提示弱化为次级说明（关键信息不再埋没）
     flux::Props count_p;
@@ -1951,6 +2006,8 @@ enum : int {
     IDC_COMBO_Y,
     IDC_PANLEFT,
     IDC_PANRIGHT,
+    IDC_EDIT_ADDR,
+    IDC_CHECK_ADDRF,
     IDC_PAGE_MAX,
 };
 
@@ -2013,6 +2070,16 @@ void apply_page_default(App& app) {
     s.stereo_opt = app.stereo_opt;
     s.spec_zoom_idx = app.spec_zoom_idx;
     s.spec_y_idx = app.spec_y_idx;   // #89 补：此前 schema 有键但从不写
+    // #102：地址过滤（只留 hex 字符，防 TSV 分隔符被污染）
+    {
+        std::string hex;
+        for (const wchar_t c : app.cap_addr_filter)
+            if ((c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'F') ||
+                (c >= L'a' && c <= L'f'))
+                hex += char(c);
+        s.cap_addr_filter = hex;
+    }
+    s.cap_addr_only = app.cap_addr_only;
     s.threshold = app.threshold;
     s.burst_thr = app.burst_thr;
     s.symrate_idx = app.symrate_idx;
@@ -2039,6 +2106,8 @@ void restore_settings(App& app, const hackrftool::app::Settings& s) {
     app.stereo_opt = s.stereo_opt;
     app.spec_zoom_idx = s.spec_zoom_idx;
     app.spec_y_idx = s.spec_y_idx;   // #89 补：schema 有键此前未搬运
+    app.cap_addr_filter = widen(s.cap_addr_filter);   // #102
+    app.cap_addr_only = s.cap_addr_only;
     app.threshold = s.threshold;
     app.burst_thr = s.burst_thr;
     app.symrate_idx = s.symrate_idx;
@@ -2054,6 +2123,9 @@ void restore_settings(App& app, const hackrftool::app::Settings& s) {
     SendMessageW(app.combo_symrate, CB_SETCURSEL, app.symrate_idx, 0);
     SendMessageW(app.combo_zoom, CB_SETCURSEL, app.spec_zoom_idx, 0);   // #89 检查员补
     SendMessageW(app.combo_y, CB_SETCURSEL, app.spec_y_idx, 0);
+    SetWindowTextW(app.edit_addr, widen(s.cap_addr_filter).c_str());   // #102
+    SendMessageW(app.check_addrf, BM_SETCHECK,
+                 s.cap_addr_only ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(app.track_lna, TBM_SETPOS, TRUE, LPARAM(app.lna));
     SendMessageW(app.track_vga, TBM_SETPOS, TRUE, LPARAM(app.vga));
     SetWindowTextW(app.lbl_lna, (L"LNA " + std::to_wstring(app.lna)).c_str());
@@ -2597,6 +2669,16 @@ void create_settings_row(App& app) {
         SendMessageW(app.combo_symrate, CB_ADDSTRING, 0, LPARAM(r));
     SendMessageW(app.combo_symrate, CB_SETCURSEL, WPARAM(app.symrate_idx), 0);
     slot(app.row_capture, app.combo_symrate, 80, true);
+    // #102：指定地址抓包——hex 输入 + 仅此地址开关（过滤帧存储与列表）
+    slot(app.row_capture,
+         make_ctl(app, WC_STATICW, L"地址", SS_LEFT | SS_CENTERIMAGE, 0, 0), 36);
+    app.edit_addr = make_ctl(app, WC_EDITW, L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
+                             0, IDC_EDIT_ADDR);
+    slot(app.row_capture, app.edit_addr, 90);
+    app.check_addrf =
+        make_ctl(app, WC_BUTTONW, L"仅此地址", BS_AUTOCHECKBOX | WS_TABSTOP, 0,
+                 IDC_CHECK_ADDRF);
+    slot(app.row_capture, app.check_addrf, 76);
     // #88：抓包特有动作归位（原工具栏「清空」）
     slot(app.row_capture,
          make_ctl(app, WC_BUTTONW, L"清空", BS_PUSHBUTTON | WS_TABSTOP, 0,
@@ -3530,6 +3612,11 @@ void on_command(App& app, int id, int code, HWND from) {
         break;
     case IDC_PANLEFT: pan_spectrum(app, -1); break;
     case IDC_PANRIGHT: pan_spectrum(app, +1); break;
+    case IDC_CHECK_ADDRF:   // #102：仅此地址开关
+        if (code == BN_CLICKED)
+            app.cap_addr_only =
+                SendMessageW(app.check_addrf, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        break;
     case IDC_CHECK_AMP:
         if (code == BN_CLICKED) {
             app.amp = SendMessageW(app.check_amp, BM_GETCHECK, 0, 0) == BST_CHECKED;

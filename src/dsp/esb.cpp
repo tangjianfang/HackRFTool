@@ -81,6 +81,12 @@ std::vector<EsbFrame> esb_scan(const std::vector<std::uint8_t>& bits) {
     return out;
 }
 
+bool addr_match(const std::vector<std::uint8_t>& address,
+                const std::vector<std::uint8_t>& filter) noexcept {
+    if (filter.empty()) return true;
+    return address == filter;
+}
+
 std::string hex_dump(const std::vector<std::uint8_t>& bytes) {
     static const char* kHex = "0123456789ABCDEF";
     std::string out;

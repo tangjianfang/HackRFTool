@@ -52,6 +52,8 @@ std::string serialize(const Settings& s) {
     os << "sig_cat\t" << s.sig_cat << "\n";
     os << "sig_online\t" << s.sig_online << "\n";
     os << "sig_sort\t" << s.sig_sort << "\n";
+    os << "cap_addr_filter\t" << s.cap_addr_filter << "\n";
+    os << "cap_addr_only\t" << (s.cap_addr_only ? 1 : 0) << "\n";
     return os.str();
 }
 
@@ -75,6 +77,14 @@ std::optional<Settings> deserialize(std::string_view text) {
         const std::string_view key = line.substr(0, tab);
         const std::string val(line.substr(tab + 1));
         // strtod 失败返回 0 会被 int 约束误收（"abc"→vol=0）：endptr 必须
+        // 字符串值键必须在数值闸门之前处理（"74F7" 会被 strtod 截断成
+        // 74 + 杂物 F7 而误拒，#102 测试实锤）
+        if (key == "cap_addr_filter") {
+            s.cap_addr_filter = val;   // hex 过滤文本原样存（解析在 UI 侧）
+            any = true;
+            if (eol == std::string_view::npos) break;
+            continue;
+        }
         // 走到末尾（允许尾随空白）才算数值
         char* vp = nullptr;
         const double d = std::strtod(val.c_str(), &vp);
@@ -128,6 +138,8 @@ std::optional<Settings> deserialize(std::string_view text) {
             if (clamp_int(std::llround(d), 0, 1, i)) { s.sig_online = i; any = true; }
         } else if (key == "sig_sort") {
             if (clamp_int(std::llround(d), 0, 1, i)) { s.sig_sort = i; any = true; }
+        } else if (key == "cap_addr_only") {
+            if (clamp_int(std::llround(d), 0, 1, i)) { s.cap_addr_only = i != 0; any = true; }
         }
         if (eol == std::string_view::npos) break;
     }

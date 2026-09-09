@@ -21,6 +21,11 @@ struct EsbFrame {
 
 [[nodiscard]] std::vector<EsbFrame> esb_scan(const std::vector<std::uint8_t>& bits);
 
+// 地址过滤（#102）：filter 空=全匹配；否则全字节精确匹配（不做前缀匹配——
+// 窄带误配会混入干扰源）
+[[nodiscard]] bool addr_match(const std::vector<std::uint8_t>& address,
+                              const std::vector<std::uint8_t>& filter) noexcept;
+
 // 字节序列 → 大写 hex 文本，空格分隔（"FB 50 00"）；空输入 → 空串
 [[nodiscard]] std::string hex_dump(const std::vector<std::uint8_t>& bytes);
 
