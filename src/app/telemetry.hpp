@@ -62,10 +62,7 @@ private:
     std::atomic<bool> debug_{false};  // relaxed 语义足够（开关不参与数据竞争）
     std::vector<Event> ring_;          // 最近 kRing 条
     std::uint64_t total_ = 0;          // 累计条数（未清零）
-    void* file_ = nullptr;             // FILE*（void* 防头文件带 cstdio）
-    std::size_t max_bytes_ = 1 << 20;
-    std::size_t written_ = 0;
-    std::wstring path_;
+    void* spd_ = nullptr;              // spdlog logger（堆上 shared_ptr；void* 防头文件带 spdlog）
     static constexpr std::size_t kRing = 600;
 };
 

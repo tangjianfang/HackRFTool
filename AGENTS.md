@@ -38,6 +38,7 @@ cmake --build --preset x64-release && ctest --preset x64-release
 - **反闪烁铁律（L8/L9/L10）**：主窗口类样式禁用 CS_HREDRAW/CS_VREDRAW；**禁用 WS_EX_COMPOSITED（与 DComp 子窗冲突，工具栏会变黑）**；**工具栏禁用 TBSTYLE_FLAT**（透明样式需父窗补画背景，热跟踪重绘=黑底——L10）；WM_ERASEBKGND 返 1、WM_PAINT 只填 `ps.rcPaint`、**WM_PRINTCLIENT 填 BTNFACE**（透明子控件背景请求）；子控件与内容区 MoveWindow 一律 bRepaint=FALSE；状态栏文本缓存+4Hz 节流；内容区拖拽冻结 = `live_sizing`（ENTERSIZEMOVE 置位）期间 layout 早退——**必须配套自愈**：几何看门狗（build 心跳核对 host 实际/目标矩形，`host_target` 与 layout 共用算法，漂移一帧内校正）+ 停顿解冻（窗口尺寸停变 500ms 即解冻，`last_size_ms`）。ENTERSIZEMOVE/EXITSIZEMOVE 不保证成对、且跨进程伪造不被投递——任何依赖消息配对的机制都要有看门狗兜底
 - 已知上游限制：WinFlux `Host::create` 硬编码 SW_SHOW → 启动时顶层窗闪现一帧后才重父化（wontfix-upstream，建议上游加 Config.visible）；PrintWindow 截图会漏画原生子控件 → 验证 UI 用 `tools/screenshot-fg.ps1`（前台 BitBlt）
 - 工程规范：C++20 / 仅 x64（CMake 强制）/ `/W4` 零告警（`flux_apply_compiler_options` 统一施加）；WinFlux 仓库经 `add_subdirectory` 引入（`WINFLUX_ROOT` 默认 `C:/tjf/github/WinFlux`），上游组件问题本仓库不可修，只记录
+- **spdlog（#105 用户授权的三方依赖唯一例外）**：源码 `C:/tjf/github/spdlog`（v1.15.1 浅克隆），`add_subdirectory` 同 MSVC 工具链构建出**静态 spdlog.lib 链入 exe**（无 spdlog.dll，exe 自包含；dumpbin 依赖清单已核）；`telemetry.cpp` 的文件落盘走其 `rotating_file_sink_mt`（pattern `%v` 原始 JSONL 行 + trace 级 flush 保持崩溃安全），**轮转命名是 `name.1.jsonl`（序号在扩展名前，与手写时代的 `name.jsonl.1` 不同）**；JSONL 行格式与 log-assert 工具完全兼容
 
 ## 已知坑
 

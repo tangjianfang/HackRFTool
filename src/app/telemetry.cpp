@@ -4,6 +4,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <string>
+
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/rotating_file_sink.h>
 
 namespace hackrftool::log {
 
@@ -62,12 +67,20 @@ std::string to_jsonl(const Event& e) {
 void Logger::open(const std::wstring& path, std::size_t max_bytes) {
     std::lock_guard<std::mutex> g(mtx_);
     close_locked();   // 复用锁内关闭（见下）
-    path_ = path;
-    max_bytes_ = max_bytes;
-    written_ = 0;
     if (path.empty()) return;
-    // 追加模式：进程重启不截断历史（轮转在写入侧按大小触发）
-    file_ = _wfopen(path.c_str(), L"ab");
+    // spdlog 轮转 sink（#105）：追加模式续写，超限改名 .1/.2（与原手写
+    // rotate 语义一致：主文件 + 2 份归档）；宽路径转 UTF-8（sink 收窄串）
+    std::string path8;
+    path8.reserve(path.size());
+    for (const wchar_t w : path)
+        path8 += static_cast<char>(w < 128 ? w : '?');
+    auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+        path8, max_bytes, 2);
+    auto spd = std::make_shared<spdlog::logger>("telemetry", std::move(sink));
+    spd->set_pattern("%v");                        // 原始 JSONL 行（自带 ts/level）
+    spd->set_level(spdlog::level::trace);
+    spd->flush_on(spdlog::level::trace);           // 每条 fflush——崩溃也不丢
+    spd_ = new std::shared_ptr<spdlog::logger>(std::move(spd));
 }
 
 void Logger::close() noexcept {
@@ -76,19 +89,9 @@ void Logger::close() noexcept {
 }
 
 void Logger::close_locked() noexcept {
-    if (file_ != nullptr) {
-        std::fclose(static_cast<std::FILE*>(file_));
-        file_ = nullptr;
-    }
-}
-
-// 轮转：hackrftool.jsonl 超限时改名 .1（旧 .1→.2，.2 丢弃），共保 3 份
-static void rotate(const std::wstring& path) {
-    const std::wstring p2 = path + L".2";
-    const std::wstring p1 = path + L".1";
-    _wremove(p2.c_str());
-    (void)_wrename(p1.c_str(), p2.c_str());
-    (void)_wrename(path.c_str(), p1.c_str());
+    // 堆上 shared_ptr 析构经 spdlog 关闭句柄（noexcept 下不抛）
+    delete reinterpret_cast<std::shared_ptr<spdlog::logger>*>(spd_);
+    spd_ = nullptr;
 }
 
 void Logger::write(
@@ -109,17 +112,11 @@ void Logger::write(
     if (ring_.size() > kRing)
         ring_.erase(ring_.begin(), ring_.end() - static_cast<long>(kRing));
     ++total_;
-    if (file_ == nullptr) return;
-    written_ += line.size();
-    if (written_ > max_bytes_) {
-        close_locked();
-        rotate(path_);
-        file_ = _wfopen(path_.c_str(), L"wb");
-        written_ = 0;
-        if (file_ == nullptr) return;
-    }
-    std::fwrite(line.data(), 1, line.size(), static_cast<std::FILE*>(file_));
-    std::fflush(static_cast<std::FILE*>(file_));   // 崩溃也不丢已记事件
+    // #105：文件落盘走 spdlog 轮转 sink（%v 原始行；行尾换行由 sink 补，
+    // 构串时去掉 to_jsonl 的 '\n' 防双换行）
+    if (spd_ == nullptr) return;
+    (*reinterpret_cast<const std::shared_ptr<spdlog::logger>*>(spd_))
+        ->info(std::string_view(line).substr(0, line.size() - 1));
 }
 
 std::vector<Event> Logger::tail(std::size_t n) const {

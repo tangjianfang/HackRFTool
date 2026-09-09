@@ -13,6 +13,16 @@ set(WINFLUX_ROOT "C:/tjf/github/WinFlux" CACHE PATH "WinFlux 仓库路径")
 set(MSYS2_UCRT64_BIN "C:/msys64/ucrt64/bin" CACHE PATH "libhackrf 运行时 DLL 目录")
 set(MSYS2_UCRT64_INCLUDE "C:/msys64/ucrt64/include" CACHE PATH "libhackrf 头文件目录")
 
+# spdlog（#105 用户授权引入的三方依赖）：源码 add_subdirectory 与本工程
+# 同工具链（MSVC）同构建，产出静态 .lib 直接链入 exe——无 spdlog.dll，
+# exe 保持自包含。只构建库本身，关掉它的示例/测试/benchmark。
+set(SPDLOG_ROOT "C:/tjf/github/spdlog" CACHE PATH "spdlog 源码路径")
+set(SPDLOG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(SPDLOG_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+add_subdirectory(${SPDLOG_ROOT} spdlog)
+
 # 子目录作用域不回传 CMAKE_MODULE_PATH，须在本工程挂 WinFlux 的 cmake/
 list(APPEND CMAKE_MODULE_PATH "${WINFLUX_ROOT}/cmake")
 add_subdirectory(${WINFLUX_ROOT} winflux)
@@ -47,7 +57,7 @@ add_executable(HackRFTool WIN32
     src/ui/status_text.cpp
     src/ui/views.cpp)
 target_include_directories(HackRFTool PRIVATE src ${MSYS2_UCRT64_INCLUDE})
-target_link_libraries(HackRFTool PRIVATE WinFlux::flux Comdlg32 Dbghelp Comctl32 Winmm Gdiplus Urlmon)
+target_link_libraries(HackRFTool PRIVATE WinFlux::flux spdlog::spdlog Comdlg32 Dbghelp Comctl32 Winmm Gdiplus Urlmon)
 # 清单由 app.rc 内嵌（RT_MANIFEST），关闭链接器自动生成避免 CVT1100 重复
 set_target_properties(HackRFTool PROPERTIES LINK_FLAGS "/MANIFEST:NO")
 flux_apply_compiler_options(HackRFTool)
@@ -114,6 +124,7 @@ add_executable(HackRFToolTest tests/dsp_test.cpp src/app/settings.cpp src/app/te
                               src/dsp/waterfall.cpp src/radio/iq_recorder.cpp
                               src/ui/status_text.cpp)
 target_include_directories(HackRFToolTest PRIVATE src)
+target_link_libraries(HackRFToolTest PRIVATE spdlog::spdlog)
 flux_apply_compiler_options(HackRFToolTest)
 add_test(NAME HackRFToolTest COMMAND HackRFToolTest)
 
