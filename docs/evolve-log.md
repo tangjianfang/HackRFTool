@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 283 断言
-- pointer: #106 信号库交互+悬浮面板 → #107 音频谱/静噪（收音侧遗留）→ 回顾
-- rounds done: 58（…/#105 spdlog 静态引入）
+- pointer: 目标 run（终极=BLE 抓包）：#107 音频谱/静噪 → #108 BLE DSP → #109 BLE 接线 → #110 分层显示 → 回顾
+- rounds done: 59（…/#106 信号库悬浮面板）
 - status: active
 - metrics: findings 69 | fixes 83 | regressions 0（E4 按轮次行累加；本 run +10/+11/0）
 - checkpoint（#97 后，10 轮节点）: 本 run=用户优先 UI 三级架构（#87 重叠根因 place 同线叠放/#88 动作归位/#89 频谱条上移/#90 轴刻度规范/#91 持久化收口 red→green/#92 云图倒计时+UTF-8 乱码/#93 tools ID 漂移误触清空/#94 最小窗口/#95 静默失败遥测/#96 设备错误分流/#97 遥测并发压测）全部 green+progress，断言 251→258；深挖轮入库 12 findings（3P1 已清/6P2 已清/P3 记池）；下一段 #98 README（T4.4/T4.6）→ #99 回顾（重放审计+报告）；灰块占位=WinFlux 上游疑（仅云图页内容顶一排空灰卡，e87-e92 截图持续，本仓库不可修只记录）
