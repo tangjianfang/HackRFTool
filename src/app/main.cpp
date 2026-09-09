@@ -139,6 +139,10 @@ struct App {
     bool cap_addr_only = false;                 // 仅存指定地址的帧
     HWND edit_addr = nullptr;
     HWND check_addrf = nullptr;
+    // #106 信号库假台探测：点击调谐后 2.5s 内静噪从未开 → 自动标离线
+    double probe_mhz = 0.0;
+    unsigned long long probe_until = 0;
+    bool probe_saw_open = false;
 
     // ---- 控件值（#52 起由原生控件持有；内容区每帧重建，普通字段即够） ----
     bool running = false;
@@ -1555,22 +1559,7 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
     return page_el;
 }
 
-// ---- 收音机页（#53/#55 重设计）：信号库列表 + 筛选 + 点击即听 ----------------
-
-// 信号行文本：频率 + 强度条 + dB + 在线点 + 频段名
-std::wstring signal_row_text(const hackrftool::dsp::SignalEntry& e) {
-    wchar_t head[96];
-    swprintf(head, 96, L"%8.3f MHz  ", e.mhz);
-    std::wstring t = head;
-    const int bars = std::clamp(int((e.db + 100.0f) * 16.0f / 60.0f), 0, 16);
-    t += L"[";
-    for (int i = 0; i < 16; ++i) t += (i < bars) ? L"█" : L"·";
-    t += L"] ";
-    swprintf(head, 96, L"%5.0f dB  %s  %s", e.db,
-             e.online ? L"●在线" : L"○离线",
-             hackrftool::dsp::band_of(e.mhz).name);
-    return t + head;
-}
+// ---- 收音机页（#53/#55 重设计）：音频谱 + 频谱（信号库列表已移悬浮面板） -------
 
 flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
     flux::Props page_p;
@@ -1626,45 +1615,18 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
             pal, app.spec_db, app.spec_peak, app.spec_seq));
     }
 
-    // 信号库列表（按筛选条件）：点击行=调谐（#55 零手动输入）
-    using hackrftool::dsp::SigCat;
-    const SigCat cat = app.sig_cat == 0   ? SigCat::radio
-                       : app.sig_cat == 1 ? SigCat::sat
-                       : app.sig_cat == 2 ? SigCat::ism
-                                          : SigCat::all;
-    const auto idx = hackrftool::dsp::filter_signals(
-        app.signals, cat, app.sig_online == 1, app.sig_sort == 0);
-    flux::Props tip_p;
-    tip_p.text_align = flux::Align::start;
-    page_el->children.push_back(flux::ui::caption(
-        pal, idx.empty()
-                 ? L"信号库为空：点工具栏「扫描电台」积累列表；列表行可直接点击收听"
-                 : L"信号库（" + std::to_wstring(idx.size()) +
-                       L" 条，按当前筛选）——点击任意行即调谐收听/收看",
-        std::move(tip_p)));
-    flux::Props list_p;
-    list_p.direction = flux::Direction::column;
-    list_p.gap = 2.0f;
-    auto list = flux::view(std::move(list_p));
-    const std::size_t n_rows = std::min<std::size_t>(idx.size(), 48);
-    for (std::size_t k = 0; k < n_rows; ++k) {
-        const auto& e = app.signals[idx[k]];
-        flux::Props row_p;
-        row_p.text_align = flux::Align::start;
-        row_p.font_size_pt = 12.0f;
-        row_p.bold = e.online;
-        row_p.text_color = e.online ? pal.text : pal.text_secondary;
-        // 点行=调谐（lambda 拷贝频率值，不引用向量内存——列表会增长）
-        const double f = e.mhz;
-        row_p.on_click = [&app, f] { tune_to(app, f); };
-        list->children.push_back(flux::label(signal_row_text(e), std::move(row_p)));
+    // #106：内嵌信号库列表移除——改为悬浮面板停靠主窗右侧（sigdb 弹窗，
+    // 进收音页自动展开，单击即收听）；页内留提示行说明位置
+    {
+        flux::Props tip_p;
+        tip_p.text_align = flux::Align::start;
+        page_el->children.push_back(flux::ui::caption(
+            pal, L"信号库在右侧悬浮面板（本页自动展开；单击行=一键收听，"
+                 L"2.5s 无音频自动标离线）——工具栏「信号库」可开关",
+            std::move(tip_p)));
     }
-    flux::Props scroll_p;
-    scroll_p.flex_grow = 1.0f;
-    page_el->children.push_back(
-        flux::scroll_view(std::move(list), std::move(scroll_p)));
 
-    // 频谱（点击信号=调谐，#55）
+    // 频谱（点击信号=调谐，#55）——flex_grow 占满（列表已移出）
     const double half = half_bw_mhz(app);
     if (!app.frame.db.empty()) {
         page_el->children.push_back(hackrftool::ui::spectrum_view(
@@ -1740,6 +1702,9 @@ flux::ElementPtr weather_display(App& app, const flux::Palette& pal) {
 void sync_chrome(App& app);   // 定义在原生骨架节（工具栏态 + 状态栏文本）
 void save_settings_tick(App& app);   // 设置缓存心跳保存（#57，定义见设置节）
 void sigdb_refresh(App& app);   // 信号库弹窗刷新（#62，定义见弹窗节）
+void sigdb_toggle(App& app);    // 弹窗开关（定义见弹窗节）
+void sigdb_pick(App& app, double mhz);   // 一键收听（#106）
+void dock_sigdb(App& app);      // 悬浮面板停靠主窗右侧（#106）
 void logview_refresh(App& app);  // 日志查看器刷新（#64）
 
 void layout(App& app);        // 定义在原生骨架节（几何摆放；看门狗共用）
@@ -2119,6 +2084,29 @@ flux::ElementPtr build(App& app) {
                      {"avg_db", std::to_string(sum / float(app.frame.db.size()))},
                      {"center_mhz", std::to_string(app.center_mhz)}});
             app.squelch_open.store(open);
+        }
+    }
+
+    // #106 假台探测窗：点击收听后 2.5s 内静噪从未开 → 标离线（噪声台治理）
+    if (app.probe_mhz > 0.0) {
+        if (app.fm_on.load() && app.squelch_open.load()) app.probe_saw_open = true;
+        if (app.probe_saw_open || !app.fm_on.load()) {
+            app.probe_mhz = 0.0;   // 有音频（或链未开）→ 探测通过
+        } else if (GetTickCount64() > app.probe_until) {
+            int marked = 0;
+            for (auto& e : app.signals)
+                if (std::abs(e.mhz - app.probe_mhz) < 0.05) {
+                    e.online = false;
+                    ++marked;
+                }
+            if (marked > 0)
+                (void)hackrftool::dsp::save_signals(
+                    exe_dir_path("signals.tsv").c_str(), app.signals);
+            app.status = L"该台 2.5s 无音频，已自动标记离线（噪声台/假信号）";
+            hackrftool::log::log_telemetry(hackrftool::log::Level::info, "SIGDB",
+                                           "probe.offline",
+                                           {{"mhz", std::to_string(app.probe_mhz)}});
+            app.probe_mhz = 0.0;
         }
     }
 
@@ -3095,6 +3083,7 @@ void layout(App& app) {
 
     // 状态栏（先自适应高，再贴底 + 分段右缘）
     SendMessageW(app.statusbar, WM_SIZE, 0, 0);
+    dock_sigdb(app);   // #106：悬浮信号库随主窗尺寸联动
     RECT sb{};
     GetWindowRect(app.statusbar, &sb);
     const int sb_h = sb.bottom - sb.top;
@@ -3321,7 +3310,8 @@ LRESULT CALLBACK sigdb_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_NOTIFY: {
         const auto* nm = reinterpret_cast<NMHDR*>(lp);
-        if (nm->idFrom == 5001 && nm->code == NM_DBLCLK) {
+        // #106：单击即收听（原仅双击——用户"点了没反应"根因之一）
+        if (nm->idFrom == 5001 && (nm->code == NM_DBLCLK || nm->code == NM_CLICK)) {
             const auto* di =
                 reinterpret_cast<const NMITEMACTIVATE*>(nm);
             wchar_t f[32];
@@ -3331,13 +3321,8 @@ LRESULT CALLBACK sigdb_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             it.pszText = f;
             it.cchTextMax = 32;
             if (SendMessageW(app->sigdb_list, LVM_GETITEMTEXTW,
-                             WPARAM(di->iItem), LPARAM(&it)) > 0) {
-                const double mhz = std::wcstod(f, nullptr);
-                tune_to(*app, mhz);
-                hackrftool::log::log_telemetry(
-                    hackrftool::log::Level::info, "SIGDB", "pick",
-                    {{"mhz", std::to_string(mhz)}});
-            }
+                             WPARAM(di->iItem), LPARAM(&it)) > 0)
+                sigdb_pick(*app, std::wcstod(f, nullptr));
         }
         return 0;
     }
@@ -3354,6 +3339,31 @@ LRESULT CALLBACK sigdb_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     default:
         return DefWindowProcW(wnd, msg, wp, lp);
     }
+}
+
+// #106：一键收听——未接收自动开链开音频，点击即出声；2.5s 假台探测窗
+void sigdb_pick(App& app, double mhz) {
+    if (mhz < 24.0) return;   // 解析失败/空行保护
+    const bool radio_band = mhz >= 87.0 && mhz <= 108.0;
+    if (!app.running) toggle_rx(app);   // 点击→声音（用户"点了没反应"主诉）
+    if (radio_band) ensure_fm(app, true);
+    tune_to(app, mhz);
+    app.probe_mhz = mhz;
+    app.probe_until = GetTickCount64() + 2500;
+    app.probe_saw_open = false;
+    hackrftool::log::log_telemetry(hackrftool::log::Level::info, "SIGDB",
+                                   "pick", {{"mhz", std::to_string(mhz)}});
+}
+
+// #106：悬浮面板停靠主窗右侧内缘（垂直表，随主窗尺寸联动）
+void dock_sigdb(App& app) {
+    if (app.sigdb_wnd == nullptr || app.main_wnd == nullptr) return;
+    RECT mw;
+    GetWindowRect(app.main_wnd, &mw);
+    const int w = 268;
+    int h = (mw.bottom - mw.top) - 120;
+    if (h < 220) h = 220;
+    MoveWindow(app.sigdb_wnd, mw.right - w - 12, mw.top + 90, w, h, TRUE);
 }
 
 void sigdb_toggle(App& app) {
@@ -3374,7 +3384,7 @@ void sigdb_toggle(App& app) {
         RegisterClassW(&wc);
         registered = true;
     }
-    HWND wnd = CreateWindowW(L"HackRFSigdb", L"信号库（双击=调谐）",
+    HWND wnd = CreateWindowW(L"HackRFSigdb", L"信号库（单击=收听）",
                              WS_OVERLAPPEDWINDOW, 80, 120, 420, 420,
                              app.main_wnd, nullptr, GetModuleHandleW(nullptr),
                              nullptr);
@@ -3409,6 +3419,7 @@ void sigdb_toggle(App& app) {
                                    "open", {{"entries",
                                              std::to_string(app.signals.size())}});
     sigdb_refresh(app);
+    dock_sigdb(app);   // #106：默认停靠主窗右侧
 }
 
 // ---- 遥测日志查看器（#64）：tail 弹窗，总数变化才重建 --------------------
@@ -3647,6 +3658,8 @@ void on_command(App& app, int id, int code, HWND from) {
         ensure_fm(app, app.running && app.page < 5);   // 轨道页无需音频链
         update_apt_on(app);
         apply_page_default(app);
+        // #106：进收音页自动展开信号库悬浮面板（一键收听入口）
+        if (app.page == 3 && app.sigdb_wnd == nullptr) sigdb_toggle(app);
         layout(app);
         break;
     case IDC_SWEEP: {
