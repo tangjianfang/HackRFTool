@@ -94,6 +94,9 @@ static void rotate(const std::wstring& path) {
 void Logger::write(
     Level level, std::string_view cat, std::string_view event,
     std::initializer_list<std::pair<std::string, std::string>> kv) {
+    // #104：debug 级门控——关闭时零成本丢弃（构串都不做）
+    if (level == Level::debug && !debug_.load(std::memory_order_relaxed))
+        return;
     Event e;
     e.ts = now_ms();
     e.level = level;

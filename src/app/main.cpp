@@ -1171,6 +1171,16 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
             text += L"  |  ";
             text += hex;
             const auto frames = hackrftool::dsp::esb_scan(r.bits);
+            // #104 debug：逐突发解调结果——漏解/质量差问题时按 burst 回放
+            if (hackrftool::log::Logger::instance().debug())
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::debug, "CAP", "demod.debug",
+                    {{"start", std::to_string(b.start_sample)},
+                     {"samples", std::to_string(b.samples)},
+                     {"peak_db", std::to_string(b.peak_db)},
+                     {"bits", std::to_string(r.bits.size())},
+                     {"q", std::to_string(best_q < 0.f ? 0.f : best_q)},
+                     {"esb", std::to_string(frames.size())}});
             if (!frames.empty()) {
                 app.esb_hits.fetch_add(unsigned(frames.size()));
                 // #101：结构化入账——专用列表/详情的数据源（上限 1000 淘汰
@@ -1210,6 +1220,23 @@ std::wstring burst_row_text(App& app, const hackrftool::dsp::LiveBurst& b,
                             fr.address, fr.payload, hist);
                     }
                     app.esb_records.push_back(std::move(rec));
+                    // #104 debug：逐 ESB 帧入账全字段（hex 载荷完整可回放）
+                    if (hackrftool::log::Logger::instance().debug()) {
+                        std::string addr_hex;
+                        for (const unsigned char a : fr.address) {
+                            char ab[4];
+                            std::snprintf(ab, sizeof ab, "%02X", a);
+                            addr_hex += ab;
+                        }
+                        hackrftool::log::log_telemetry(
+                            hackrftool::log::Level::debug, "ESB", "rec.debug",
+                            {{"addr", addr_hex},
+                             {"len", std::to_string(fr.payload.size())},
+                             {"pid", std::to_string(unsigned(fr.pid))},
+                             {"q", std::to_string(rec.quality)},
+                             {"iv_ms", std::to_string(rec.interval_ms)},
+                             {"payload", hackrftool::dsp::hex_dump(fr.payload)}});
+                    }
                 }
                 constexpr std::size_t kEsbMax = 1000;
                 if (app.esb_records.size() > kEsbMax)
@@ -1880,6 +1907,32 @@ flux::ElementPtr build(App& app) {
     const auto f = app.analyzer.snapshot();
     if (!f.db.empty()) {
         const bool fresh = f.seq != app.frame.seq;
+        // #104 debug 模式逐帧日志：帧级峰值/峰位/噪底/突发/ESB 总量——
+        // 配合 log-assert --order 可逐帧回放（视觉分析的确定性替代）
+        if (fresh && hackrftool::log::Logger::instance().debug()) {
+            float mx = -999.f, sum = 0.f;
+            std::size_t mxi = 0;
+            for (std::size_t i = 0; i < f.db.size(); ++i) {
+                sum += f.db[i];
+                if (f.db[i] > mx) {
+                    mx = f.db[i];
+                    mxi = i;
+                }
+            }
+            const float avg = sum / float(f.db.empty() ? 1 : f.db.size());
+            const double bin = 2.0 * half_bw_mhz(app) /
+                               double(f.db.empty() ? 1 : f.db.size());
+            const double peak_mhz = app.center_mhz - half_bw_mhz(app) +
+                                    double(mxi) * bin + bin / 2.0;
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::debug, "DSP", "frame.debug",
+                {{"seq", std::to_string(f.seq)},
+                 {"peak_db", std::to_string(mx)},
+                 {"peak_mhz", std::to_string(peak_mhz)},
+                 {"avg_db", std::to_string(avg)},
+                 {"bursts", std::to_string(app.live.bursts().size())},
+                 {"esb_total", std::to_string(app.esb_hits.load())}});
+        }
         if (app.sweep_on == 0) {
             if (fresh) {
                 app.waterfall.push(f.db);
@@ -2056,6 +2109,15 @@ flux::ElementPtr build(App& app) {
                 mx = std::max(mx, v);
             }
             const bool open = (mx - sum / float(app.frame.db.size())) > 8.0f;
+            // #104 debug：开合沿记判据数值——收音"没声/噪声"问题逐帧定位
+            if (open != app.squelch_open.load() &&
+                hackrftool::log::Logger::instance().debug())
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::debug, "AUDIO", "squelch.edge",
+                    {{"open", open ? "1" : "0"},
+                     {"peak_db", std::to_string(mx)},
+                     {"avg_db", std::to_string(sum / float(app.frame.db.size()))},
+                     {"center_mhz", std::to_string(app.center_mhz)}});
             app.squelch_open.store(open);
         }
     }
@@ -3972,6 +4034,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     // 遥测日志（#59）：全量 UI/事件/数据记录——脚本断言与问题分析用
     hackrftool::log::Logger::instance().open(
         exe_dir_path("hackrftool.jsonl"));
+    // #104 debug 模式（spdlog 风格级别过滤）：--debug 参数或
+    // HACKRFTOOL_DEBUG=1 开启——放行 Level::debug 逐帧事件
+    //（DSP frame.debug / CAP demod.debug / ESB rec.debug / AUDIO squelch.edge），
+    // 供 log-assert 逐帧回放分析；正常会话 debug 级零成本丢弃
+    {
+        bool dbg = cmd_line != nullptr &&
+                   (wcscmp(cmd_line, L"--debug") == 0 ||
+                    wcscmp(cmd_line, L"debug") == 0);
+        char env[8] = {};
+        if (!dbg &&
+            GetEnvironmentVariableA("HACKRFTOOL_DEBUG", env, sizeof env) > 0 &&
+            env[0] == '1' && env[1] == '\0')
+            dbg = true;
+        if (dbg) {
+            hackrftool::log::Logger::instance().set_debug(true);
+            hackrftool::log::log_telemetry(hackrftool::log::Level::info,
+                                           "LIFE", "debug.on", {});
+        }
+    }
     hackrftool::log::log_telemetry(hackrftool::log::Level::info, "LIFE",
                                    "app.start", {{"build", __DATE__ " " __TIME__}});
 

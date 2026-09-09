@@ -3,6 +3,7 @@
 // 纯 C++ 无 UI/硬件依赖；线程安全；文件轮转防占盘。
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <initializer_list>
 #include <mutex>
@@ -46,12 +47,19 @@ public:
     [[nodiscard]] std::size_t count_event(std::string_view cat,
                                           std::string_view event) const;
 
+    // debug 模式门控（#104，spdlog 风格级别过滤）：关闭时 Level::debug
+    // 整条丢弃（不进环形/计数/文件）——正常会话体量不受 40Hz 逐帧 debug
+    // 流影响；--debug / HACKRFTOOL_DEBUG=1 开启后逐帧回放分析
+    void set_debug(bool on) noexcept { debug_.store(on); }
+    [[nodiscard]] bool debug() const noexcept { return debug_.load(); }
+
     // 单实例：dsp/radio 层无 App 依赖也能埋点
     [[nodiscard]] static Logger& instance();
 
 private:
     void close_locked() noexcept;     // 调用方持锁
     mutable std::mutex mtx_;
+    std::atomic<bool> debug_{false};  // relaxed 语义足够（开关不参与数据竞争）
     std::vector<Event> ring_;          // 最近 kRing 条
     std::uint64_t total_ = 0;          // 累计条数（未清零）
     void* file_ = nullptr;             // FILE*（void* 防头文件带 cstdio）

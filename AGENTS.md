@@ -13,6 +13,7 @@ cmake --build --preset x64-release && ctest --preset x64-release
 （断言数以 `docs/evolve-log.md` 头部为准，当前 254；本文件不再写死数字）
 
 - UI 行为验证走日志：exe 旁 hackrftool.jsonl（结构化遥测：UI/点击/DSP/APT/扫描/生命周期）+ python tools/log-assert.py <日志> "LIFE:app.start,RADIO:tune" 可选 --order（顺序断言）/ --tail N——截图仅核对布局（视觉识别有幻觉，lessons L14）
+- **debug 模式（#104，逐帧日志回放）**：`HackRFTool.exe --debug` 或环境变量 `HACKRFTOOL_DEBUG=1` 开启——Level::debug 事件放行（关闭时零成本丢弃，正常体量不受影响）。事件速查：`DSP/frame.debug`（逐帧峰值/峰位频率/噪底/突发数/ESB 总量）、`CAP/demod.debug`（逐突发解调：样本数/比特数/符号质量/解出帧数）、`ESB/rec.debug`（逐帧入账：地址 hex/PID/质量/间隔/完整载荷）、`AUDIO/squelch.edge`（静噪开合沿+判据数值）。排障流程：debug 跑一段 → log-assert 按 cat:event 逐帧过滤/回放，不靠视觉。体量提醒：抓包密集时 ~120 行/s，1MB 轮转约 70s——排障短会话够用
 - 遥测分类速查：LIFE 起停 / UI cmd·state / RADIO tune·reconfig·sweep·apply.fail / AUDIO fm.on·off / DSP frame(非fm页)·fm(1Hz) / APT diag / SCAN start·done / SIGDB / SETTINGS / ESB hit
 - 唯一验收命令，应 5/5 通过（单测断言数见 evolve-log 头部 + 端到端合成管线 + WinFlux 测试；两个真机整机自测无设备时退出码 42 → CTest 记 SKIP）
 - **跑 ctest 前先确认构建零 error**：构建失败后 ctest 跑的是陈旧二进制，"全绿"是假象（docs/lessons.md L1，已两次踩中）

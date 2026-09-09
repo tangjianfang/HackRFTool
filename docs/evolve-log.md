@@ -1,10 +1,10 @@
 # evolve log — HackRFTool
 
-- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 275 断言
-- pointer: 用户指令抓包可读性专项：#104 信号库交互+悬浮面板 → #105 音频谱/静噪 → 回顾
-- rounds done: 56（…/#103 协议解析可读化）
+- verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 283 断言
+- pointer: #105 信号库交互+悬浮面板 → #106 音频谱/静噪（收音侧遗留）→ 回顾
+- rounds done: 57（…/#104 debug 模式逐帧日志）
 - status: active
-- metrics: findings 68 | fixes 82 | regressions 0（E4 按轮次行累加；本 run +9/+10/0）
+- metrics: findings 69 | fixes 83 | regressions 0（E4 按轮次行累加；本 run +10/+11/0）
 - checkpoint（#97 后，10 轮节点）: 本 run=用户优先 UI 三级架构（#87 重叠根因 place 同线叠放/#88 动作归位/#89 频谱条上移/#90 轴刻度规范/#91 持久化收口 red→green/#92 云图倒计时+UTF-8 乱码/#93 tools ID 漂移误触清空/#94 最小窗口/#95 静默失败遥测/#96 设备错误分流/#97 遥测并发压测）全部 green+progress，断言 251→258；深挖轮入库 12 findings（3P1 已清/6P2 已清/P3 记池）；下一段 #98 README（T4.4/T4.6）→ #99 回顾（重放审计+报告）；灰块占位=WinFlux 上游疑（仅云图页内容顶一排空灰卡，e87-e92 截图持续，本仓库不可修只记录）
 - checkpoint（#68 后，10 轮节点）: #59-#68 全 green+progress（遥测核心/数据面/APT 诊断/信号库弹窗/Y 轴档/日志查看器/云图状态卡/覆盖缺口/制度/L14/selftest 事件链）；下一段 #69=轮转测试强化、#70-72=Meteor QPSK（Costas+Gardner 纯函数→ASM 帧同步→接线）、#73-77=池（收音微调/池刷新）、#78=回顾；转义坑已第八次变体（bash 反引号命令替换）——python 内联写文件一律 Edit 工具
 - checkpoint（#65 后，会话压缩预防）: 本 run=日志替代视觉识别（#59 核心+#60 数据面+#61 APT/扫描+#62 信号库弹窗+#63 Y轴档+#64 日志查看器+#65 云图状态卡，全部 green+progress）；下一目标 #66=数据面覆盖缺口（非 fm 页 DSP frame 1Hz/ESB 命中沿/SETTINGS restore/apply 失败路径）；末轮 #78=回顾（重放审计+经验库+报告）。工作树 clean
@@ -103,3 +103,4 @@
 #101 | 用户专项：ESB 帧结构化存储 + 抓包页专用"有效数据"列表（red→green，断言 258→262） | findings(3) | actions(3) | result(green+progress, 5 ctest/262 断言) | diff(+~150) | ①dsp：EsbFrame 补 PCF PID(2bit)/NO_ACK(1bit) 解析（esb_pack 加参 red→green，4 组 pid 全还原）；②UI 侧 GFSK 解调补 ±半符号相位搜索 {0,5,10,15}（e2e 证明单点漏解），质量=逐符号 |f|/dev 钳位均值（真机首拍 269% 暴露未钳位，即修）；③App 新增 esb_records（上限 1000）+抓包页"ESB 有效帧"专用列表（时间/地址/len/pid/NA/质量%/载荷 hex，↻=同地址同 PID 重传，点行更新协议字段详情行），突发预览降 120px 辅助区，清空同步清帧存储。真机 15s 实拍：4 条 CRC16✓ 帧（addr:74F77017 len:28 等）+详情行全字段（out/e101-cap2.png）
 #102 | 用户专项：指定地址抓包过滤 | findings(3) | actions(3) | result(green+progress, 5 ctest/266 断言) | diff(+~140) | dsp 新增 addr_match 纯函数（空=全匹配/全字节精确/不前缀匹配，red→green 4 断言）；抓包行新增「地址 hex 输入 + 仅此地址」（EN 输入即时生效，每帧从控件读）；入账点过滤（开关关=不过滤）；横幅徽章显示过滤状态（hex 非法→warning 徽章）；settings.tsv 持久化 cap_addr_filter/cap_addr_only。坑：字符串键走数值 strtod 闸门之后被截断误拒（"74F7"→74+"F7 杂物"）——字符串键须在数值解析前 continue（测试实锤）；TSV 序列化只留 hex 字符防分隔符污染。排障：构建三连败——孤儿 cl.exe 锁 main.obj（清进程）、LNK1104 残留 exe（L1 复现两次，ctest 假绿作废重跑）
 #103 | 用户指令：抓包协议解析可读化——"完全看不懂的 hex"变结构化人话（red→green，断言 266→275） | findings(1) | actions(3) | result(green+progress, 5 ctest/275 断言) | diff(+~230) | dsp 新增 esb_interpret 纯函数（EsbInterp：厂商地址表 E7×5=nRF24 出厂默认/C5:2E=Logitech 前缀、香农熵+疑似加密判据（≥12B 且 ≥3.5bit/B）、全零=空保持包、跨帧+1 序号字节、与上帧差分字节集）9 断言全绿；入账即算解读（同地址最近 ≤4 帧历史）+interval_ms；详情面板重排四行：帧结构逐字段（前导 AA|地址 NB hex（厂商备注）|PCF 长/PID/NO_ACK|CRC16✓）/载荷解读（熵→加密或空包或序号+差分字节=按键移动传感值）/发包节奏（间隔→回报率分档：≥900 满速/≥400 电竞/≥100 普通外设/≥30 交互/<30 遥控传感·同地址累计与重传数）/质量+载荷 hex；列表行加 [疑似加密][空保持包][序号B0][内容未变] 标签+t 改 boot 基准秒。真机实拍（out/e103-cap.png/e103-detail.png）：addr A620B2C4 帧"熵 1.0/与上一帧内容相同/距上一帧 2085ms≈0Hz 遥控传感风格"全可读。视觉核对揪出首帧误标"与上一帧内容相同"（无历史时 diff 集为空与全同不可区分）→ interval_ms==0 分支即修
+#104 | 用户指令：日志体系升级为 spdlog 风格 debug 模式（逐帧分析替代视觉；spdlog 本体不引入——红线禁三方依赖，现有 JSONL logger 同形态升级） | findings(1) | actions(4) | result(green+progress, 5 ctest/283 断言) | diff(+~150) | Logger 增 set_debug/debug 原子门控：Level::debug 关闭时零成本丢弃（构串都不做，正常会话体量不变），--debug 参数/HACKRFTOOL_DEBUG=1 开启+LIFE debug.on 事件；四类逐帧埋点：DSP frame.debug（逐帧峰值/峰位频率/噪底/突发/ESB 总量）、CAP demod.debug（逐突发：样本/比特/符号质量/解出帧数）、ESB rec.debug（逐帧入账全字段含载荷 hex）、AUDIO squelch.edge（静噪开合沿+判据数值——收音没声/噪声问题定位）。红→绿 8 断言（门控默认关/开/info 不受影响/再关/count_event 可断言）。真机 12s 实测：253 帧事件+1171 突发事件+2 ESB 全字段，log-assert "LIFE:debug.on,DSP:frame.debug,CAP:demod.debug" ALL PASS；AGENTS 契约补 debug 模式排障流程与体量提醒（~120 行/s，1MB 轮转 70s）

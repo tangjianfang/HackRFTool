@@ -1161,6 +1161,27 @@ static void test_telemetry() {
     _wremove(tmp.c_str());
 }
 
+// debug 级门控（#104）：默认丢弃；set_debug(true) 后放行——逐帧日志的
+// 体量开关（正常会话不受 40Hz debug 流影响）
+static void test_telemetry_debug_gate() {
+    using hackrftool::log::Level;
+    hackrftool::log::Logger lg;
+    check(!lg.debug(), "debug 默认关闭");
+    lg.write(Level::debug, "DBG", "frame.debug", {{"seq", "1"}});
+    check(lg.count() == 0, "debug 关闭时 debug 级整条丢弃（不进环形/计数）");
+    lg.write(Level::info, "UI", "cmd", {{"id", "100"}});
+    check(lg.count() == 1, "info 级不受 debug 开关影响");
+    lg.set_debug(true);
+    check(lg.debug(), "set_debug(true)");
+    lg.write(Level::debug, "DBG", "frame.debug", {{"seq", "2"}});
+    check(lg.count() == 2, "debug 开启后 debug 级放行");
+    check(lg.count_event("DBG", "frame.debug") == 1,
+          "debug 事件可按 cat/event 断言（log-assert 逐帧分析入口）");
+    lg.set_debug(false);
+    lg.write(Level::debug, "DBG", "frame.debug", {{"seq", "3"}});
+    check(lg.count() == 2, "再关闭后继续丢弃");
+}
+
 // 遥测并发压测（#97，T2.5 基准）：8 线程 × 500 条写独立实例——
 // 计数一致性（total/count_event 无丢条）+ 环形缓冲不越界
 static void test_telemetry_concurrent() {
@@ -1730,6 +1751,7 @@ int main() {
     test_orbit_passes();
     test_telemetry();
     test_telemetry_concurrent();
+    test_telemetry_debug_gate();
     test_audio_spectrum();
     test_fm_decimator_stopband();
     test_apt_decode();
