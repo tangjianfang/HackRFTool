@@ -1,8 +1,8 @@
 # evolve log — HackRFTool
 
 - verify: cmake --build --preset x64-release && ctest --preset x64-release   # 5 ctests（单测/真机自测×2/WinFlux×2，无设备自动 SKIP）+ 单测 283 断言
-- pointer: 目标 run（终极=BLE 抓包）：#107 音频谱/静噪 → #108 BLE DSP → #109 BLE 接线 → #110 分层显示 → 回顾
-- rounds done: 59（…/#106 信号库悬浮面板）
+- pointer: 目标 run（终极=BLE 抓包）：#108 BLE DSP → #109 BLE 接线 → #110 分层显示 → 回顾
+- rounds done: 60（…/#107 音频频谱/静噪）
 - status: active
 - metrics: findings 69 | fixes 83 | regressions 0（E4 按轮次行累加；本 run +10/+11/0）
 - checkpoint（#97 后，10 轮节点）: 本 run=用户优先 UI 三级架构（#87 重叠根因 place 同线叠放/#88 动作归位/#89 频谱条上移/#90 轴刻度规范/#91 持久化收口 red→green/#92 云图倒计时+UTF-8 乱码/#93 tools ID 漂移误触清空/#94 最小窗口/#95 静默失败遥测/#96 设备错误分流/#97 遥测并发压测）全部 green+progress，断言 251→258；深挖轮入库 12 findings（3P1 已清/6P2 已清/P3 记池）；下一段 #98 README（T4.4/T4.6）→ #99 回顾（重放审计+报告）；灰块占位=WinFlux 上游疑（仅云图页内容顶一排空灰卡，e87-e92 截图持续，本仓库不可修只记录）
@@ -106,3 +106,4 @@
 #104 | 用户指令：日志体系升级为 spdlog 风格 debug 模式（逐帧分析替代视觉；spdlog 本体不引入——红线禁三方依赖，现有 JSONL logger 同形态升级） | findings(1) | actions(4) | result(green+progress, 5 ctest/283 断言) | diff(+~150) | Logger 增 set_debug/debug 原子门控：Level::debug 关闭时零成本丢弃（构串都不做，正常会话体量不变），--debug 参数/HACKRFTOOL_DEBUG=1 开启+LIFE debug.on 事件；四类逐帧埋点：DSP frame.debug（逐帧峰值/峰位频率/噪底/突发/ESB 总量）、CAP demod.debug（逐突发：样本/比特/符号质量/解出帧数）、ESB rec.debug（逐帧入账全字段含载荷 hex）、AUDIO squelch.edge（静噪开合沿+判据数值——收音没声/噪声问题定位）。红→绿 8 断言（门控默认关/开/info 不受影响/再关/count_event 可断言）。真机 12s 实测：253 帧事件+1171 突发事件+2 ESB 全字段，log-assert "LIFE:debug.on,DSP:frame.debug,CAP:demod.debug" ALL PASS；AGENTS 契约补 debug 模式排障流程与体量提醒（~120 行/s，1MB 轮转 70s）
 #105 | 用户指令：引入 spdlog 三方库（用户授权覆盖"禁三方依赖"红线）——源码静态构建链入 exe | findings(2) | actions(3) | result(green+progress, 5 ctest/283 断言) | diff(+~60/-~35) | 源码 v1.15.1 浅克隆 C:/tjf/github/spdlog，CMake add_subdirectory 同 MSVC 工具链（WinFlux 同款模式，SPDLOG_BUILD_SHARED=FORCE OFF）→ 静态 spdlog.lib 链入 HackRFTool+HackRFToolTest；telemetry.cpp 文件落盘切 rotating_file_sink_mt（%v 原始 JSONL 行+trace 级 flush 崩溃安全+max_files=2 与旧"共 3 份"等价），删手写 fwrite/rotate。坑：①spdlog 轮转命名 name.1.jsonl（序号在扩展名前）——测试按旧 name.jsonl.1 找归档假失败，改命名断言；②dumpbin /dependents 被 Git Bash 转义成路径（MS_NO_PATHCONV + -dependents 破法）。验证：依赖清单无 spdlog.dll（仅系统+CRT）、exe 767KB 自包含；真机 8s debug 会话 jsonl 格式逐字节不变、log-assert "debug.on,app.start,frame.debug" ALL PASS；轮转测试现场 .1.jsonl 存在实证
 #106 | 用户遗留项：信号库交互修复+悬浮面板 | findings(3) | actions(4) | result(green+progress, 5 ctest/283 断言) | diff(+~90/-~60) | ①一键收听 sigdb_pick：未接收自动 toggle_rx+广播段 ensure_fm——"点了没反应"主诉根因（未接收时 tune_to 只改变量不动硬件）；②弹窗单击即收听（原仅双击 NM_DBLCLK，加 NM_CLICK）；③悬浮垂直面板：dock_sigdb 停靠主窗右缘 268px、进收音页自动展开、layout 联动跟随主窗；页内 48 行内嵌列表移除（"放中间不好看"+冗余）；④假台治理：点击后 2.5s 静噪从未开 → 自动标离线+落盘+SIGDB probe.offline 事件。真机验证：面板自动展开/列内容齐全/有声（人声 -22dB）；FindWindowW pinvoke 字符串编组又踩（L13 复证，截图为准绳）
+#107 | 用户遗留项：音频频谱与静噪四修 | findings(1) | actions(4) | result(green+progress, 5 ctest/285 断言) | diff(+~90/-~45) | ①量程 0–24k→20Hz–20kHz（人耳域，超声段裁掉；bins 23.4Hz 线性插值重采样绘制）；②杂波根治：静噪开才喂谱+开门沿 AudioSpectrumMeter::reset() 清旧台残谱（红→绿 2 断言：清空实时谱与峰保持/seq 递增）；③19k 导频线仅立体声锁定（fm_pilot>0.02）时 accent 高亮，否则灰化刻度；④静噪门限双条件：峰均差>8dB 且 峰值>−55dB（噪声台起伏假阳性拦截）。真机截图（e107-radio.png）：量程 20–20k/导频高亮真峰/谱形干净能量集中低频——用户"杂波看不清谱形"问题闭环

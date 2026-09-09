@@ -293,6 +293,15 @@ void AudioSpectrumMeter::recompute() noexcept {
     ++seq_;
 }
 
+void AudioSpectrumMeter::reset() noexcept {
+    std::fill(ring_.begin(), ring_.end(), 0.0f);
+    std::fill(db_.begin(), db_.end(), 0.0f);
+    std::fill(peak_.begin(), peak_.end(), 0.0f);
+    pos_ = 0;
+    fed_ = 0;
+    ++seq_;
+}
+
 void AudioSpectrumMeter::feed(const float* x, std::size_t n) noexcept {
     const std::size_t N = ring_.size();
     for (std::size_t i = 0; i < n; ++i) {

@@ -186,6 +186,7 @@ struct App {
     std::mutex spec_mtx;
     std::vector<float> spec_db, spec_peak;
     unsigned spec_seq = 0, spec_seen = 0;   // seen=fm 线程私有比较位
+    bool spec_gate_last = false;            // 静噪开门沿检测（#107）
     int vol = 80;                          // 音量 0..100（waveout 外存，供设置持久化）
     // 设置持久化（#57）：序列化比对变化才写盘，3s 节流
     std::string last_settings;
@@ -626,8 +627,10 @@ void fm_audio_cb(const float* l, const float* r, std::size_t n, void* ctx) {
         app->voice_cur = db;
         ++app->voice_seq;
     }
-    // 音频频谱：静噪前取 (L+R)/2——静噪会掐掉底噪谱形；seq 变化才拷贝
-    {
+    // 音频频谱（#107：静噪开才喂——关门期噪声不进谱=杂波根治；开门沿
+    // reset 清旧台残谱）。seq 变化才拷贝
+    if (app->squelch_open.load()) {
+        if (!app->spec_gate_last) app->audio_spec.reset();   // 上升沿
         float mono[480];
         const std::size_t k = std::min<std::size_t>(n, 480);
         for (std::size_t i = 0; i < k; ++i) mono[i] = (l[i] + r[i]) * 0.5f;
@@ -640,6 +643,7 @@ void fm_audio_cb(const float* l, const float* r, std::size_t n, void* ctx) {
             app->spec_seq = app->spec_seen;
         }
     }
+    app->spec_gate_last = app->squelch_open.load();
     if (app->apt_on.load()) app->apt.feed(l, n);   // APT：单声道取 L
     app->fm_pilot.store(app->fm_rx ? app->fm_rx->pilot_level() : 0.0f);
     app->fm_peak.store(app->fm_rx ? app->fm_rx->audio_peak() : 0.0f);
@@ -1608,11 +1612,12 @@ flux::ElementPtr radio_display(App& app, const flux::Palette& pal) {
             pal, app.voice_hist, app.voice_cur, app.voice_seq));
     }
 
-    // 音频频谱 0–24 kHz（#57）：实时谱+峰保持+19k 导频参考线
+    // 音频频谱 20Hz–20kHz（#107）：静噪开才更新+19k 导频仅立体声锁定高亮
     {
         std::lock_guard<std::mutex> g(app.spec_mtx);
         page_el->children.push_back(hackrftool::ui::audio_spectrum_strip(
-            pal, app.spec_db, app.spec_peak, app.spec_seq));
+            pal, app.spec_db, app.spec_peak, app.spec_seq,
+            app.fm_pilot.load() > 0.02f));
     }
 
     // #106：内嵌信号库列表移除——改为悬浮面板停靠主窗右侧（sigdb 弹窗，
@@ -2073,7 +2078,9 @@ flux::ElementPtr build(App& app) {
                 sum += v;
                 mx = std::max(mx, v);
             }
-            const bool open = (mx - sum / float(app.frame.db.size())) > 8.0f;
+            // #107 双条件：峰均差>8dB 且 峰值>−55dB——噪声台起伏假阳性拦截
+            const float avg = sum / float(app.frame.db.size());
+            const bool open = (mx - avg) > 8.0f && mx > -55.0f;
             // #104 debug：开合沿记判据数值——收音"没声/噪声"问题逐帧定位
             if (open != app.squelch_open.load() &&
                 hackrftool::log::Logger::instance().debug())
@@ -2081,7 +2088,7 @@ flux::ElementPtr build(App& app) {
                     hackrftool::log::Level::debug, "AUDIO", "squelch.edge",
                     {{"open", open ? "1" : "0"},
                      {"peak_db", std::to_string(mx)},
-                     {"avg_db", std::to_string(sum / float(app.frame.db.size()))},
+                     {"avg_db", std::to_string(avg)},
                      {"center_mhz", std::to_string(app.center_mhz)}});
             app.squelch_open.store(open);
         }

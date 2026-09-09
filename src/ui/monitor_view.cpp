@@ -64,13 +64,13 @@ flux::ElementPtr audio_level_strip(const flux::Palette& pal,
 
 flux::ElementPtr audio_spectrum_strip(
     const flux::Palette& pal, const std::vector<float>& spec_db,
-    const std::vector<float>& peak_db, unsigned seq) {
+    const std::vector<float>& peak_db, unsigned seq, bool pilot_on) {
     flux::Props p;
     p.height = 150.0f;
     p.background = pal.surface;
     p.radius = 10.0f;
     p.paint_id = seq;
-    p.paint = [pal, spec_db, peak_db](flux::D2DRenderer& r, float x, float y,
+    p.paint = [pal, spec_db, peak_db, pilot_on](flux::D2DRenderer& r, float x, float y,
                                       float w, float h, bool, float, float) {
         const float top = y + 4.0f, bot = y + h - 18.0f;
         // 纵轴 -90..-10 dBFS（语音带内典型 -60..-20）
@@ -78,8 +78,11 @@ flux::ElementPtr audio_spectrum_strip(
             const float t = (-10.0f - db) / 80.0f;
             return top + t * (bot - top);
         };
+        // 横轴 20Hz–20kHz 人耳可听域（#107：原 0–24k 含超声段，噪声杂波
+        // 全谱铺满看不清谱形）；2048 点 FFT@48k → bin 23.4Hz
         const auto x_of = [&](double hz) {
-            return float(x + 8.0 + hz / 24000.0 * double(w - 16.0));
+            return float(x + 8.0 + (std::clamp(hz, 20.0, 20000.0) - 20.0) /
+                                   19980.0 * double(w - 16.0));
         };
         for (float db = -20.0f; db > -90.0f; db -= 20.0f) {
             const float gy = y_of(db);
@@ -95,8 +98,14 @@ flux::ElementPtr audio_spectrum_strip(
         };
         ylab(-20.0f, true);
         for (float db = -40.0f; db > -90.0f; db -= 20.0f) ylab(db);
-        // 横轴刻度 0/6k/12k/18k/24k（#90 补 0 起点）
-        for (int khz = 0; khz <= 24; khz += 6) {
+        // 横轴刻度：20Hz 起点 + 5k..20k（#107 新量程）
+        {
+            const float gx0 = x_of(20.0);
+            r.draw_line(gx0, bot, gx0, bot + 4.0f, pal.divider, 1.0f, 0.5f);
+            r.draw_text(flux::Rect{gx0 - 14.0f, bot + 4.0f, 28.0f, 12.0f}, L"20",
+                        9.0f, pal.text_secondary, false, flux::Align::center);
+        }
+        for (int khz = 5; khz <= 20; khz += 5) {
             const float gx = x_of(double(khz) * 1000.0);
             r.draw_line(gx, bot, gx, bot + 4.0f, pal.divider, 1.0f, 0.5f);
             wchar_t lab[12];
@@ -104,26 +113,46 @@ flux::ElementPtr audio_spectrum_strip(
             r.draw_text(flux::Rect{gx - 14.0f, bot + 4.0f, 28.0f, 12.0f}, lab,
                         9.0f, pal.text_secondary, false, flux::Align::center);
         }
-        // 19 kHz 导频参考（诊断 STEREO：导频峰可见=发射端立体声）
+        // 19 kHz 导频参考（#107：仅立体声锁定时高亮为导频峰，否则灰化刻度）
         const float px = x_of(19000.0);
-        r.draw_line(px, top, px, bot, pal.divider, 1.0f, 0.5f);
+        r.draw_line(px, top, px, bot, pilot_on ? pal.accent : pal.divider, 1.0f,
+                    pilot_on ? 0.9f : 0.5f);
         r.draw_text(flux::Rect{px - 20.0f, top + 2.0f, 40.0f, 12.0f}, L"19k 导频",
-                    9.0f, pal.text_secondary, false, flux::Align::center);
-        r.draw_text(flux::Rect{x + 8.0f, y + 2.0f, 160.0f, 16.0f},
-                    L"音频频谱 0–24 kHz", 12.0f, pal.text_secondary, false,
-                    flux::Align::start);
+                    9.0f, pilot_on ? pal.accent : pal.text_secondary, false,
+                    flux::Align::center);
+        r.draw_text(flux::Rect{x + 8.0f, y + 2.0f, 200.0f, 16.0f},
+                    L"音频频谱 20 Hz–20 kHz（静噪开时更新）", 12.0f,
+                    pal.text_secondary, false, flux::Align::start);
         if (spec_db.empty()) {
-            r.draw_text(flux::Rect{x, y, w, h}, L"等待音频…", 14.0f,
-                        pal.text_secondary, false, flux::Align::center);
+            r.draw_text(flux::Rect{x, y, w, h}, L"等待音频…", 14.0f, pal.text_secondary,
+                        false, flux::Align::center);
             return;
         }
-        const std::size_t n = spec_db.size();
+        // bins → 20Hz..20kHz 均匀重采样绘制（非整 bin 映射，线性插值）
+        const auto s_at = [&](double hz) -> float {
+            const double b = hz / 23.4375;
+            const std::size_t i0 = std::min<std::size_t>(
+                std::size_t(b), spec_db.size() - 1);
+            const std::size_t i1 = std::min<std::size_t>(i0 + 1, spec_db.size() - 1);
+            const double f = b - std::floor(b);
+            return float(spec_db[i0] * (1.0 - f) + spec_db[i1] * f);
+        };
+        const auto p_at = [&](double hz) -> float {
+            if (peak_db.empty()) return s_at(hz);
+            const double b = hz / 23.4375;
+            const std::size_t i0 = std::min<std::size_t>(
+                std::size_t(b), peak_db.size() - 1);
+            const std::size_t i1 = std::min<std::size_t>(i0 + 1, peak_db.size() - 1);
+            const double f = b - std::floor(b);
+            return float(peak_db[i0] * (1.0 - f) + peak_db[i1] * f);
+        };
+        const std::size_t n = 256;
         std::vector<std::pair<float, float>> pk(n), cur(n);
         for (std::size_t i = 0; i < n; ++i) {
-            const float cx = x + 8.0f + float(i) / float(n - 1) * (w - 16.0f);
-            cur[i] = {cx, y_of(std::clamp(spec_db[i], -90.0f, -10.0f))};
-            const float pmax = peak_db.empty() ? spec_db[i] : peak_db[i];
-            pk[i] = {cx, y_of(std::clamp(pmax, -90.0f, -10.0f))};
+            const double hz = 20.0 + double(i) / double(n - 1) * 19980.0;
+            const float cx = x_of(hz);
+            cur[i] = {cx, y_of(std::clamp(s_at(hz), -90.0f, -10.0f))};
+            pk[i] = {cx, y_of(std::clamp(p_at(hz), -90.0f, -10.0f))};
         }
         r.draw_polyline(pk, pal.text_secondary, 1.0f, 0.7f);   // 峰保持（淡）
         r.draw_polyline(cur, pal.accent, 1.6f, 1.0f);           // 实时谱

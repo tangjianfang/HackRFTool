@@ -1531,6 +1531,16 @@ static void test_audio_spectrum() {
     const auto& pk3 = m2.peak_db();
     check(db3[pk2] < pk3[pk2] - 3.0f, "静音后峰保持线显著高于实时谱");
     check(pk3[pk2] > db2[pk2] - 1.0f, "保持线衰减缓慢（<1dB/帧）");
+    // #107 reset：开门沿清残谱——峰保持与实时谱全部归零、seq 递增触发重绘
+    const unsigned seq_before = m2.seq();
+    m2.reset();
+    const auto& dbr = m2.spectrum_db();
+    const auto& pkr = m2.peak_db();
+    bool all_flat = true;
+    for (std::size_t i = 0; i < dbr.size(); ++i)
+        if (dbr[i] != 0.0f || pkr[i] != 0.0f) all_flat = false;
+    check(all_flat, "reset 清空实时谱与峰保持");
+    check(m2.seq() > seq_before, "reset 后 seq 递增（UI 重绘触发）");
 }
 
 static void test_fm_decimator_stopband() {

@@ -76,6 +76,8 @@ public:
     AudioSpectrumMeter();
     // 喂 mono 音频块；每累计 N 新样本重算一次谱（约 24 Hz @48k）
     void feed(const float* x, std::size_t n) noexcept;
+    // 清空谱与峰保持（#107：静噪开门沿调用——旧台残谱不带入新台）
+    void reset() noexcept;
     [[nodiscard]] const std::vector<float>& spectrum_db() const noexcept { return db_; }
     [[nodiscard]] const std::vector<float>& peak_db() const noexcept { return peak_; }
     [[nodiscard]] unsigned seq() const noexcept { return seq_; }
