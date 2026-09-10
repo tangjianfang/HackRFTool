@@ -2,6 +2,7 @@
 // 全部函数经 LoadLibrary/GetProcAddress 取得；DLL 由构建后步骤复制到 exe 旁。
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -29,6 +30,7 @@ public:
     struct RxTrampoline {
         Callback cb;
         void* ctx;
+        std::atomic<std::uint64_t>* loss = nullptr;   // 指向 rx_loss_（回调线程仅原子自增）
     };
 
     HackRadio() = default;
@@ -46,6 +48,9 @@ public:
 
     [[nodiscard]] bool is_open() const noexcept { return dev_ != nullptr; }
     [[nodiscard]] bool is_running() const noexcept { return running_; }
+    // 接收流异常计数（#110：valid_length<=0 的回调次数，app 层心跳上报
+    // RADIO rx.loss——USB 断流/固件 wedge 的最早信号；无异常恒 0）
+    [[nodiscard]] std::uint64_t rx_loss_events() const noexcept { return rx_loss_.load(); }
     [[nodiscard]] std::string library_version() const;
 
 private:
@@ -56,6 +61,7 @@ private:
     hackrf_device* dev_ = nullptr;
     bool inited_ = false;
     bool running_ = false;
+    std::atomic<std::uint64_t> rx_loss_{0};
     RxTrampoline trampoline_{};
 
     // 动态加载的 API（open 成功后有效）

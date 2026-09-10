@@ -49,6 +49,7 @@ bool IqRecorder::start(const std::wstring& path) {
     }
     written_.store(0);
     dropped_.store(0);
+    write_errors_.store(0);
     quit_.store(false);
     running_.store(true);
     writer_ = std::thread([this] { writer_loop(); });
@@ -89,6 +90,8 @@ void IqRecorder::writer_loop() {
         if (!block.empty()) {
             if (std::fwrite(block.data(), 1, block.size(), file_) == block.size())
                 written_.fetch_add(block.size());
+            else
+                write_errors_.fetch_add(1);   // 短写（#110：磁盘满/配额）
             continue;   // 优先清空队列
         }
         if (quit_.load()) {

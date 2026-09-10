@@ -5,10 +5,14 @@ namespace hackrftool::radio {
 namespace {
 int rx_trampoline(hackrf_transfer* t) {
     // 回调契约：只读 transfer，不调 libhackrf
-    const auto* tramp = static_cast<HackRadio::RxTrampoline*>(t->rx_ctx);
-    if (tramp != nullptr && tramp->cb != nullptr)
+    auto* tramp = static_cast<HackRadio::RxTrampoline*>(t->rx_ctx);
+    if (tramp == nullptr) return 0;
+    if (t->valid_length <= 0 && tramp->loss != nullptr)
+        tramp->loss->fetch_add(1);   // 异常块计数（#110：app 层限流上报）
+    if (tramp->cb != nullptr)
         tramp->cb(reinterpret_cast<const std::int8_t*>(t->buffer),
-                  static_cast<std::size_t>(t->valid_length), tramp->ctx);
+                  static_cast<std::size_t>(t->valid_length < 0 ? 0 : t->valid_length),
+                  tramp->ctx);
     return 0;   // 0 = 继续流
 }
 } // namespace
@@ -116,7 +120,7 @@ bool HackRadio::start_rx(Callback cb, void* ctx, std::string* error) {
         if (error != nullptr) *error = "设备未打开";
         return false;
     }
-    trampoline_ = {cb, ctx};
+    trampoline_ = {cb, ctx, &rx_loss_};
     const int rc = fn_start_rx(dev_, &rx_trampoline, &trampoline_);
     if (rc != HACKRF_SUCCESS) {
         if (error != nullptr) *error = "hackrf_start_rx: " + hackrf_error_text(rc);

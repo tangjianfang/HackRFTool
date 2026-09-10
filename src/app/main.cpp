@@ -161,6 +161,7 @@ struct App {
     std::vector<BleRec> ble_records;        // CRC24 通过的有效帧，新在尾，上限 500
     unsigned long long ble_seen_burst = 0;  // 已消费的突发数（增量处理）
     int ble_budget = 0;                     // 每 build BLE 解调配额（独立于 ESB 行文本）
+    int ble_dump_n = 0;                     // 比特转储序号（#110：BLE 会话启动复位，每会话滚动覆盖 30 份）
 
     // ---- 控件值（#52 起由原生控件持有；内容区每帧重建，普通字段即够） ----
     bool running = false;
@@ -232,10 +233,16 @@ struct App {
     // 日志查看器（#64）：遥测 tail 弹窗——云图排查/问题分析在应用内直接读
     HWND logview_wnd = nullptr;
     HWND logview_list = nullptr;
+    HWND logview_dbg = nullptr;   // #110：逐帧 DEBUG 运行时开关（免重启进程）
     std::size_t logview_stamp = 0;   // 上次刷新的日志总数
     // 数据面遥测（#60）：UI 状态变更快照 + DSP 1Hz 节流
     std::string last_ui_state;
     unsigned long long last_dsp_ms = 0;
+    // 底层降级边沿上报（#110）：rx 异常块/录制丢块——心跳比对计数器增量
+    std::uint64_t rx_loss_reported = 0;
+    std::uint64_t rec_degraded_reported = 0;
+    hackrftool::log::ErrorThrottle rx_loss_throttle_;
+    hackrftool::log::ErrorThrottle rec_degraded_throttle_;
     bool afc_on = true;                    // AFC 自动频率微调（收音页）
     HWND check_afc = nullptr;
     int fm_bw = 0;                         // 收听带宽：0=±120k 1=±80k 2=±50k
@@ -529,6 +536,7 @@ void set_ble_live(App& app, bool on) {
     if (on) {
         app.ble_hop_ms.store(0);
         app.ble_live.store(1);
+        app.ble_dump_n = 0;   // #110：转储配额随会话重置（滚动覆盖旧文件）
         std::thread(ble_loop, std::ref(app)).detach();
     } else {
         app.ble_live.store(0);
@@ -795,7 +803,11 @@ void ensure_fm(App& app, bool on) {
     }
     const bool was = app.fm_on.load();
     if (on == was) {
-        if (on && !app.waveout.running()) (void)app.waveout.start(app.audio_dev);
+        if (on && !app.waveout.running()) {
+            // #110：失败不再 (void) 静默——设备错误码已由 waveout 层入遥测
+            if (!app.waveout.start(app.audio_dev))
+                app.status = L"音频设备打开失败（检查扬声器/默认设备）";
+        }
         return;
     }
     if (on) {
@@ -1125,9 +1137,16 @@ void record_toggle(App& app) {
         (void)hackrftool::radio::write_capture_sidecar(app.rec_path, info);
         app.status = L"录制完成: " + std::to_wstring(app.recorder.bytes_written()) +
                      L" 字节（参数已写 .txt）";
+        // #110：录制结束汇总丢块/短写——数据完整性问题不再只在计数器里沉默
+        if (app.recorder.dropped_blocks() > 0 || app.recorder.write_errors() > 0)
+            app.status += L" ⚠丢块 " +
+                          std::to_wstring(app.recorder.dropped_blocks()) + L"/写错 " +
+                          std::to_wstring(app.recorder.write_errors());
         hackrftool::log::log_telemetry(
             hackrftool::log::Level::info, "LIFE", "record.stop",
-            {{"bytes", std::to_string(app.recorder.bytes_written())}});
+            {{"bytes", std::to_string(app.recorder.bytes_written())},
+             {"dropped", std::to_string(app.recorder.dropped_blocks())},
+             {"werr", std::to_string(app.recorder.write_errors())}});
         return;
     }
     wchar_t path[MAX_PATH] = L"hackrftool-iq.cs8";
@@ -2117,15 +2136,16 @@ flux::ElementPtr build(App& app) {
                         hackrftool::log::Level::debug, "BLE", "variant.hit",
                         {{"ch", std::to_string(ch_now)}, {"v", s}});
                 else if (hackrftool::dsp::ble_count_aa(r.bits) > 0) {
-                    // AA 命中但全变体失败 → 原始比特转储（离线穷举约定）
-                    static int dump_n = 0;
-                    if (dump_n < 30) {
+                    // AA 命中但全变体失败 → 原始比特转储（离线穷举约定）；
+                    // 序号随 BLE 会话启动复位（#110：修复进程常驻时 30 份写满
+                    // 后静默停止的假"没有 AA 命中"）
+                    if (app.ble_dump_n < 30) {
                         std::string bits8;
                         bits8.reserve(r.bits.size());
                         for (const std::uint8_t b : r.bits) bits8 += char('0' + b);
                         const std::string nm =
                             "ble-bits-" + std::to_string(ch_now) + "-" +
-                            std::to_string(dump_n) + ".txt";
+                            std::to_string(app.ble_dump_n) + ".txt";
                         std::FILE* fp =
                             _wfopen(exe_dir_path(nm.c_str()).c_str(), L"wb");
                         if (fp != nullptr) {
@@ -2134,7 +2154,7 @@ flux::ElementPtr build(App& app) {
                                          bits8.c_str());
                             std::fclose(fp);
                         }
-                        ++dump_n;
+                        ++app.ble_dump_n;
                     }
                 }
             }
@@ -2163,6 +2183,31 @@ flux::ElementPtr build(App& app) {
                          (app.stereo_opt ? "1" : "0") + "|" +
                          std::to_string(app.fm_bw) + "|" +
                          std::to_string(app.vol);
+        // #110 底层降级边沿上报：计数器有增量才记 + 1s 限流——USB 断流
+        //（rx 异常块）/录制丢块（队列溢出/短写）不刷屏，正常会话零输出
+        const std::uint64_t loss_now = app.radio.rx_loss_events();
+        if (loss_now > app.rx_loss_reported &&
+            app.rx_loss_throttle_.should_log(now)) {
+            app.rx_loss_reported = loss_now;
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::warn, "RADIO", "rx.loss",
+                {{"total", std::to_string(loss_now)},
+                 {"suppressed",
+                  std::to_string(app.rx_loss_throttle_.suppressed())}});
+        }
+        if (app.recorder.recording()) {
+            const std::uint64_t deg = app.recorder.dropped_blocks() +
+                                      app.recorder.write_errors();
+            if (deg > app.rec_degraded_reported &&
+                app.rec_degraded_throttle_.should_log(now)) {
+                app.rec_degraded_reported = deg;
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::warn, "LIFE", "record.degraded",
+                    {{"dropped",
+                      std::to_string(app.recorder.dropped_blocks())},
+                     {"werr", std::to_string(app.recorder.write_errors())}});
+            }
+        }
         if (st != app.last_ui_state) {
             app.last_ui_state = st;
             hackrftool::log::log_telemetry(
@@ -3693,13 +3738,35 @@ LRESULT CALLBACK logview_wndproc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
     switch (msg) {
     case WM_SIZE:
-        if (app != nullptr && app->logview_list != nullptr)
-            MoveWindow(app->logview_list, 0, 0, LOWORD(lp), HIWORD(lp), TRUE);
+        if (app != nullptr) {
+            const int w = LOWORD(lp), h = HIWORD(lp);
+            if (app->logview_dbg != nullptr)
+                MoveWindow(app->logview_dbg, 0, 0, w, 26, FALSE);
+            if (app->logview_list != nullptr)
+                MoveWindow(app->logview_list, 0, 26, w,
+                           h > 26 ? h - 26 : 0, FALSE);
+        }
+        return 0;
+    case WM_COMMAND:
+        // #110 逐帧 DEBUG 运行时开关：排障中途开/关，不重启进程丢现场；
+        // BM_GETCHECK 数值消息读态（L13），事件入遥测供 log-assert 断言
+        if (app != nullptr && LOWORD(wp) == 5003 &&
+            HIWORD(wp) == BN_CLICKED && app->logview_dbg != nullptr) {
+            const bool dbg_on = SendMessageW(app->logview_dbg, BM_GETCHECK, 0, 0) ==
+                                BST_CHECKED;
+            hackrftool::log::Logger::instance().set_debug(dbg_on);
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::info, "LIFE",
+                dbg_on ? "debug.on" : "debug.off", {{"src", "ui"}});
+            app->status = dbg_on ? L"逐帧 DEBUG 已开启（~120 行/s 高频，排障完关闭）"
+                                 : L"逐帧 DEBUG 已关闭";
+        }
         return 0;
     case WM_DESTROY:
         if (app != nullptr) {
             app->logview_wnd = nullptr;
             app->logview_list = nullptr;
+            app->logview_dbg = nullptr;
         }
         return 0;
     default:
@@ -3729,9 +3796,18 @@ void logview_toggle(App& app) {
                              nullptr);
     if (wnd == nullptr) return;
     SetWindowLongPtrW(wnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&app));
+    // #110 逐帧 DEBUG 开关（5003）：初始态与 Logger 同步（--debug 启动时勾上）
+    HWND dbg = CreateWindowExW(
+        0, WC_BUTTONW, L"逐帧 DEBUG（高频 ~120 行/s，排障时开）",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 740, 26,
+        wnd, reinterpret_cast<HMENU>(5003), GetModuleHandleW(nullptr), nullptr);
+    if (dbg != nullptr && app.font != nullptr)
+        SendMessageW(dbg, WM_SETFONT, WPARAM(app.font), TRUE);
+    if (hackrftool::log::Logger::instance().debug())
+        SendMessageW(dbg, BM_SETCHECK, BST_CHECKED, 0);
     HWND lv = CreateWindowExW(
         0, WC_LISTVIEWW, nullptr,
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS, 0, 0, 740, 400,
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS, 0, 26, 740, 374,
         wnd, reinterpret_cast<HMENU>(5002), GetModuleHandleW(nullptr), nullptr);
     ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT |
                                               LVS_EX_DOUBLEBUFFER);
@@ -3751,6 +3827,7 @@ void logview_toggle(App& app) {
     SendMessageW(lv, LVM_INSERTCOLUMNW, 3, LPARAM(&col));
     app.logview_wnd = wnd;
     app.logview_list = lv;
+    app.logview_dbg = dbg;
     app.logview_stamp = 0;
     ShowWindow(wnd, SW_SHOW);
     logview_refresh(app);

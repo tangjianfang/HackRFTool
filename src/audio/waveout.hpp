@@ -12,6 +12,8 @@
 #include <windows.h>
 #include <mmsystem.h>
 
+#include "app/telemetry.hpp"   // ErrorThrottle（#110 错误限流）
+
 namespace hackrftool::audio {
 
 class WaveOut {
@@ -71,6 +73,9 @@ private:
     // ——诊断（#55b 临时）——
     volatile LONG dbg_submitted_ = 0;
     volatile LONG dbg_werr_ = 0;
+    // #110 底层错误遥测：underrun 累计 + 1s 限流（仅 fm 线程访问）
+    LONG underruns_ = 0;
+    hackrftool::log::ErrorThrottle err_throttle_;
 };
 
 } // namespace hackrftool::audio

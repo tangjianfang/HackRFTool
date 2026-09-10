@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "app/telemetry.hpp"   // #110：底层错误遥测（本模块仅链入主 exe）
+
 namespace hackrftool::audio {
 
 std::vector<std::wstring> WaveOut::enum_devices() {
@@ -40,11 +42,17 @@ bool WaveOut::start(int device_id) {
     fmt.nBlockAlign = 4;
     fmt.nAvgBytesPerSec = 48000 * 4;
     const UINT dev = device_id < 0 ? UINT(WAVE_MAPPER) : UINT(device_id);
-    if (waveOutOpen(&wave_, dev, &fmt,
-                    reinterpret_cast<DWORD_PTR>(&WaveOut::proc),
-                    reinterpret_cast<DWORD_PTR>(this),
-                    CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
+    const MMRESULT orc = waveOutOpen(&wave_, dev, &fmt,
+                                     reinterpret_cast<DWORD_PTR>(&WaveOut::proc),
+                                     reinterpret_cast<DWORD_PTR>(this),
+                                     CALLBACK_FUNCTION);
+    if (orc != MMSYSERR_NOERROR) {
         wave_ = nullptr;
+        // #110：设备打开失败不再静默（此前 app 层 (void) 丢弃返回值，
+        // "没声"问题日志无线索）——错误码+设备号直接入遥测
+        hackrftool::log::log_telemetry(
+            hackrftool::log::Level::error, "AUDIO", "device.fail",
+            {{"code", std::to_string(int(orc))}, {"dev", std::to_string(dev)}});
         return false;
     }
     for (std::size_t i = 0; i < kBlocks; ++i) {
@@ -71,7 +79,17 @@ void WaveOut::stop() {
 bool WaveOut::submit_block() {
     // 等空闲块（≤200ms；仍无则返回 false 由调用方丢弃保实时）
     for (int wait = 0; wait < 40 && free_blocks_ <= 0; ++wait) Sleep(5);
-    if (free_blocks_ <= 0) return false;
+    if (free_blocks_ <= 0) {
+        // #110：空闲块耗尽=音频断续（underrun）——累计+1s 限流上报
+        if (err_throttle_.should_log(hackrftool::log::now_ms()))
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::warn, "AUDIO", "underrun",
+                {{"total", std::to_string(++underruns_)},
+                 {"suppressed", std::to_string(err_throttle_.suppressed())}});
+        else
+            ++underruns_;
+        return false;
+    }
     LONG took = 0;
     // 找一个非队列中的块（dwFlags 无 WHDR_INQUEUE）
     for (std::size_t i = 0; i < kBlocks; ++i) {
@@ -91,6 +109,12 @@ bool WaveOut::submit_block() {
         dbg_werr_ = LONG(wr);
         if (wr != MMSYSERR_NOERROR) {
             InterlockedIncrement(&free_blocks_);   // 提交失败退还
+            // #110：提交失败（设备拔出/驱动错误）限流上报错误码
+            if (err_throttle_.should_log(hackrftool::log::now_ms()))
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::error, "AUDIO", "write.fail",
+                    {{"code", std::to_string(int(wr))},
+                     {"suppressed", std::to_string(err_throttle_.suppressed())}});
             return false;
         }
         InterlockedIncrement(&dbg_submitted_);

@@ -360,6 +360,10 @@ static void test_iq_recorder_file() {
     rec.write(c.data(), c.size());
     check(rec.stop(), "录制停止");
     check(rec.bytes_written() == 3000, "落盘字节 3000");
+    // #110 健康路径统计断言：干净录制零丢块零写错——write_errors/dropped
+    // 是 record.degraded 遥测的数据源，误计数会让日志说谎
+    check(rec.dropped_blocks() == 0, "健康录制零丢块");
+    check(rec.write_errors() == 0, "健康录制零写错（短写计数）");
     if (std::FILE* fp = _wfopen(path.c_str(), L"rb")) {
         std::vector<unsigned char> buf(3000);
         check(std::fread(buf.data(), 1, 3000, fp) == 3000, "文件长度");
@@ -1305,6 +1309,19 @@ static void test_telemetry_debug_gate() {
     check(lg.count() == 2, "再关闭后继续丢弃");
 }
 
+// 错误限流器（#110）：高频错误首次立即放行，窗口内静默累计，窗口过后
+// 放行并携带被压条数——音频 underrun/rx 丢样这类逐块错误按 1 条/s 上报不刷屏
+static void test_telemetry_error_throttle() {
+    hackrftool::log::ErrorThrottle th;
+    check(th.should_log(100), "首次错误立即放行");
+    check(!th.should_log(400), "1s 窗口内第二条静默");
+    check(!th.should_log(900), "窗口内继续静默");
+    check(th.suppressed() == 2, "被压条数累计（汇总 kv 用）");
+    check(th.should_log(1200), "超过窗口再放行（记汇总条）");
+    check(th.suppressed() == 0, "放行后累计清零");
+    check(th.should_log(0), "时钟 0 视为首次（不与初始态混淆）");
+}
+
 // 遥测并发压测（#97，T2.5 基准）：8 线程 × 500 条写独立实例——
 // 计数一致性（total/count_event 无丢条）+ 环形缓冲不越界
 static void test_telemetry_concurrent() {
@@ -1888,6 +1905,7 @@ int main() {
     test_telemetry();
     test_telemetry_concurrent();
     test_telemetry_debug_gate();
+    test_telemetry_error_throttle();
     test_audio_spectrum();
     test_fm_decimator_stopband();
     test_apt_decode();

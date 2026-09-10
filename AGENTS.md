@@ -13,8 +13,8 @@ cmake --build --preset x64-release && ctest --preset x64-release
 （断言数以 `docs/evolve-log.md` 头部为准，当前 254；本文件不再写死数字）
 
 - UI 行为验证走日志：exe 旁 hackrftool.jsonl（结构化遥测：UI/点击/DSP/APT/扫描/生命周期）+ python tools/log-assert.py <日志> "LIFE:app.start,RADIO:tune" 可选 --order（顺序断言）/ --tail N——截图仅核对布局（视觉识别有幻觉，lessons L14）
-- **debug 模式（#104，逐帧日志回放）**：`HackRFTool.exe --debug` 或环境变量 `HACKRFTOOL_DEBUG=1` 开启——Level::debug 事件放行（关闭时零成本丢弃，正常体量不受影响）。事件速查：`DSP/frame.debug`（逐帧峰值/峰位频率/噪底/突发数/ESB 总量）、`CAP/demod.debug`（逐突发解调：样本数/比特数/符号质量/解出帧数）、`ESB/rec.debug`（逐帧入账：地址 hex/PID/质量/间隔/完整载荷）、`AUDIO/squelch.edge`（静噪开合沿+判据数值）。排障流程：debug 跑一段 → log-assert 按 cat:event 逐帧过滤/回放，不靠视觉。体量提醒：抓包密集时 ~120 行/s，1MB 轮转约 70s——排障短会话够用
-- 遥测分类速查：LIFE 起停 / UI cmd·state / RADIO tune·reconfig·sweep·apply.fail / AUDIO fm.on·off / DSP frame(非fm页)·fm(1Hz) / APT diag / SCAN start·done / SIGDB / SETTINGS / ESB hit
+- **debug 模式（#104，逐帧日志回放）**：`HackRFTool.exe --debug` 或环境变量 `HACKRFTOOL_DEBUG=1` 开启——Level::debug 事件放行（关闭时零成本丢弃，正常体量不受影响）；**#110 起日志查看器顶部复选框可运行时开/关（LIFE debug.on/debug.off，免重启丢现场）**。事件速查：`DSP/frame.debug`（逐帧峰值/峰位频率/噪底/突发数/ESB 总量）、`CAP/demod.debug`（逐突发解调：样本数/比特数/符号质量/解出帧数）、`ESB/rec.debug`（逐帧入账：地址 hex/PID/质量/间隔/完整载荷）、`AUDIO/squelch.edge`（静噪开合沿+判据数值）。排障流程：debug 跑一段 → log-assert 按 cat:event 逐帧过滤/回放，不靠视觉。体量提醒：抓包密集时 ~120 行/s，1MB 轮转约 70s——排障短会话够用
+- 遥测分类速查：LIFE 起停·record.degraded·debug.on·off / UI cmd·state / RADIO tune·reconfig·sweep·apply.fail·rx.loss / AUDIO fm.on·off·device.fail·underrun·write.fail / DSP frame(非fm页)·fm(1Hz) / APT diag / SCAN start·done / SIGDB / SETTINGS / ESB hit / BLE hit·hop
 - 唯一验收命令，应 5/5 通过（单测断言数见 evolve-log 头部 + 端到端合成管线 + WinFlux 测试；两个真机整机自测无设备时退出码 42 → CTest 记 SKIP）
 - **跑 ctest 前先确认构建零 error**：构建失败后 ctest 跑的是陈旧二进制，"全绿"是假象（docs/lessons.md L1，已两次踩中）
 - 整机自测必须 Release：Debug 下全量 FFT 会 CPU 饥饿
@@ -57,4 +57,8 @@ cmake --build --preset x64-release && ctest --preset x64-release
 
 ## 约定
 
+- **日志三条铁律（#110 用户指令，长期有效）**：
+  1. **实现代码之前先加日志**——新功能/新数据通路的埋点与代码同轮落地，排障时不许"临时插桩重跑"；底层（radio/audio/存储）失败必须携带错误码入遥测，不许静默或只进调试变量
+  2. **高频日志必须限流**——逐帧/逐块级事件走 `Level::debug` 门控（关闭零成本）；错误类高频事件用 `log::ErrorThrottle`（首次立即记 + 窗口内静默累计 + 1s 汇总一条带 suppressed 计数）；状态快照走 diff 触发（变化才是事件）
+  3. **级别规范**——`error`=失败且功能受损（device.fail/write.fail/rx.start.fail）；`warn`=可自愈但需关注（underrun/rx.loss/record.degraded/restore.fail）；`info`=生命周期与状态变更（起停/调谐/页面/配置）；`debug`=逐帧回放（仅 debug 模式）。不许级别通胀：正常会话里 info ≤ ~2 行/s
 - 注释、提交信息、文档全用中文；提交风格如 `M6 完成：…` / `evolve #N: …` / `修复…（根因）`

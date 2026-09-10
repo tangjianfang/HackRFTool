@@ -73,6 +73,29 @@ inline void log_telemetry(
     Logger::instance().write(level, cat, event, kv);
 }
 
+// 高频错误限流器（#110）：首次立即放行，窗口内静默累计被压条数，窗口
+// 过后再放行——音频 underrun/rx 丢样这类逐块错误按 1 条/s 汇总不刷屏。
+// 非线程安全：每个调用点单线程持有（回调线程/写线程各自一个实例）。
+class ErrorThrottle {
+public:
+    // 返回 true = 本次应记（首次，或距上次放行已超过 window_ms）
+    bool should_log(std::uint64_t now_ms, std::uint32_t window_ms = 1000) {
+        if (last_ms_ == 0 || now_ms - last_ms_ >= window_ms) {
+            last_ms_ = now_ms == 0 ? 1 : now_ms;   // 0 保留为"从未"哨兵
+            suppressed_ = 0;
+            return true;
+        }
+        ++suppressed_;
+        return false;
+    }
+    // 被压条数——放行的那条汇总日志带上它（"窗口内又发生 N 次"）
+    [[nodiscard]] std::uint32_t suppressed() const noexcept { return suppressed_; }
+
+private:
+    std::uint64_t last_ms_ = 0;
+    std::uint32_t suppressed_ = 0;
+};
+
 // 毫秒时钟（QueryTickCount 换算——Win 下 GetTickCount64，测试下可注入）
 [[nodiscard]] std::uint64_t now_ms() noexcept;
 

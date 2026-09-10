@@ -43,6 +43,8 @@ public:
     [[nodiscard]] bool recording() const noexcept { return running_.load(); }
     [[nodiscard]] std::uint64_t bytes_written() const noexcept { return written_.load(); }
     [[nodiscard]] std::uint64_t dropped_blocks() const noexcept { return dropped_.load(); }
+    // 写线程短写次数（#110：record.degraded 遥测数据源——磁盘满/权限）
+    [[nodiscard]] std::uint64_t write_errors() const noexcept { return write_errors_.load(); }
 
 private:
     void writer_loop();
@@ -51,6 +53,7 @@ private:
     std::atomic<bool> quit_{false};
     std::atomic<std::uint64_t> written_{0};
     std::atomic<std::uint64_t> dropped_{0};
+    std::atomic<std::uint64_t> write_errors_{0};
     std::thread writer_;
     std::mutex mutex_;
     std::deque<std::vector<std::int8_t>> queue_;
