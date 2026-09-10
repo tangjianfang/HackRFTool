@@ -37,6 +37,7 @@
 #include "app/settings.hpp"
 #include "app/telemetry.hpp"
 #include "dsp/channel_monitor.hpp"
+#include "dsp/ble.hpp"
 #include "dsp/esb.hpp"
 #include "dsp/fm.hpp"
 #include "dsp/gfsk.hpp"
@@ -143,6 +144,23 @@ struct App {
     double probe_mhz = 0.0;
     unsigned long long probe_until = 0;
     bool probe_saw_open = false;
+    // ---- BLE 广播扫描（#109，终极目标）----
+    std::atomic<int> ble_live{0};   // 信道轮换线程运行标志
+    std::atomic<int> ble_ch{37};    // 当前广播信道 37/38/39（白化种子+显示）
+    std::atomic<unsigned long long> ble_hop_ms{0};
+    bool ble_mode = false;          // 抓包行「BLE 扫描」开关
+    HWND check_ble = nullptr;
+    struct BleRec {
+        unsigned long long tick = 0;
+        unsigned ch = 37;
+        float peak_db = 0.f;
+        float quality = 0.f;
+        unsigned long long start_sample = 0;
+        hackrftool::dsp::BleAdvPdu pdu;
+    };
+    std::vector<BleRec> ble_records;        // CRC24 通过的有效帧，新在尾，上限 500
+    unsigned long long ble_seen_burst = 0;  // 已消费的突发数（增量处理）
+    int ble_budget = 0;                     // 每 build BLE 解调配额（独立于 ESB 行文本）
 
     // ---- 控件值（#52 起由原生控件持有；内容区每帧重建，普通字段即够） ----
     bool running = false;
@@ -477,11 +495,51 @@ void device_open_failed(App& app, const std::string& err) {
 
 void ensure_fm(App& app, bool on);   // 收音机音频链开关（定义在收音机节）
 void reconfigure_rx(App& app, const hackrftool::radio::RadioConfig& cfg);
+void set_ble_live(App& app, bool on);   // BLE 广播信道轮换（#109，定义在下方）
+
+// BLE 广播信道（37/38/39 = 2402/2426/2480 MHz）轮换线程：各驻留 160ms
+//（广播者间隔 20ms~10s，三信道轮换采样；绝不在 UI 线程改频——同 sweep 契约）
+constexpr double kBleChMhz[3] = {2402.0, 2426.0, 2480.0};
+constexpr unsigned kBleChId[3] = {37, 38, 39};
+void ble_loop(App& app) {
+    unsigned idx = 0;
+    app.ble_ch.store(37);
+    app.ble_hop_ms.store(GetTickCount64());
+    (void)app.radio.set_center_hz(kBleChMhz[0] * 1e6);
+    while (app.ble_live.load() == 1) {
+        Sleep(20);
+        if (app.ble_live.load() != 1) break;
+        if (GetTickCount64() - app.ble_hop_ms.load() >= 160) {
+            app.ble_hop_ms.store(GetTickCount64());
+            idx = (idx + 1) % 3;
+            app.ble_ch.store(int(kBleChId[idx]));
+            const bool ok = app.radio.set_center_hz(kBleChMhz[idx] * 1e6);
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::debug, "BLE", "hop",
+                {{"ch", std::to_string(kBleChId[idx])},
+                 {"mhz", std::to_string(kBleChMhz[idx])},
+                 {"ok", ok ? "1" : "0"}});
+        }
+    }
+}
+
+void set_ble_live(App& app, bool on) {
+    const bool was = app.ble_live.load() == 1;
+    if (on == was) return;
+    if (on) {
+        app.ble_hop_ms.store(0);
+        app.ble_live.store(1);
+        std::thread(ble_loop, std::ref(app)).detach();
+    } else {
+        app.ble_live.store(0);
+    }
+}
 void update_apt_on(App& app);        // APT 解码开关（定义在收音机节）
 
 void toggle_rx(App& app) {
     if (app.running) {
         set_sweep_live(app, false);
+        set_ble_live(app, false);   // #109：BLE 轮换线程随接收停止
         ensure_fm(app, false);
         update_apt_on(app);
         if (app.recorder.recording()) app.recorder.stop();
@@ -513,6 +571,7 @@ void toggle_rx(App& app) {
          {"vga", std::to_string(app.vga)},
          {"src", "toolbar"}});
     if (app.sweep_on == 1) set_sweep_live(app, true);
+    if (app.ble_mode) set_ble_live(app, true);   // #109：BLE 模式随接收恢复
     if (app.page >= 3) ensure_fm(app, true);   // 收音/云图页直接起音频链
     update_apt_on(app);
 }
@@ -599,6 +658,8 @@ void clear_bursts(App& app) {
     app.last_esb.clear();
     app.esb_records.clear();   // #101：有效帧存储一并清
     app.esb_sel = 0;
+    app.ble_records.clear();   // #109：BLE 有效帧一并清
+    app.ble_seen_burst = 0;
 }
 
 // ---- 收音机（#53）：fm 解调线程 / 音频开关 / 自动扫台 ------------------------
@@ -1361,6 +1422,17 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
             pal, filt_bad ? flux::ui::BadgeKind::warning : flux::ui::BadgeKind::info,
             filt_bad ? L"地址过滤：hex 格式非法"
                      : L"仅地址 " + app.cap_addr_filter));
+    if (app.ble_live.load() == 1) {   // #109：BLE 扫描状态徽章
+        const unsigned ch = unsigned(app.ble_ch.load());
+        key->children.push_back(flux::ui::badge(
+            pal, flux::ui::BadgeKind::accent,
+            L"BLE 扫描 · 信道 " + std::to_wstring(ch) + L"（" +
+                wd1(kBleChMhz[ch == 38 ? 1 : ch == 39 ? 2 : 0]) + L" MHz）"));
+        key->children.push_back(flux::ui::caption(
+            pal, L"BLE 有效帧 " + std::to_wstring(app.ble_records.size()) +
+                     L" 条（37/38/39 每 160ms 轮换）",
+            {}));
+    }
 
     // 概览：计数加粗独立成段，操作提示弱化为次级说明（关键信息不再埋没）
     flux::Props count_p;
@@ -1933,7 +2005,143 @@ flux::ElementPtr build(App& app) {
     // M5：实时突发检测——必须在页面构建之前跑，否则行文本生成滞后一个
     // 构建周期，突发已被环形缓冲挤出（read_slice 失败 → 永久缓存无 hex）
     if (app.running) app.live.refresh(float(app.burst_thr));
+    // BLE 广播扫描（#109）：增量消费新突发→BLE 参数解调→ble_scan 入账；
+    // 与 ESB 懒解调独立，共享 demod_budget 防风暴。帧归当前驻留信道
+    //（轮换 160ms 远大于 adv 包长 0.4ms，错配率可忽略）
+    if (app.running && app.ble_live.load() == 1) {
+        const auto& bl = app.live.bursts();
+        if (app.ble_seen_burst > bl.size()) app.ble_seen_burst = 0;   // 清空回绕
+        const unsigned ch_now = unsigned(app.ble_ch.load());
+        const double ble_fs = kRatesMsps[size_t(app.rate_index)] * 1e6;
+        while (app.ble_seen_burst < bl.size() && app.ble_budget > 0) {
+            const auto& b = bl[app.ble_seen_burst];
+            ++app.ble_seen_burst;
+            if (b.samples < 128) continue;
+            --app.ble_budget;
+            const unsigned long long n_demod =
+                std::min<unsigned long long>(b.samples, 262144);
+            std::vector<std::int8_t> slice;
+            if (!app.live.read_slice(b.start_sample, n_demod, slice)) continue;
+            const hackrftool::dsp::GfskDemod demod(
+                ble_fs, 1e6, 250e3);   // BLE 1M PHY：1 Mbps，频偏 250 kHz
+            hackrftool::dsp::GfskResult r;
+            float best_q = -1.0f;
+            // 16Msps=16 采样/符号：全 16 相位试解，按 AA 区汉明距离选优
+            //（前导 8b + 接入码 32b 为已知图案——相位=符号时钟）
+            unsigned best_aa_err = UINT_MAX;
+            for (unsigned off : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u,
+                                 11u, 12u, 13u, 14u, 15u}) {
+                if (n_demod <= off) break;
+                const unsigned long long avail = n_demod - off;
+                std::vector<std::complex<float>> cmplx(avail);
+                for (unsigned long long i = 0; i < avail; ++i)
+                    cmplx[static_cast<std::size_t>(i)] = {
+                        float(slice[static_cast<std::size_t>((i + off) * 2)]),
+                        float(slice[static_cast<std::size_t>((i + off) * 2 + 1)])};
+                auto cand = demod.demod(cmplx, 0);
+                float q = 0.0f;
+                if (!cand.quality.empty()) {
+                    for (const float x : cand.quality) q += std::min(1.0f, std::abs(x));
+                    q /= float(cand.quality.size());
+                }
+                // AA 汉明距离：preamble 0xAA + 接入码 D6 BE 89 8E（LSB-first）
+                unsigned aa_err = UINT_MAX;
+                if (cand.bits.size() >= 40) {
+                    static const unsigned char kExp[5] = {0xAA, 0xD6, 0xBE, 0x89, 0x8E};
+                    aa_err = 0;
+                    for (std::size_t bi = 0; bi < 40; ++bi)
+                        aa_err += unsigned(((cand.bits[bi] & 1u) !=
+                                            ((kExp[bi / 8] >> (bi % 8)) & 1u)));
+                }
+                if (aa_err < best_aa_err ||
+                    (aa_err == best_aa_err && q > best_q)) {
+                    best_aa_err = aa_err;
+                    best_q = q;
+                    r = std::move(cand);
+                }
+                if (best_aa_err == 0) break;   // 完美相位提前收工
+            }
+            for (auto& fr : hackrftool::dsp::ble_scan(r.bits, ch_now)) {
+                App::BleRec rec;
+                rec.tick = GetTickCount64();
+                rec.ch = ch_now;
+                rec.peak_db = b.peak_db;
+                rec.quality = best_q < 0.f ? 0.f : best_q;
+                rec.start_sample = b.start_sample;
+                rec.pdu = std::move(fr.pdu);
+                app.ble_records.push_back(std::move(rec));
+                constexpr std::size_t kBleMax = 500;
+                if (app.ble_records.size() > kBleMax)
+                    app.ble_records.erase(
+                        app.ble_records.begin(),
+                        app.ble_records.end() - std::ptrdiff_t(kBleMax));
+                const auto& rec2 = app.ble_records.back();
+                std::string addr_hex;
+                for (const unsigned char a : rec2.pdu.adv_a) {
+                    char ab[4];
+                    std::snprintf(ab, sizeof ab, "%02X", a);
+                    addr_hex += ab;
+                }
+                hackrftool::log::log_telemetry(
+                    hackrftool::log::Level::info, "BLE", "hit",
+                    {{"ch", std::to_string(rec2.ch)},
+                     {"type", std::to_string(rec2.pdu.type)},
+                     {"addr", addr_hex},
+                     {"name", rec2.pdu.name},
+                     {"peak_db", std::to_string(rec2.peak_db)}});
+                if (hackrftool::log::Logger::instance().debug())
+                    hackrftool::log::log_telemetry(
+                        hackrftool::log::Level::debug, "BLE", "rec.debug",
+                        {{"ch", std::to_string(rec2.ch)},
+                         {"bits", std::to_string(r.bits.size())},
+                         {"q", std::to_string(rec2.quality)},
+                         {"len", std::to_string(rec2.pdu.payload_len)}});
+            }
+            if (hackrftool::log::Logger::instance().debug()) {
+                static unsigned burst_dbg = 0;
+                if (++burst_dbg % 16 == 0)
+                    hackrftool::log::log_telemetry(
+                        hackrftool::log::Level::debug, "BLE", "burst.sample",
+                        {{"aa", std::to_string(
+                                    hackrftool::dsp::ble_count_aa(r.bits))},
+                         {"bits", std::to_string(r.bits.size())},
+                         {"q", std::to_string(best_q < 0.f ? 0.f : best_q)}});
+                unsigned vc[16] = {};
+                hackrftool::dsp::ble_debug_variants(r.bits, ch_now, vc);
+                std::string s;
+                for (int v = 0; v < 16; ++v)
+                    if (vc[v] != 0)
+                        s += std::to_string(v) + ":" + std::to_string(vc[v]) + " ";
+                if (!s.empty())
+                    hackrftool::log::log_telemetry(
+                        hackrftool::log::Level::debug, "BLE", "variant.hit",
+                        {{"ch", std::to_string(ch_now)}, {"v", s}});
+                else if (hackrftool::dsp::ble_count_aa(r.bits) > 0) {
+                    // AA 命中但全变体失败 → 原始比特转储（离线穷举约定）
+                    static int dump_n = 0;
+                    if (dump_n < 30) {
+                        std::string bits8;
+                        bits8.reserve(r.bits.size());
+                        for (const std::uint8_t b : r.bits) bits8 += char('0' + b);
+                        const std::string nm =
+                            "ble-bits-" + std::to_string(ch_now) + "-" +
+                            std::to_string(dump_n) + ".txt";
+                        std::FILE* fp =
+                            _wfopen(exe_dir_path(nm.c_str()).c_str(), L"wb");
+                        if (fp != nullptr) {
+                            std::fprintf(fp, "ch=%u q=%.3f bits=%s\n", ch_now,
+                                         double(best_q < 0.f ? 0.f : best_q),
+                                         bits8.c_str());
+                            std::fclose(fp);
+                        }
+                        ++dump_n;
+                    }
+                }
+            }
+        }
+    }
     app.demod_budget = 2;   // 本帧解调配额（build 内突发行文本生成消耗）
+    app.ble_budget = 2;     // BLE 消费独立配额（#109：与行文本互不抢占）
 
     const flux::Palette& pal = app.host.palette();
 
@@ -2192,6 +2400,7 @@ enum : int {
     IDC_PANRIGHT,
     IDC_EDIT_ADDR,
     IDC_CHECK_ADDRF,
+    IDC_CHECK_BLE,
     IDC_PAGE_MAX,
 };
 
@@ -2264,6 +2473,7 @@ void apply_page_default(App& app) {
         s.cap_addr_filter = hex;
     }
     s.cap_addr_only = app.cap_addr_only;
+    s.ble_mode = app.ble_mode ? 1 : 0;   // #109
     s.threshold = app.threshold;
     s.burst_thr = app.burst_thr;
     s.symrate_idx = app.symrate_idx;
@@ -2292,6 +2502,7 @@ void restore_settings(App& app, const hackrftool::app::Settings& s) {
     app.spec_y_idx = s.spec_y_idx;   // #89 补：schema 有键此前未搬运
     app.cap_addr_filter = widen(s.cap_addr_filter);   // #102
     app.cap_addr_only = s.cap_addr_only;
+    app.ble_mode = s.ble_mode != 0;   // #109
     app.threshold = s.threshold;
     app.burst_thr = s.burst_thr;
     app.symrate_idx = s.symrate_idx;
@@ -2310,6 +2521,8 @@ void restore_settings(App& app, const hackrftool::app::Settings& s) {
     SetWindowTextW(app.edit_addr, widen(s.cap_addr_filter).c_str());   // #102
     SendMessageW(app.check_addrf, BM_SETCHECK,
                  s.cap_addr_only ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(app.check_ble, BM_SETCHECK,
+                 s.ble_mode ? BST_CHECKED : BST_UNCHECKED, 0);   // #109
     SendMessageW(app.track_lna, TBM_SETPOS, TRUE, LPARAM(app.lna));
     SendMessageW(app.track_vga, TBM_SETPOS, TRUE, LPARAM(app.vga));
     SetWindowTextW(app.lbl_lna, (L"LNA " + std::to_wstring(app.lna)).c_str());
@@ -2863,6 +3076,10 @@ void create_settings_row(App& app) {
         make_ctl(app, WC_BUTTONW, L"仅此地址", BS_AUTOCHECKBOX | WS_TABSTOP, 0,
                  IDC_CHECK_ADDRF);
     slot(app.row_capture, app.check_addrf, 76);
+    app.check_ble =
+        make_ctl(app, WC_BUTTONW, L"BLE 扫描", BS_AUTOCHECKBOX | WS_TABSTOP, 0,
+                 IDC_CHECK_BLE);
+    slot(app.row_capture, app.check_ble, 76);
     // #88：抓包特有动作归位（原工具栏「清空」）
     slot(app.row_capture,
          make_ctl(app, WC_BUTTONW, L"清空", BS_PUSHBUTTON | WS_TABSTOP, 0,
@@ -3826,6 +4043,51 @@ void on_command(App& app, int id, int code, HWND from) {
             app.cap_addr_only =
                 SendMessageW(app.check_addrf, BM_GETCHECK, 0, 0) == BST_CHECKED;
         break;
+    case IDC_CHECK_BLE:     // #109：BLE 广播扫描开关
+        if (code == BN_CLICKED) {
+            const bool on =
+                SendMessageW(app.check_ble, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            if (on && app.sweep_on == 1) {
+                SendMessageW(app.check_ble, BM_SETCHECK, BST_UNCHECKED, 0);
+                app.status = L"全频段扫描与 BLE 互斥（先退出全频段）";
+                break;
+            }
+            if (on && app.fm_on.load()) {
+                ensure_fm(app, false);   // 音频链锁 2Msps+固定频率，让位 BLE
+                app.status = L"BLE 扫描已接管（收音音频链暂停）";
+            }
+            if (on && app.rate_index != 3) {
+                // #109：BLE 1M PHY 用 16Msps（16 采样/符号）+16 相位全扫+
+                // AA 相关评分——8Msps/4 相位下 BER 随帧长累积，CRC24 全挂
+                //（真机 150s 实测头部对、CRC 全错的根因）；同收音页强制策略
+                app.rate_index = 3;
+                SendMessageW(app.combo_rate, CB_SETCURSEL, 3, 0);
+                if (app.running) reconfigure_rx(app, current_radio_cfg(app));
+            }
+            if (on && app.lna < 32 && !app.gains_pinned) {
+                // BLE 广播包弱（手机 0~10dBm）：提增益到收音页同款缺省
+                app.lna = 40;
+                app.vga = std::max(app.vga, 40u);
+                app.amp = true;
+                SendMessageW(app.track_lna, TBM_SETPOS, TRUE, LPARAM(40));
+                SendMessageW(app.track_vga, TBM_SETPOS, TRUE, LPARAM(app.vga));
+                if (app.check_amp != nullptr)
+                    SendMessageW(app.check_amp, BM_SETCHECK, BST_CHECKED, 0);
+                SetWindowTextW(app.lbl_lna, L"LNA 40");
+                SetWindowTextW(app.lbl_vga,
+                               (L"VGA " + std::to_wstring(app.vga)).c_str());
+                if (app.running) {
+                    hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
+                    reconfigure_rx(app, cfg);
+                }
+            }
+            app.ble_mode = on;
+            if (app.running) set_ble_live(app, on);
+            hackrftool::log::log_telemetry(
+                hackrftool::log::Level::info, "CAP", on ? "ble.on" : "ble.off",
+                {{"ch", std::to_string(unsigned(app.ble_ch.load()))}});
+        }
+        break;
     case IDC_CHECK_AMP:
         if (code == BN_CLICKED) {
             app.amp = SendMessageW(app.check_amp, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -3849,6 +4111,12 @@ void on_command(App& app, int id, int code, HWND from) {
                 // use-after-free 崩溃。收音中拒绝切换（B2 同款回弹+提示）
                 SendMessageW(app.combo_rate, CB_SETCURSEL, 0, 0);
                 app.status = L"收音中采样率锁定 2 Msps（音频链要求），先停止收音再切换";
+                break;
+            }
+            if (app.ble_live.load() == 1) {
+                // #109：BLE 1M PHY 锁 16Msps（符号定时精度），同款回弹
+                SendMessageW(app.combo_rate, CB_SETCURSEL, 3, 0);
+                app.status = L"BLE 扫描中采样率锁定 16 Msps，先关闭 BLE 再切换";
                 break;
             }
             if (app.sweep_on == 1 && i != 4) {
@@ -4246,6 +4514,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                      {"lna", std::to_string(app.lna)},
                      {"vga", std::to_string(app.vga)}});
                 if (app.sweep_on == 1) set_sweep_live(app, true);
+                if (app.ble_mode) set_ble_live(app, true);   // #109：自动恢复同享
                 if (app.page >= 3) ensure_fm(app, true);
                 update_apt_on(app);
             } else {
@@ -4379,6 +4648,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     }
     exit_code = int(msg.wParam);
     app.sweep_live.store(0);   // 收扫描线程（detach 线程须先令其退出再析构 App）
+    app.ble_live.store(0);     // #109：收 BLE 轮换线程
     Sleep(80);
 
     if (selftest) {

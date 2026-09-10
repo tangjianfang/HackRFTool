@@ -54,6 +54,7 @@ std::string serialize(const Settings& s) {
     os << "sig_sort\t" << s.sig_sort << "\n";
     os << "cap_addr_filter\t" << s.cap_addr_filter << "\n";
     os << "cap_addr_only\t" << (s.cap_addr_only ? 1 : 0) << "\n";
+    os << "ble_mode\t" << s.ble_mode << "\n";
     return os.str();
 }
 
@@ -140,6 +141,8 @@ std::optional<Settings> deserialize(std::string_view text) {
             if (clamp_int(std::llround(d), 0, 1, i)) { s.sig_sort = i; any = true; }
         } else if (key == "cap_addr_only") {
             if (clamp_int(std::llround(d), 0, 1, i)) { s.cap_addr_only = i != 0; any = true; }
+        } else if (key == "ble_mode") {
+            if (clamp_int(std::llround(d), 0, 1, i)) { s.ble_mode = i; any = true; }
         }
         if (eol == std::string_view::npos) break;
     }

@@ -33,6 +33,7 @@ struct Settings {
     int sig_sort = 0;                // 0=强度 1=频率
     std::string cap_addr_filter;     // 抓包地址过滤（hex 文本，#102）
     bool cap_addr_only = false;      // 1=仅存指定地址的帧
+    int ble_mode = 0;                // 1=BLE 广播扫描（#109）
 };
 
 // TSV：每行 "key<TAB>value"，# 开头为注释。未知键忽略（前向兼容），

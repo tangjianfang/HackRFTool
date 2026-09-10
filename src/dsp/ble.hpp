@@ -39,6 +39,16 @@ struct BleAdvFrame {
 [[nodiscard]] std::vector<BleAdvFrame> ble_scan(const std::vector<std::uint8_t>& bits,
                                                 unsigned channel);
 
+// 统计前导+广播接入码出现次数（不校验 CRC）——排障用：AA>0 而 ble_scan=0
+// 说明有包但白化/CRC 约定或解调质量有问题
+[[nodiscard]] std::size_t ble_count_aa(const std::vector<std::uint8_t>& bits) noexcept;
+
+// 变体探测（排障专用，#109）：白化/CRC 空口约定 16 变体（位序 LSB/MSB ×
+// 种子 ch/ch|0x40 × 抽头 b6/fb × CRC 空口字节序）逐一试解，counts[16]
+// 累计各变体 CRC 通过帧数——真机日志定位正确约定后固化进 ble_scan
+void ble_debug_variants(const std::vector<std::uint8_t>& bits, unsigned channel,
+                        unsigned counts[16]) noexcept;
+
 // 白化/去白化（同一 LFSR 自逆）：data = PDU+CRC 字节（空口序）
 void ble_whiten(std::uint8_t* data, std::size_t n, unsigned channel) noexcept;
 
