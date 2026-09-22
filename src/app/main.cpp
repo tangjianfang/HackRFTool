@@ -670,6 +670,84 @@ void clear_bursts(App& app) {
     app.ble_seen_burst = 0;
 }
 
+// CSV 字段转义（RFC 4180 近似：含逗号/引号/换行 → 双引号包裹并翻倍引号）
+std::string csv_escape(const std::string& s) {
+    if (s.find(',') == std::string::npos && s.find('"') == std::string::npos &&
+        s.find('\n') == std::string::npos && s.find('\r') == std::string::npos)
+        return s;
+    std::string out = "\"";
+    for (const char c : s) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    return out + "\"";
+}
+
+// 抓包数据导出（#110）：ESB 全字段（含解读列）+ BLE 帧两段式 CSV。
+// 无对话框直落 exe 旁 capture-export.csv（可脚本化/可回归验证）
+void export_capture_csv(App& app) {
+    std::string out;
+    out += "type,t_s,addr,len,pid,no_ack,retx,tag,entropy,quality_pct,"
+           "peak_dbfs,interval_ms,payload_hex,name\n";
+    char tbuf[32];
+    for (const auto& r : app.esb_records) {
+        std::string addr;
+        for (const unsigned char a : r.address) {
+            char ab[4];
+            std::snprintf(ab, sizeof ab, "%02X", a);
+            addr += ab;
+        }
+        const char* tag = r.interp.looks_encrypted ? "suspect-encrypted"
+                        : r.interp.all_zero       ? "keep-alive"
+                        : r.interp.seq_byte >= 0  ? "has-seq-byte"
+                                                  : "plaintext";
+        std::snprintf(tbuf, sizeof tbuf, "%.3f",
+                      double(r.tick - app.boot_ms) / 1000.0);
+        out += std::string("ESB,") + tbuf + "," + addr + "," +
+               std::to_string(r.payload.size()) + "," +
+               std::to_string(r.pid) + "," + (r.no_ack ? "1" : "0") + ",," +
+               tag + "," + std::to_string(r.interp.entropy_bits) + "," +
+               std::to_string(unsigned(r.quality * 100.f + 0.5f)) + "," +
+               std::to_string(r.peak_db) + "," +
+               std::to_string(r.interval_ms) + "," +
+               csv_escape(hackrftool::dsp::hex_dump(r.payload)) + ",\n";
+    }
+    for (const auto& r : app.ble_records) {
+        std::string addr;
+        for (const unsigned char a : r.pdu.adv_a) {
+            char ab[4];
+            std::snprintf(ab, sizeof ab, "%02X", a);
+            addr += ab;
+        }
+        std::snprintf(tbuf, sizeof tbuf, "%.3f",
+                      double(r.tick - app.boot_ms) / 1000.0);
+        out += std::string("BLE,") + tbuf + "," + addr + "," +
+               std::to_string(r.pdu.payload_len) + "," +
+               std::to_string(r.pdu.type) + "," +
+               (r.pdu.tx_add ? "1" : "0") + ",,," +
+               std::to_string(unsigned(r.quality * 100.f + 0.5f)) + "," +
+               std::to_string(r.peak_db) + ",," +
+               csv_escape(hackrftool::dsp::hex_dump(r.pdu.manufacturer)) +
+               "," + csv_escape(r.pdu.name) + "\n";
+    }
+    if (std::FILE* fp =
+            _wfopen(exe_dir_path("capture-export.csv").c_str(), L"wb")) {
+        std::fwrite(out.data(), 1, out.size(), fp);
+        std::fclose(fp);
+        app.status = L"已导出 capture-export.csv（ESB " +
+                     std::to_wstring(app.esb_records.size()) + L" 行 · BLE " +
+                     std::to_wstring(app.ble_records.size()) + L" 行）";
+        hackrftool::log::log_telemetry(
+            hackrftool::log::Level::info, "CAP", "export",
+            {{"esb", std::to_string(app.esb_records.size())},
+             {"ble", std::to_string(app.ble_records.size())}});
+    } else {
+        app.status = L"导出失败（无法写 capture-export.csv）";
+        hackrftool::log::log_telemetry(hackrftool::log::Level::error, "CAP",
+                                       "export.fail", {});
+    }
+}
+
 // ---- 收音机（#53）：fm 解调线程 / 音频开关 / 自动扫台 ------------------------
 
 // fm 线程：SPSC 环拉 IQ → FmReceiver → waveOut（音频回调在本线程执行）
@@ -2142,7 +2220,8 @@ flux::ElementPtr build(App& app) {
                     if (app.ble_dump_n < 30) {
                         std::string bits8;
                         bits8.reserve(r.bits.size());
-                        for (const std::uint8_t b : r.bits) bits8 += char('0' + b);
+                        for (const std::uint8_t bit : r.bits)
+                            bits8 += char('0' + bit);
                         const std::string nm =
                             "ble-bits-" + std::to_string(ch_now) + "-" +
                             std::to_string(app.ble_dump_n) + ".txt";
@@ -2446,6 +2525,7 @@ enum : int {
     IDC_EDIT_ADDR,
     IDC_CHECK_ADDRF,
     IDC_CHECK_BLE,
+    IDC_EXPORT_CAP,
     IDC_PAGE_MAX,
 };
 
@@ -3125,6 +3205,10 @@ void create_settings_row(App& app) {
         make_ctl(app, WC_BUTTONW, L"BLE 扫描", BS_AUTOCHECKBOX | WS_TABSTOP, 0,
                  IDC_CHECK_BLE);
     slot(app.row_capture, app.check_ble, 76);
+    slot(app.row_capture,
+         make_ctl(app, WC_BUTTONW, L"导出 CSV", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                  IDC_EXPORT_CAP),
+         84);   // #110：抓包数据落盘（Excel/Wireshark 前置清洗）
     // #88：抓包特有动作归位（原工具栏「清空」）
     slot(app.row_capture,
          make_ctl(app, WC_BUTTONW, L"清空", BS_PUSHBUTTON | WS_TABSTOP, 0,
@@ -4119,6 +4203,9 @@ void on_command(App& app, int id, int code, HWND from) {
         if (code == BN_CLICKED)
             app.cap_addr_only =
                 SendMessageW(app.check_addrf, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        break;
+    case IDC_EXPORT_CAP:   // #110：抓包导出 CSV
+        if (code == BN_CLICKED) export_capture_csv(app);
         break;
     case IDC_CHECK_BLE:     // #109：BLE 广播扫描开关
         if (code == BN_CLICKED) {
