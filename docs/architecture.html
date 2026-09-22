@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HackRFTool 架构文档 · RF 基础 · HackRF 使用指南</title>
+<style>
+:root{--bg:#0d1220;--panel:#151c2e;--line:#2a3550;--text:#dce3f2;--dim:#8fa0c0;--acc:#5aa2ff;--ok:#4fbf7a;--warn:#e0a63c;--bad:#e0645a;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:15px/1.75 "Segoe UI","Microsoft YaHei",sans-serif;padding:0 0 80px}
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+header{border-bottom:1px solid var(--line);padding:36px 0 20px;margin-bottom:8px}
+h1{font-size:26px;color:#fff}
+.sub{color:var(--dim);margin-top:6px;font-size:13px}
+nav{position:sticky;top:0;background:rgba(13,18,32,.96);border-bottom:1px solid var(--line);z-index:9;padding:10px 0;margin-bottom:24px}
+nav a{color:var(--dim);text-decoration:none;margin-right:16px;font-size:13px}
+nav a:hover{color:var(--acc)}
+h2{font-size:20px;color:var(--acc);margin:40px 0 14px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+h3{font-size:16px;color:#fff;margin:22px 0 8px}
+p{margin:8px 0;color:var(--text)}
+.dim{color:var(--dim)}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--panel);color:#fff;font-weight:600}
+tr:nth-child(even) td{background:rgba(21,28,46,.5)}
+code{background:var(--panel);padding:1px 6px;border-radius:4px;font:13px Consolas,monospace;color:#9fd0ff}
+pre{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;overflow-x:auto;margin:10px 0}
+pre code{background:none;padding:0}
+.mermaid{background:#fff;border-radius:8px;padding:12px;margin:12px 0;overflow-x:auto}
+.tag{display:inline-block;padding:0 8px;border-radius:10px;font-size:12px;margin-right:6px}
+.t-ok{background:rgba(79,191,122,.15);color:var(--ok)}
+.t-warn{background:rgba(224,166,60,.15);color:var(--warn)}
+.t-bad{background:rgba(224,100,90,.15);color:var(--bad)}
+ul{margin:8px 0 8px 22px}
+.note{border-left:3px solid var(--acc);background:rgba(90,162,255,.07);padding:8px 14px;margin:12px 0;border-radius:0 6px 6px 0;font-size:14px}
+.warnbox{border-left:3px solid var(--warn);background:rgba(224,166,60,.07);padding:8px 14px;margin:12px 0;border-radius:0 6px 6px 0;font-size:14px}
+footer{margin-top:60px;color:var(--dim);font-size:12px;border-top:1px solid var(--line);padding-top:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<h1>HackRFTool 架构文档</h1>
+<div class="sub">基于 HackRF One 的 2.4 GHz 信号检测工具 · M0–M6 + 演进 #1–#109 · 更新 2026-09-10（对应提交 c317478）· 面向：新成员 Review / RF 小白入门</div>
+</header>
+<nav>
+<a href="#ctx">系统边界</a><a href="#logic">逻辑架构</a><a href="#comp">职责</a><a href="#dep">依赖</a><a href="#rt">运行时线程</a><a href="#flow">关键数据流</a><a href="#iface">接口契约</a><a href="#state">状态</a><a href="#dm">数据模型</a><a href="#nfr">NFR</a><a href="#adr">决策 ADR</a><a href="#risk">风险</a><a href="#rf">RF 基础</a><a href="#hackrf">HackRF 使用</a><a href="#ant">天线选择</a>
+</nav>
+
+<!-- ============ 1 Overview ============ -->
+<h2>1. Overview</h2>
+<p>HackRFTool 是运行于 Windows x64 的单进程桌面应用，通过 HackRF One 硬件接收 2.4 GHz ISM 频段信号（nRF24 ESB 私有协议 / BLE 蓝牙广播），并覆盖 FM 广播收音、NOAA/Meteor 气象卫星云图接收、轨道预测。本文档覆盖：系统架构（含线程/数据流/契约）、RF 基础知识（小白到入门）、HackRF 使用与天线选择。合规边界：<b>只收不发</b>。</p>
+
+<!-- ============ 2 Context ============ -->
+<h2 id="ctx">2. Architecture Context</h2>
+<div class="mermaid">
+flowchart LR
+    U["用户"] -->|键鼠/截图| APP["HackRFTool.exe"]
+    APP <-->|USB 2.0 独占| HW["HackRF One 硬件"]
+    HW -->|SMA 天线| AIR["空中信号: 2.4G ISM / FM 广播 / 气象卫星"]
+    APP -->|音频| SPK["扬声器 / WaveOut 设备"]
+    APP -->|HTTPS 拉取 TLE| CEL["Celestrak.org"]
+    APP -->|读写| FS["exe 旁文件: settings.tsv / signals.tsv / hackrftool.jsonl / *.cs8"]
+    APP -.->|日志断言验收| LA["tools/log-assert.py"]
+</div>
+<p class="dim">外部依赖只有两类：HackRF 硬件（USB 独占设备，多实例互踢）与 Celestrak TLE 拉取（7 天缓存）。音频输出走系统 WaveOut。</p>
+
+<!-- ============ 3 Logical ============ -->
+<h2 id="logic">3. Logical Architecture</h2>
+<div class="mermaid">
+flowchart TB
+    subgraph app["src/app（组装层）"]
+        MAIN["main.cpp<br>骨架/UI 组装/线程/状态（4600+ 行）"]
+        SET["settings.cpp<br>21+2 项参数 TSV 持久化"]
+        TEL["telemetry.cpp<br>JSONL 日志（spdlog 轮转 sink）"]
+    end
+    subgraph dsp["src/dsp（纯函数层，不依赖 UI/硬件）"]
+        ANA["analyzer 频谱"]
+        WF["waterfall 瀑布"]
+        CM["channel_monitor 信道监测"]
+        PANO["panorama 全景拼接"]
+        BUR["burst_detector 突发检测"]
+        GK["gfsk 解调"]
+        ESB["esb 解帧"]
+        BLE["ble 广播链路"]
+        LVB["live_bursts 环形缓冲"]
+        FMD["fm 收音链路"]
+        APT["apt 卫星云图"]
+        MET["meteor QPSK"]
+        SIG["sigdb 信号库"]
+        ORB["orbit/orbit_map 轨道"]
+    end
+    subgraph radio["src/radio（硬件层）"]
+        HR["hackrf.cpp<br>LoadLibrary 动态加载 libhackrf"]
+        REC["iq_recorder IQ 落盘"]
+    end
+    subgraph ui["src/ui（WinFlux 声明式 + 原生 GDI）"]
+        WV["views / monitor_view 图表"]
+        AV["apt_view 原生云图窗"]
+        ST["status_text 状态栏"]
+    end
+    subgraph audio["src/audio"]
+        WO["waveout 音频输出"]
+    end
+    MAIN --> ANA & BUR & FMD
+    MAIN --> HR
+    MAIN --> WV & AV & ST
+    MAIN --> SET & TEL & WO
+    HR --> REC
+    BUR --> ANA
+    FMD --> WO
+</div>
+<p class="dim">分层铁律：dsp 层禁止依赖 UI 与硬件（AGENTS.md 契约），新算法一律写成纯函数供 tests/dsp_test.cpp 直接单测。</p>
+
+<!-- ============ 4 Component Responsibilities ============ -->
+<h2 id="comp">4. Component Responsibilities</h2>
+<table>
+<tr><th>Component</th><th>负责</th><th>不负责</th></tr>
+<tr><td><code>main.cpp App</code></td><td>窗口/工具栏/设置行三级骨架、页签路由、线程编排、全部设置项持有</td><td>DSP 算法细节、硬件寄存器操作、绘图表实现</td></tr>
+<tr><td><code>radio/hackrf</code></td><td>动态加载 libhackrf、启停流、改频/增益、IQ 回调分发</td><td>IQ 数据的任何解析（回调内只许拷贝，禁调类方法）</td></tr>
+<tr><td><code>dsp/analyzer</code></td><td>FFT 频谱帧产出（256 bin）、峰值/噪底</td><td>频率换算为信道语义（上层折算）</td></tr>
+<tr><td><code>dsp/live_bursts</code></td><td>2M 复样本环形缓冲、突发检测、read_slice 回取</td><td>解调（GFSK/ESB/BLE 在 UI 帧内懒执行）</td></tr>
+<tr><td><code>dsp/esb</code></td><td>ESB 帧搜索：前导+地址 3–5B+PCF（len/PID/NO_ACK）+CRC16 硬门限</td><td>重传计时器语义、应用层协议（无包类型字段）</td></tr>
+<tr><td><code>dsp/ble</code></td><td>BLE 广播链路：白化、CRC24、PDU/AD 解析（设备名/厂商/flags）</td><td>连接态数据包（仅 37/38/39 广播信道）、BER 恢复（匹配滤波未完成）</td></tr>
+<tr><td><code>dsp/fm</code></td><td>FIR 抽取→鉴频→导频 PLL→立体声矩阵→去加重；音频谱 FFT；静噪增益</td><td>音频设备管理（waveout 独立）</td></tr>
+<tr><td><code>dsp/sigdb</code></td><td>信号库纯函数：频段判定/筛选/随机选台/TSV 读写</td><td>扫台线程调度（main.cpp start_scan）</td></tr>
+<tr><td><code>dsp/orbit*</code></td><td>J2 轨道递推、星下点投影、世界地图渲染数据</td><td>TLE 拉取时机（main.cpp 7 天节流）</td></tr>
+<tr><td><code>app/telemetry</code></td><td>JSONL 结构化日志：级别门控（debug 模式）、环形缓冲、spdlog 轮转落盘</td><td>日志语义分析（tools/log-assert.py 独立工具）</td></tr>
+<tr><td><code>app/settings</code></td><td>参数序列化/反序列化+值域钳制（损坏行跳过保留默认）</td><td>控件同步（restore_settings 在 main.cpp）</td></tr>
+<tr><td><code>ui/apt_view</code></td><td>原生 GDI 位图窗（StretchDIBits 8bpp 灰度）、PNG 保存</td><td>APT 解码（dsp/apt 产出行数据）</td></tr>
+</table>
+
+<!-- ============ 5 Dependency ============ -->
+<h2 id="dep">5. Dependency Architecture</h2>
+<div class="mermaid">
+flowchart LR
+    HT["HackRFTool targets"] --> FLUX["WinFlux::flux<br>（add_subdirectory 源码构建）"]
+    HT --> SPD["spdlog::spdlog<br>（静态 .lib，无 DLL）"]
+    HT --> SYS["系统库<br>Comdlg32/Dbghelp/Comctl32/Winmm/Gdiplus/Urlmon/d2d1/DWrite/dcomp"]
+    HT --> LH["libhackrf.dll<br>（运行时 LoadLibrary，不链 .dll.a）"]
+    LH --> LU["libusb-1.0.dll / libwinpthread-1.dll<br>（msys64 复制）"]
+    TEL2["telemetry.cpp"] --> SPD
+    CRT["MSVCP140 / VCRUNTIME140<br>（动态 CRT）"]
+    classDef third fill:#2a3550,color:#fff
+    class FLUX,SPD,LH,LU,CRT third
+</div>
+<p class="dim">三方依赖仅 WinFlux（上游不可修只记录）与 spdlog（#105 用户授权例外，静态链入，dumpbin 已核）。libhackrf 为 MSYS2/MinGW 构建，MSVC 链接器不能链其 .dll.a——必须 LoadLibrary + GetProcAddress（ADR-001）。</p>
+
+<!-- ============ 6 Runtime ============ -->
+<h2 id="rt">6. Runtime Architecture（线程视图）</h2>
+<div class="mermaid">
+flowchart TB
+    subgraph UITH["UI 线程（GetMessage 泵）"]
+        BUILD["build() 心跳 ~40fps<br>拉帧/重建声明式树/sync_chrome"]
+        LAY["layout() + 几何看门狗"]
+        WND["Win32 消息: WM_COMMAND/HSCROLL"]
+    end
+    subgraph RXTH["libusb 回调线程（rx_trampoline_ui）"]
+        RXCB["每块 IQ 分发: analyzer.feed / live.write / recorder.write"]
+    end
+    subgraph FMTH["fm 专职线程（fm_loop）"]
+        FML["SPSC 4MB 环 → FmReceiver → waveout"]
+    end
+    subgraph BGTH["后台短线程（detach）"]
+        SW["sweep_loop: 5 段跳频 200ms/段"]
+        BLEL["ble_loop: 广播信道 37/38/39 轮换 160ms"]
+        SCANN["scan 线程: 扫台 80ms 驻留"]
+        SELF["selftest 看门狗（6s/8s）"]
+    end
+    RXCB -->|IQ| BUILD
+    RXCB -->|字节环| FML
+    SW -->|set_center_hz| HW2["HackRF 硬件"]
+    BLEL -->|set_center_hz| HW2
+    FML -->|音频回调 fm_audio_cb| WO2["WaveOut"]
+    BUILD -->|PostMessage WM_COMMAND| WND
+</div>
+<p class="dim">线程纪律：跳频/改频绝不在 UI 线程（paint 中同步 set_freq 会挂死首帧 build）；rx 回调内禁止调用 HackRadio 方法；detach 线程退出前必须先置停标志再析构 App。</p>
+
+<!-- ============ 7 Flow ============ -->
+<h2 id="flow">7. Key Data Flow / Sequence</h2>
+<h3>7.1 频谱主链路（每 build 心跳）</h3>
+<div class="mermaid">
+sequenceDiagram
+    participant HW as HackRF(USB线程)
+    participant AN as analyzer
+    participant B as build()心跳
+    participant W as WinFlux内容区
+    HW->>AN: IQ 块 feed
+    B->>AN: snapshot() 取帧
+    AN-->>B: SpectrumFrame(256bin)
+    B->>B: 瀑布push/监测push(帧序号去重)
+    B->>W: 重建声明式树(paint_id=seq 局部重绘)
+    W-->>B: 点击频谱→tune_to(热切频)
+</div>
+<h3>7.2 ESB 抓包懒解调（预算制）</h3>
+<div class="mermaid">
+sequenceDiagram
+    participant L as live_bursts环形缓冲
+    participant B as build()心跳
+    participant G as GfskDemod
+    participant E as esb_scan
+    B->>L: refresh(burst_thr) 检测突发
+    B->>L: read_slice(start,len)
+    L-->>B: int8 IQ 切片
+    B->>G: demod(±半符号 4 相位取最优)
+    G-->>B: bits + 符号质量
+    B->>E: esb_scan(bits)
+    E-->>B: EsbFrame(CRC16 通过)
+    B->>B: esb_records 入账+esb_interpret 解读缓存
+</div>
+<p class="dim">解调预算 demod_budget=2/帧 + BLE 独立预算 2/帧：突发风暴时行文本延后补全，不阻塞渲染。</p>
+<h3>7.3 BLE 扫描链路（#109，BER 攻坚中）</h3>
+<div class="mermaid">
+sequenceDiagram
+    participant HL as ble_loop线程
+    participant HW as HackRF
+    participant BC as build() BLE消费
+    participant BS as ble_scan
+    HL->>HW: set_center_hz(2402/2426/2480)
+    BC->>BC: 16Msps 全16相位解调+AA汉明评分
+    BC->>BS: ble_scan(bits, channel)
+    BS->>BS: 白化(约定已破译)+CRC24
+    BS-->>BC: BleAdvPdu(名称/厂商/flags)
+    BC->>BC: ble_records 入账 + BLE hit 遥测
+</div>
+
+<!-- ============ 8 Interface ============ -->
+<h2 id="iface">8. Interface / Contract</h2>
+<table>
+<tr><th>Interface</th><th>Direction</th><th>Transport</th><th>Payload</th><th>Error</th></tr>
+<tr><td>radio.open/start_rx/stop_rx/set_center_hz/apply</td><td>app → libhackrf</td><td>LoadLibrary 动态符号</td><td>RadioConfig{center_hz,sample_rate,lna,vga,amp}</td><td>错误串入遥测 RADIO:apply.fail；设备打开失败区分 DLL 缺失/未插（#96）</td></tr>
+<tr><td>rx 回调</td><td>libusb → app</td><td>函数指针 trampoline</td><td>int8 交错 IQ 块</td><td>禁止抛出/禁调类方法（只拷贝）</td></tr>
+<tr><td>settings.tsv</td><td>app ↔ 磁盘</td><td>TSV（key\tvalue，# 注释）</td><td>23 项参数；值域钳制越界回默认</td><td>损坏→SETTINGS restore.fail 遥测+状态栏提示；不存在=静默默认</td></tr>
+<tr><td>signals.tsv</td><td>app ↔ 磁盘</td><td>TSV</td><td>SignalEntry{mhz,db,online}</td><td>读写失败静默（非关键路径）</td></tr>
+<tr><td>hackrftool.jsonl</td><td>app → 磁盘</td><td>JSONL（spdlog rotating，主+2 归档）</td><td>{ts,level,cat,event,kv...}</td><td>debug 关闭时 Level::debug 零成本丢弃</td></tr>
+<tr><td>log-assert.py</td><td>脚本 → 日志</td><td>CLI</td><td>"CAT:event,CAT:event" 支持 --order/--tail</td><td>非零退出=断言失败</td></tr>
+<tr><td>命令行模式</td><td>用户 → app</td><td>argv</td><td>auto/autom/autos/autocap/autoradio/autowx/autosc/selftest/selftestsweep/--debug</td><td>selftest 无设备退出码 42=SKIP；命令行模式禁读写设置</td></tr>
+<tr><td>ble-bits-*.txt</td><td>app → 排障</td><td>文本（debug 模式）</td><td>AA 命中突发原始比特+信道</td><td>上限 30 份</td></tr>
+</table>
+<h3>8.1 遥测事件速查（验收断言入口）</h3>
+<table>
+<tr><th>cat:event</th><th>级别</th><th>含义</th></tr>
+<tr><td>LIFE:app.start / rx.start / rx.stop</td><td>info</td><td>生命周期</td></tr>
+<tr><td>LIFE:debug.on / AUDIO:squelch.edge</td><td>info/debug</td><td>debug 模式开关；静噪开合沿+判据数值</td></tr>
+<tr><td>UI:cmd / UI:scroll / UI:state</td><td>info</td><td>点击（code 白名单 0/1 防刷屏）/滑条/状态快照 diff</td></tr>
+<tr><td>RADIO:tune / reconfig / apply.fail</td><td>info/error</td><td>调谐/重配/配置失败带 err</td></tr>
+<tr><td>DSP:frame（1Hz）/ DSP:frame.debug（逐帧）</td><td>info/debug</td><td>峰值/噪底/突发数/ESB 总量</td></tr>
+<tr><td>CAP:demod.debug / ESB:rec.debug / BLE:hop / BLE:hit</td><td>debug/info</td><td>逐突发解调 / 逐 ESB 帧 / BLE 跳频 / BLE 帧命中</td></tr>
+</table>
+
+<!-- ============ 9 State ============ -->
+<h2 id="state">9. State / Lifecycle</h2>
+<h3>9.1 接收主状态</h3>
+<div class="mermaid">
+stateDiagram-v2
+    [*] --> Stopped: 启动（设置恢复→自动开始）
+    Stopped --> Running: toggle_rx / 自检
+    Running --> Running: 改频(热切)/增益/页切换
+    Running --> Running: sweep_on=1 进入全频段(锁20Msps)
+    Running --> Running: ble_mode=1 BLE扫描(锁16Msps/互斥全频段/接管收音)
+    Running --> Stopped: 停止(收全部后台线程)
+</div>
+<h3>9.2 子链互斥关系（运行约束）</h3>
+<table>
+<tr><th>组合</th><th>行为</th></tr>
+<tr><td>全频段扫描 × 收音音频</td><td>互斥：扫描中拒开音频链（B3），提示先退出</td></tr>
+<tr><td>收音音频 × BLE 扫描</td><td>接管：BLE 开启时 ensure_fm(false)（音频链锁 2Msps 与 BLE 16Msps 冲突）</td></tr>
+<tr><td>全频段 × BLE</td><td>互斥：开关处直接拒绝</td></tr>
+<tr><td>采样率切换 × 接收中</td><td>combo_rate 置灰（#100）；收音锁 2Msps / 扫描锁 20Msps / BLE 锁 16Msps</td></tr>
+<tr><td>轨道页 × 音频链</td><td>进轨道页强制关音频（无需收听）</td></tr>
+</table>
+
+<!-- ============ 10 Data Model ============ -->
+<h2 id="dm">10. Data Model</h2>
+<div class="mermaid">
+classDiagram
+    class SpectrumFrame { +seq uint +db[]float +peak[]float }
+    class LiveBurst { +start_sample u64 +samples u64 +peak_db float }
+    class EsbRecord { +tick +start_sample +peak_db +quality +pid +no_ack +interval_ms +interp EsbInterp +address[] +payload[] }
+    class BleRec { +tick +ch +peak_db +quality +pdu BleAdvPdu }
+    class BleAdvPdu { +type +tx_add +adv_a[6] +name string +manufacturer[] +flags +tx_power_dbm }
+    class EsbInterp { +vendor +entropy_bits +looks_encrypted +all_zero +seq_byte +diff_bytes[] }
+    class SignalEntry { +mhz +db +online }
+    class Settings { +23项参数 }
+    LiveBurst "1" --> "*" EsbRecord : 懒解调入账
+    LiveBurst "1" --> "*" BleRec : BLE消费
+    BleRec "1" --> "1" BleAdvPdu
+    EsbRecord "1" --> "1" EsbInterp
+</div>
+<p class="dim">容量上限：live_bursts 突发 500 条/环形 2M 复样本（100ms@20Msps）；esb_records 1000 条；ble_records 500 条；row_cache 800 条淘汰最旧 200。</p>
+
+<!-- ============ 11 NFR ============ -->
+<h2 id="nfr">11. Non-Functional Requirements</h2>
+<table>
+<tr><th>Category</th><th>Requirement</th></tr>
+<tr><td>验收命令</td><td><code>cmake --build --preset x64-release && ctest --preset x64-release</code> 5/5（构建零 error 是前置——陈旧二进制会假绿，lessons L1）</td></tr>
+<tr><td>断言基线</td><td>单测 297 断言只增不减；每轮变更 red→green 优先</td></tr>
+<tr><td>渲染</td><td>build 心跳 ~40fps；拖拽冻结+看门狗自愈（500ms 停顿解冻/10s 强制）；反闪烁契约（禁 CS_HREDRAW/WS_EX_COMPOSITED/TBSTYLE_FLAT）</td></tr>
+<tr><td>日志</td><td>正常会话 info ≤2 行/s；debug 模式 ~120 行/s（1MB 轮转约 70s）；每条 fflush 崩溃安全</td></tr>
+<tr><td>线程</td><td>USB 回调/FM/扫描/BLE 轮换/看门狗各一线程；跨线程只走原子量与专用锁保护缓冲</td></tr>
+<tr><td>兼容性</td><td>Windows 10/11 x64 only（CMake 强制）；DPI 感知 PerMonitorV2；最小窗口 880×520×DPI</td></tr>
+<tr><td>内存</td><td>IQ 环 4MB 字节 + 瀑布/记录缓冲，常驻远低于 100MB</td></tr>
+<tr><td>告警</td><td>/W4 零告警（flux_apply_compiler_options 统一施加）</td></tr>
+<tr><td>自包含</td><td>exe 仅依赖系统 DLL+CRT+libhackrf 三件套；spdlog/WinFlux 源码静态构建</td></tr>
+</table>
+
+<!-- ============ 12 ADR ============ -->
+<h2 id="adr">12. Key Decisions（ADR）</h2>
+<table>
+<tr><th>ID</th><th>Decision</th><th>Status</th><th>Alternatives</th><th>Reason</th><th>Impact</th></tr>
+<tr><td>ADR-001</td><td>libhackrf 用 LoadLibrary 动态加载，不链 MinGW .dll.a</td><td>Accepted</td><td>直接链接导入库</td><td>MSVC 与 MSYS2 构建不兼容</td><td>需手工声明函数指针；三 DLL 随构建复制</td></tr>
+<tr><td>ADR-002</td><td>#52 原生 Win32 骨架 + WinFlux Host 重父化为内容区子窗</td><td>Accepted</td><td>全 WinFlux 自绘 / 全原生</td><td>图表保留 D2D/DComp 管线，控件用原生（可用性）</td><td>两套 UI 体系并存；PrintWindow 截图漏子控件（L6）</td></tr>
+<tr><td>ADR-003</td><td>自研 JSONL logger（#104 增 debug 门控），文件层切 spdlog rotating sink（#105）</td><td>Accepted</td><td>全量换 spdlog API / 纯手写轮转</td><td>格式/断言工具零破坏；轮转命名变为 name.1.jsonl</td><td>telemetry.hpp 不暴露 spdlog 头（void* 持有）</td></tr>
+<tr><td>ADR-004</td><td>#88 三级架构：一级工具栏全局动作，页特有动作/参数进二级行，内容区纯显示</td><td>Accepted</td><td>继续 18 按钮恒显</td><td>用户指令；功能归属一目了然</td><td>命令 ID 不变，遥测/断言兼容</td></tr>
+<tr><td>ADR-005</td><td>#100 接收中采样率置灰+按子链锁率（收音 2M/扫描 20M/BLE 16M）</td><td>Accepted</td><td>允许热切（曾致 use-after-free）</td><td>切率必须停流重配；子链采样率互斥</td><td>切率需先停止对应子链</td></tr>
+<tr><td>ADR-006</td><td>BLE 扫描 16Msps+16 相位+AA 汉明评分选相位</td><td>Accepted</td><td>2Msps 直解（BER 过高全挂 CRC）</td><td>符号定时精度决定 BER</td><td>USB 带宽占用高；BER 仍待匹配滤波/AFC</td></tr>
+<tr><td>ADR-007</td><td>ESB/BLE 均以 CRC 硬门限入账（不过不产出）</td><td>Accepted</td><td>展示所有帧+标记校验</td><td>噪声突发误报率高</td><td>BER 未达标的包完全不可见（BLE 现状）</td></tr>
+<tr><td>ADR-008</td><td>日志验证制度化（L14）：截图仅核对布局，行为验收走 log-assert</td><td>Accepted</td><td>视觉识别</td><td>视觉幻觉两次实证</td><td>所有新功能埋点与代码同轮落地</td></tr>
+</table>
+
+<!-- ============ 13 Risks ============ -->
+<h2 id="risk">13. Risks / Open Issues</h2>
+<table>
+<tr><th>ID</th><th>Issue / Risk</th><th>Impact</th><th>Status</th></tr>
+<tr><td>R-101</td><td>BLE 载荷 BER 过高：AA 捕获正常但 CRC24 距离 8–15/24（随机级），30 份转储已备</td><td>BLE 设备名/RSSI 显示需求阻塞</td><td><span class="tag t-bad">Open</span>需 GFSK 匹配滤波（BT=0.5）+载波 AFC</td></tr>
+<tr><td>R-102</td><td>WinFlux 上游三限制：启动闪现一帧 / 无 fill_circle / tabs 汉字间距</td><td>Low（观感）</td><td><span class="tag t-warn">wontfix-upstream</span></td></tr>
+<tr><td>R-103</td><td>任务栏图标为系统 ShellCache 旧图</td><td>Low</td><td><span class="tag t-ok">重启 explorer 自愈</span></td></tr>
+<tr><td>R-104</td><td>云图状态卡带上方一排灰块占位（仅云图页，疑上游帧残留）</td><td>Low（视觉）</td><td><span class="tag t-warn">记录待查</span></td></tr>
+<tr><td>R-105</td><td>T1.5 真机导频 PLL 偶锁不到位 / T1.6 Meteor 过境实测</td><td>Medium</td><td><span class="tag t-warn">待真机场景</span></td></tr>
+</table>
+
+<!-- ============ 14 待确认项 ============ -->
+<h2>14. 待确认项</h2>
+<ul>
+<li>[ ] BLE 白化约定（种子=信道/预移 1/输出 bit0/反馈 b2^b6）已由 8/13 头部规范校验确认，但尚无 CRC 通过帧佐证——BER 修复后应复验</li>
+<li>[ ] GfskDemod 内部是否含 DC/频偏跟踪（推断无——BLE 弱信号 BER 症状吻合，未逐行核对其 slicer 实现）</li>
+<li>[ ] 手机端 ADV_EXT_IND 扩展广播占比（len 32–63 已放行，但 AD 解析对扩展 PDU 不适用——UI 文案需区分）</li>
+<li>[ ] sigdb 弹窗筛选映射 SigCat::other 与内置列表 all 的差异是否为历史遗留（#62/#55 两代实现）</li>
+</ul>
+
+<!-- ============ RF 基础 ============ -->
+<h2 id="rf">15. RF 基础知识（小白到入门）</h2>
+
+<h3>15.1 频率、波长与频段</h3>
+<p>无线电波以频率（Hz）区分。波长 λ = 光速 c ÷ 频率 f——这个数决定天线长度：天线要"谐振"于目标频率，最常用 λ/4（四分之一波长）。例如 FM 100MHz 的 λ/4 ≈ 75cm，而 2.4GHz 只有 ≈ 3.1cm。</p>
+<table>
+<tr><th>本工具涉及的频段</th><th>频率范围</th><th>λ/4 天线长度</th><th>常见信号</th></tr>
+<tr><td>FM 广播</td><td>87.5–108 MHz</td><td>≈ 70–80 cm</td><td>电台（立体声导频 19kHz）</td></tr>
+<tr><td>NOAA/Meteor 气象卫星</td><td>137–138 MHz</td><td>≈ 54 cm</td><td>APT 模拟云图 / LRPT 数字云图</td></tr>
+<tr><td>2.4 GHz ISM</td><td>2400–2483.5 MHz</td><td>≈ 3.1 cm</td><td>nRF24 ESB（鼠标键盘）、BLE 蓝牙、WiFi</td></tr>
+<tr><td>BLE 广播信道</td><td>2402 / 2426 / 2480 MHz（37/38/39）</td><td>同上</td><td>设备名广播包（每 20ms–10s 一发）</td></tr>
+</table>
+
+<h3>15.2 采样率与带宽（奈奎斯特）</h3>
+<p>数字接收机不能直接"听"模拟信号，要按一定速率采样。<b>采样率必须 ≥ 想看的带宽的 2 倍</b>（奈奎斯特）。本工具里采样率的实际意义：</p>
+<table>
+<tr><th>采样率档位</th><th>能看的频谱窗宽</th><th>典型用途</th><th>代价</th></tr>
+<tr><td>2 Msps</td><td>±1 MHz（2MHz 窗）</td><td>收音音频链（FM 通道带宽 250k）</td><td>CPU/USB 最省</td></tr>
+<tr><td>8–16 Msps</td><td>±4–8 MHz</td><td>BLE 解调（符号定时精度需要）</td><td>中等</td></tr>
+<tr><td>20 Msps</td><td>±10 MHz（够 ESB 符号定时 + 全频段 5 段拼接）</td><td>ESB 抓包/全频段扫描</td><td>USB/CPU 满负荷</td></tr>
+</table>
+<p class="dim">这也是为什么软件在收音时强制 2Msps、BLE 时强制 16Msps、全频段强制 20Msps（ADR-005）——不是随意的，是子链的物理需要。</p>
+
+<h3>15.3 dB / dBm / dBFS：别怕对数单位</h3>
+<table>
+<tr><th>单位</th><th>含义</th><th>本工具哪里出现</th></tr>
+<tr><td>dB</td><td>比值（差多少倍）</td><td>峰均差 >8dB 判有台（静噪门限）</td></tr>
+<tr><td>dBm</td><td>绝对功率（0dBm=1mW）</td><td>信号强度惯例单位（信号库列表）</td></tr>
+<tr><td>dBFS</td><td>相对满量程（0=最大，负数）</td><td>频谱纵轴、突发峰值（127 满幅=0dBFS）</td></tr>
+</table>
+<p class="dim">口诀：每 ±6dB ≈ 功率 ±4 倍（电压 ±2 倍）；dB 只能"相减做比较"，说"信号是 -60dB"其实是 -60dBm 的简称。</p>
+
+<h3>15.4 IQ 采样：一台设备为什么叫"软件无线电"</h3>
+<p>HackRF 输出的不是"音频"也不是"电压波形"，而是 <b>I/Q 两路</b>（同相/正交）——把中心频率附近的整段频谱"搬"到基带记录下来。中心频率由你设定，I/Q 数据里包含了这段窗内<b>所有</b>信号。所以"换个频率抓"= 改中心频率（热切，毫秒级），"换个协议解"= 对同一份 IQ 用不同解调器。本工具的 burst 检测→GFSK→ESB/BLE 全部发生在 IQ 之后。</p>
+
+<h3>15.5 数字调制：本工具四类信号怎么" encoded "</h3>
+<table>
+<tr><th>信号</th><th>调制方式</th><th>速率</th><th>帧结构要点</th><th>工具内解析器</th></tr>
+<tr><td>nRF24 ESB</td><td>GFSK（频偏 ±250k 附近，1–2Mbps）</td><td>1/2 Mbps</td><td>前导+地址 3–5B+PCF(9b)+载荷 0–32B+CRC16</td><td>burst_detector→gfsk→esb（CRC16 硬门限）</td></tr>
+<tr><td>BLE 广播</td><td>GFSK（BT=0.5，频偏 ±250k）</td><td>1 Mbps</td><td>前导+接入码 0x8E89BED6+白化(PDU+CRC24)；AD 结构含设备名 0x09/厂商 0xFF</td><td>ble_scan（CRC24 硬门限）</td></tr>
+<tr><td>FM 广播</td><td>模拟调频</td><td>—</td><td>19kHz 导频=立体声标志；RDS 在 57kHz</td><td>fm 链路（PLL 立体声解码）</td></tr>
+<tr><td>NOAA APT</td><td>模拟调频副载波</td><td>2 行/秒</td><td>1040Hz 同步头+2080 像素/行</td><td>apt（行同步+AGC）</td></tr>
+</table>
+<div class="note"><b>GFSK 是什么：</b>用"频率偏正/偏负"表示 0/1。解调器把每个符号的瞬时频率判成正/负即恢复比特。难点在符号时钟对齐（本工具用多相位试解+AA 图案评分）和频偏校准。BLE 还要对载荷做"白化"搅频（每个信道一种伪随机序列），这就是为什么约定错了 CRC 永远不过——#109 攻坚正是靠离线穷举破解了这个约定。</div>
+
+<h3>15.6 噪底、信噪比与"为什么我全是噪声"</h3>
+<ul>
+<li><b>噪底</b>：没有信号时频谱的底线。天线越差/增益越不合理，噪底相对越高。</li>
+<li><b>信噪比 SNR</b>：信号峰高出噪底的 dB 数。数字解调要求 SNR 足够高——BLE 包 CRC 过不过，本质就是全帧累积误码是否 <0.5%。</li>
+<li><b>增益三级</b>：AMP（板载功放，开=更灵敏但易饱和）→ LNA（低噪放 0–40dB，主力）→ VGA（基带 0–62dB，兜底）。调法：先 LNA 上到信号刚出现，再 VGA 微调；<b>增益过高会饱和</b>——表现为突发时长全接近 100ms 连片（工具会在抓包页提示你降 LNA/VGA）。</li>
+<li><b>静噪（Squelch）</b>：收音时"没信号就静音"的守门员。本工具用双条件（峰均差>8dB 且峰值>−55dB），防噪声台假开门。</li>
+</ul>
+
+<!-- ============ HackRF 使用 ============ -->
+<h2 id="hackrf">16. HackRF One 使用指南（本工具语境）</h2>
+<h3>16.1 硬件与启动</h3>
+<table>
+<tr><th>项</th><th>说明</th></tr>
+<tr><td>频率范围</td><td>1 MHz – 6 GHz（2.4G/FM/137M 气象卫星全部覆盖）</td></tr>
+<tr><td>采样</td><td>2–20 Msps，8bit IQ（本工具自动按子链选档）</td></tr>
+<tr><td>USB</td><td><b>独占设备</b>：第二个实例会互踢；多工具（SDRSharp 等）不可同时用</td></tr>
+<tr><td>固件坑</td><td>每次插 USB 先 <code>hackrf_spiflash -R</code> 软复位一次（固件已知 bug，否则可能收不到/状态 wedge）</td></tr>
+<tr><td>天线口</td><td>SMA 母口；50Ω 阻抗</td></tr>
+<tr><td>合规</td><td><b>只收不发</b>（工具与文档同此边界）；抓包对象限自有设备</td></tr>
+</table>
+<h3>16.2 本工具典型操作流</h3>
+<table>
+<tr><th>想做什么</th><th>操作</th><th>验收/排障</th></tr>
+<tr><td>看 2.4G 频谱</td><td>频谱页 → 开始；缩放 ×1–×8 与 Y 档在频谱页二级行</td><td>DSP:frame.debug 看 peak/噪底</td></tr>
+<tr><td>抓 nRF24 ESB 包</td><td>抓包页 → 开始（默认 20Msps）；突发阈值默认 −40dB</td><td>ESB 有效帧列表实时刷新；CAP:demod.debug 看每突发质量</td></tr>
+<tr><td>只抓某个地址</td><td>抓包行「地址」输 hex（如 74F77017）+ 勾「仅此地址」</td><td>横幅出现"仅地址"徽章</td></tr>
+<tr><td>BLE 蓝牙设备扫描</td><td>抓包页勾「BLE 扫描」（需设备在广播；手机开蓝牙即可）</td><td>BLE 扫描徽章+信道显示；BLE:hit 遥测</td></tr>
+<tr><td>听 FM</td><td>收音页 → 开始；「扫描信号」积累信号库 → 右侧面板单击收听</td><td>STEREO 徽章+导频值；AUDIO:squelch.edge 看门限</td></tr>
+<tr><td>收气象卫星</td><td>云图页选在役卫星（METEOR-M2 系）→ 等过境（页内倒计时）</td><td>状态卡三态：成像/有信号未同步/等待过境</td></tr>
+<tr><td>排障万能三步</td><td colspan="2">① <code>HACKRFTOOL_DEBUG=1</code> 跑一段 ② <code>python tools/log-assert.py hackrftool.jsonl "DSP:frame.debug"</code> 逐帧回放 ③ 对照 AGENTS.md 遥测速查表定位环节</td></tr>
+</table>
+<div class="warnbox"><b>新手三大坑（本仓库 lessons 实录）：</b>① 构建"成功"但 exe 被残留进程锁住没更新——ctest 全绿是假的，先清进程；② 视觉识别不可靠——LNA 40 幻觉、波形有数据幻觉各两次实证，行为验收一律走日志断言；③ 并行开两个会话/两个实例会互踩 USB。</div>
+
+<!-- ============ 天线 ============ -->
+<h2 id="ant">17. 抓不同信号要不要换天线？（要，看这张表）</h2>
+<p>天线 = 谐振器 + 方向器。两个原则：① <b>长度匹配波长</b>（λ/4 起步）；② <b>频段对上</b>（2.4G 天线收 FM 效率极低，反之亦然）。本工具四类目标的天线建议：</p>
+<table>
+<tr><th>目标</th><th>推荐天线</th><th>要点</th><th>省钱方案</th></tr>
+<tr><td>2.4G ISM（ESB 鼠标键盘 / BLE）</td><td>2.4G 胶棒天线（WiFi 鞭状）</td><td>λ/4≈31mm，抓自家设备足够；BLE 设备功率小（0–10dBm），离近点/上高增益</td><td>原装伸缩鞭拉到最短档</td></tr>
+<tr><td>FM 广播</td><td>拉杆天线 75–80cm 或电视兔耳</td><td>本地强台随便收；弱台/远程台看方向</td><td>一根 75cm 电线也能凑合（效率低）</td></tr>
+<tr><td>137M 气象卫星</td><td><b>右旋圆极化</b>（QFH"跷跷板"天线 / V 字交叉偶极）</td><td>卫星过境时姿态旋转，线极化会深度衰落；V 型天线两臂 120° 展开成本最低</td><td>DIY 铜管 QFH（社区成熟图纸）</td></tr>
+<tr><td>全频段扫</td><td>宽带盘锥/伸缩鞭</td><td>扫描阶段宽带优先，锁定目标再换专用</td><td>伸缩鞭（妥协但能用）</td></tr>
+</table>
+<table>
+<tr><th>概念</th><th>一句话理解</th></tr>
+<tr><td>增益 dBi</td><td>能量"攒"向某方向的倍数——高增益=更窄的波束，不是凭空放大</td></tr>
+<tr><td>方向性</td><td>鞭状=360° 水平全向；八木/贴片=定向，要对准信号来向</td></tr>
+<tr><td>驻波 SWR</td><td>天线与 50Ω 系统的匹配度，>3 说明天线不对/接触不良，能量反射回机器</td></tr>
+<tr><td>极化</td><td>电场振动方向；收卫星强烈建议圆极化（线极化过境中段会衰落 20dB+）</td></tr>
+</table>
+<div class="note"><b>入门路线建议：</b>先用原装伸缩鞭把 2.4G 频谱/ESB 抓包/FM 收音三条链路跑通（本工具所有页面都不需要额外硬件），再按兴趣升级：收卫星 DIY 一副 QFH（材料 50 元内），玩 BLE 把 2.4G 胶棒换好一点的（如 TerraTec/Nagoya NA-771 剪裁版）。天线永远排在"玄学增益数值"之前——先保证天线谐振，再谈增益。</div>
+
+<footer>
+HackRFTool 架构文档 · 按架构文档规范生成（图表/表格/ADR/待确认项）· 事实来源：src/ 代码与 docs/evolve-log.md #1–#109 · 合规边界：只收不发，抓包限自有设备
+</footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'base',themeVariables:{primaryColor:'#e8f0fe',primaryTextColor:'#1a2233',lineColor:'#5a6a8a',fontSize:'14px'}});</script>
+</body>
+</html>
