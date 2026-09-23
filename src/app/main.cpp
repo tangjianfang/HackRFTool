@@ -502,7 +502,8 @@ void device_open_failed(App& app, const std::string& err) {
 
 void ensure_fm(App& app, bool on);   // 收音机音频链开关（定义在收音机节）
 void reconfigure_rx(App& app, const hackrftool::radio::RadioConfig& cfg);
-void set_ble_live(App& app, bool on);   // BLE 广播信道轮换（#109，定义在下方）
+void set_ble_live(App& app, bool on);
+void ble_engage(App& app);   // #111：BLE 接管统一入口（定义在下方）
 
 // BLE 广播信道（37/38/39 = 2402/2426/2480 MHz）轮换线程：各驻留 160ms
 //（广播者间隔 20ms~10s，三信道轮换采样；绝不在 UI 线程改频——同 sweep 契约）
@@ -542,6 +543,35 @@ void set_ble_live(App& app, bool on) {
         app.ble_live.store(0);
     }
 }
+
+// #111：BLE 接管统一入口——手动勾选与自动恢复两条启动路径都必须走
+//（首版自动恢复漏锁 16Msps，2Msps 下 2 采样/符号×中窗 0.5 积分样本数
+// 为 0 → 比特全零假象，真机日志实锤）。UI 线程调用。
+void ble_engage(App& app) {
+    if (app.fm_on.load()) ensure_fm(app, false);   // 音频链锁 2Msps，让位
+    if (app.lna < 32 && !app.gains_pinned) {
+        app.lna = 40;
+        app.vga = std::max(app.vga, 40u);
+        app.amp = true;
+        if (app.track_lna != nullptr)
+            SendMessageW(app.track_lna, TBM_SETPOS, TRUE, 40);
+        if (app.track_vga != nullptr)
+            SendMessageW(app.track_vga, TBM_SETPOS, TRUE, LPARAM(app.vga));
+        if (app.check_amp != nullptr)
+            SendMessageW(app.check_amp, BM_SETCHECK, BST_CHECKED, 0);
+        if (app.lbl_lna != nullptr) SetWindowTextW(app.lbl_lna, L"LNA 40");
+        if (app.lbl_vga != nullptr)
+            SetWindowTextW(app.lbl_vga,
+                           (L"VGA " + std::to_wstring(app.vga)).c_str());
+    }
+    if (app.rate_index != 3) {
+        app.rate_index = 3;   // BLE 1M PHY：16 采样/符号
+        if (app.combo_rate != nullptr)
+            SendMessageW(app.combo_rate, CB_SETCURSEL, 3, 0);
+    }
+    if (app.running) reconfigure_rx(app, current_radio_cfg(app));
+    set_ble_live(app, true);
+}
 void update_apt_on(App& app);        // APT 解码开关（定义在收音机节）
 
 void toggle_rx(App& app) {
@@ -579,8 +609,8 @@ void toggle_rx(App& app) {
          {"vga", std::to_string(app.vga)},
          {"src", "toolbar"}});
     if (app.sweep_on == 1) set_sweep_live(app, true);
-    if (app.ble_mode) set_ble_live(app, true);   // #109：BLE 模式随接收恢复
-    if (app.page >= 3) ensure_fm(app, true);   // 收音/云图页直接起音频链
+    if (app.ble_mode) ble_engage(app);   // #111：接管统一入口（锁 16Msps 等）
+    if (app.page >= 3 && !app.ble_mode) ensure_fm(app, true);   // BLE 让位
     update_apt_on(app);
 }
 
@@ -2123,41 +2153,73 @@ flux::ElementPtr build(App& app) {
                 ble_fs, 1e6, 250e3);   // BLE 1M PHY：1 Mbps，频偏 250 kHz
             hackrftool::dsp::GfskResult r;
             float best_q = -1.0f;
-            // 16Msps=16 采样/符号：全 16 相位试解，按 AA 区汉明距离选优
-            //（前导 8b + 接入码 32b 为已知图案——相位=符号时钟）
+            // #111 双通道竞速：①原始全窗 16 相位（历史验证可解 AA 的路径）
+            // ②AFC 去旋转+中窗 16 相位（大频偏场景）。按 AA 汉明距离择优
+            // ——短突发 AFC 估计噪声（±64kHz@40 符号）不会反噬：最差落回①
             unsigned best_aa_err = UINT_MAX;
-            for (unsigned off : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u,
-                                 11u, 12u, 13u, 14u, 15u}) {
-                if (n_demod <= off) break;
-                const unsigned long long avail = n_demod - off;
-                std::vector<std::complex<float>> cmplx(avail);
-                for (unsigned long long i = 0; i < avail; ++i)
-                    cmplx[static_cast<std::size_t>(i)] = {
-                        float(slice[static_cast<std::size_t>((i + off) * 2)]),
-                        float(slice[static_cast<std::size_t>((i + off) * 2 + 1)])};
-                auto cand = demod.demod(cmplx, 0);
+            unsigned aa_raw = 0, aa_afc = 0;
+            const auto try_phase = [&](const std::vector<std::complex<float>>& s,
+                                       unsigned off, float wfrac,
+                                       unsigned* aa_out) {
+                auto cand = demod.demod(
+                    {s.begin() + long(off), s.end()}, 0, wfrac);
                 float q = 0.0f;
                 if (!cand.quality.empty()) {
-                    for (const float x : cand.quality) q += std::min(1.0f, std::abs(x));
+                    for (const float x : cand.quality)
+                        q += std::min(1.0f, std::abs(x));
                     q /= float(cand.quality.size());
                 }
-                // AA 汉明距离：preamble 0xAA + 接入码 D6 BE 89 8E（LSB-first）
                 unsigned aa_err = UINT_MAX;
                 if (cand.bits.size() >= 40) {
-                    static const unsigned char kExp[5] = {0xAA, 0xD6, 0xBE, 0x89, 0x8E};
+                    static const unsigned char kExp[5] = {0xAA, 0xD6, 0xBE,
+                                                          0x89, 0x8E};
                     aa_err = 0;
                     for (std::size_t bi = 0; bi < 40; ++bi)
                         aa_err += unsigned(((cand.bits[bi] & 1u) !=
                                             ((kExp[bi / 8] >> (bi % 8)) & 1u)));
                 }
+                if (aa_out != nullptr) *aa_out = aa_err;
                 if (aa_err < best_aa_err ||
                     (aa_err == best_aa_err && q > best_q)) {
                     best_aa_err = aa_err;
                     best_q = q;
                     r = std::move(cand);
                 }
-                if (best_aa_err == 0) break;   // 完美相位提前收工
+            };
+            // 原始 IQ（无 AFC，全窗）
+            std::vector<std::complex<float>> raw(
+                static_cast<std::size_t>(n_demod));
+            for (unsigned long long i = 0; i < n_demod; ++i)
+                raw[static_cast<std::size_t>(i)] = {
+                    float(slice[static_cast<std::size_t>(i * 2)]),
+                    float(slice[static_cast<std::size_t>(i * 2 + 1)])};
+            unsigned best_raw_err = UINT_MAX;
+            for (unsigned off = 0; off < 16 && off < n_demod; ++off) {
+                try_phase(raw, off, 1.0f, off == 0 ? &best_raw_err : nullptr);
+                if (best_aa_err == 0) break;
             }
+            aa_raw = best_aa_err == UINT_MAX ? 0 : best_aa_err;
+            unsigned best_afc_err = UINT_MAX;
+            if (best_aa_err != 0 && n_demod >= 16) {
+                // AFC：中段 80% 估计频偏（跳过突发首尾瞬态），去旋转再试
+                const double foff = hackrftool::dsp::estimate_freq_offset_rad(
+                    raw, n_demod / 10,
+                    n_demod - n_demod / 10);
+                std::vector<std::complex<float>> derot(
+                    static_cast<std::size_t>(n_demod));
+                for (unsigned long long i = 0; i < n_demod; ++i) {
+                    const double ph = -foff * double(i);
+                    derot[static_cast<std::size_t>(i)] =
+                        raw[static_cast<std::size_t>(i)] *
+                        std::complex<float>(float(std::cos(ph)),
+                                            float(std::sin(ph)));
+                }
+                for (unsigned off = 0; off < 16 && off < n_demod; ++off) {
+                    try_phase(derot, off, 0.5f, off == 0 ? &best_afc_err : nullptr);
+                    if (best_aa_err == 0) break;
+                }
+            }
+            aa_afc = best_afc_err == UINT_MAX ? aa_raw : best_afc_err;
             for (auto& fr : hackrftool::dsp::ble_scan(r.bits, ch_now)) {
                 App::BleRec rec;
                 rec.tick = GetTickCount64();
@@ -2201,6 +2263,8 @@ flux::ElementPtr build(App& app) {
                         hackrftool::log::Level::debug, "BLE", "burst.sample",
                         {{"aa", std::to_string(
                                     hackrftool::dsp::ble_count_aa(r.bits))},
+                         {"err_raw", std::to_string(aa_raw)},
+                         {"err_afc", std::to_string(aa_afc)},
                          {"bits", std::to_string(r.bits.size())},
                          {"q", std::to_string(best_q < 0.f ? 0.f : best_q)}});
                 unsigned vc[16] = {};
@@ -4216,37 +4280,15 @@ void on_command(App& app, int id, int code, HWND from) {
                 app.status = L"全频段扫描与 BLE 互斥（先退出全频段）";
                 break;
             }
-            if (on && app.fm_on.load()) {
-                ensure_fm(app, false);   // 音频链锁 2Msps+固定频率，让位 BLE
-                app.status = L"BLE 扫描已接管（收音音频链暂停）";
-            }
-            if (on && app.rate_index != 3) {
-                // #109：BLE 1M PHY 用 16Msps（16 采样/符号）+16 相位全扫+
-                // AA 相关评分——8Msps/4 相位下 BER 随帧长累积，CRC24 全挂
-                //（真机 150s 实测头部对、CRC 全错的根因）；同收音页强制策略
-                app.rate_index = 3;
-                SendMessageW(app.combo_rate, CB_SETCURSEL, 3, 0);
-                if (app.running) reconfigure_rx(app, current_radio_cfg(app));
-            }
-            if (on && app.lna < 32 && !app.gains_pinned) {
-                // BLE 广播包弱（手机 0~10dBm）：提增益到收音页同款缺省
-                app.lna = 40;
-                app.vga = std::max(app.vga, 40u);
-                app.amp = true;
-                SendMessageW(app.track_lna, TBM_SETPOS, TRUE, LPARAM(40));
-                SendMessageW(app.track_vga, TBM_SETPOS, TRUE, LPARAM(app.vga));
-                if (app.check_amp != nullptr)
-                    SendMessageW(app.check_amp, BM_SETCHECK, BST_CHECKED, 0);
-                SetWindowTextW(app.lbl_lna, L"LNA 40");
-                SetWindowTextW(app.lbl_vga,
-                               (L"VGA " + std::to_wstring(app.vga)).c_str());
-                if (app.running) {
-                    hackrftool::radio::RadioConfig cfg = current_radio_cfg(app);
-                    reconfigure_rx(app, cfg);
-                }
-            }
             app.ble_mode = on;
-            if (app.running) set_ble_live(app, on);
+            // #111：接管/释放统一入口（锁 16Msps+增益缺省+音频链让位+
+            // 重配置——与自动恢复路径同一份逻辑）
+            if (on && app.running) {
+                ble_engage(app);
+                app.status = L"BLE 扫描中（16 Msps，广播信道 37/38/39 轮换）";
+            } else {
+                set_ble_live(app, on);
+            }
             hackrftool::log::log_telemetry(
                 hackrftool::log::Level::info, "CAP", on ? "ble.on" : "ble.off",
                 {{"ch", std::to_string(unsigned(app.ble_ch.load()))}});
@@ -4678,8 +4720,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
                      {"lna", std::to_string(app.lna)},
                      {"vga", std::to_string(app.vga)}});
                 if (app.sweep_on == 1) set_sweep_live(app, true);
-                if (app.ble_mode) set_ble_live(app, true);   // #109：自动恢复同享
-                if (app.page >= 3) ensure_fm(app, true);
+                if (app.ble_mode) ble_engage(app);   // #111：统一接管入口
+                if (app.page >= 3 && !app.ble_mode) ensure_fm(app, true);
                 update_apt_on(app);
             } else {
                 app.status = L"启动接收失败: " + widen(err);

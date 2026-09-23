@@ -289,6 +289,56 @@ static void test_gfsk_roundtrip() {
     check(qmin > 0.3f, "符号置信度健康");
 }
 
+// AFC + 匹配窗（#111）：模拟 BLE 场景——晶振偏差叠加在符号上（判决阈值
+// 0 偏移），老 demod 误码、AFC 去旋转+中窗积分后全对
+static void test_gfsk_afc_window() {
+    using hackrftool::dsp::GfskDemod;
+    using hackrftool::dsp::estimate_freq_offset_rad;
+    unsigned rng = 99u;
+    const auto rnd = [&rng] {
+        rng = rng * 1664525u + 1013904223u;
+        return (rng >> 31) & 1u;
+    };
+    std::vector<unsigned> bits(200);
+    for (auto& b : bits) b = rnd();
+    // BLE 参数：16Msps / 1Mbps / 频偏 250kHz，叠加 +200kHz 载波偏差
+    //（>0.7×dev 的符号均值裕量，足以翻转弱符号——真机 BLE 晶振偏差
+    // 可达 ±120kHz 且叠加噪声，同样机制）
+    auto wave = gfsk_modulate(bits, 16, 250e3, 16e6);
+    const double f_off_hz = 200e3;
+    const double w = 2.0 * 3.14159265358979323846 * f_off_hz / 16e6;
+    for (std::size_t i = 0; i < wave.size(); ++i) {
+        const double ph = w * double(i);
+        wave[i] *= std::complex<float>(float(std::cos(ph)),
+                                       float(std::sin(ph)));
+    }
+    const GfskDemod plain(16e6, 1e6, 250e3);
+    const auto r0 = plain.demod(wave, 0);
+    std::size_t err0 = 0;
+    for (std::size_t i = 0; i < bits.size(); ++i)
+        if (unsigned(r0.bits[i] & 1u) != bits[i]) ++err0;
+    check(err0 > 8, ("无 AFC 时频偏致显著误码（实测 " + std::to_string(err0) +
+                     " bit）")
+                        .c_str());
+    // AFC：估计均值相偏并去旋转
+    const double off = estimate_freq_offset_rad(wave);
+    // 圆均值含有限平均噪声（±π 摆动 / √N），15% 容差（真机典型偏移
+    // 0.01–0.05 rad/样本，估计 std ≈ 0.003）
+    check(std::abs(off - w) < 0.15 * w, "频偏估计准确（±15%）");
+    std::vector<std::complex<float>> fixed(wave.size());
+    for (std::size_t i = 0; i < wave.size(); ++i) {
+        const double ph = -off * double(i);
+        fixed[i] = wave[i] * std::complex<float>(float(std::cos(ph)),
+                                                 float(std::sin(ph)));
+    }
+    // 中窗积分（眼图张开区）进一步压 ISI
+    const auto r1 = plain.demod(fixed, 0, 0.5f);
+    std::size_t err1 = 0;
+    for (std::size_t i = 0; i < bits.size(); ++i)
+        if (unsigned(r1.bits[i] & 1u) != bits[i]) ++err1;
+    check(err1 == 0, "AFC+中窗积分后零误码");
+}
+
 static void test_gfsk_short_input() {
     hackrftool::dsp::GfskDemod demod(20e6, 1e6, 160e3);
     check(demod.demod({}, 0).bits.empty(), "空输入返回空");
@@ -1866,6 +1916,7 @@ int main() {
     test_monitor_stats();
     test_monitor_ring_and_csv();
     test_gfsk_roundtrip();
+    test_gfsk_afc_window();
     test_gfsk_roundtrip_2m();
     test_gfsk_short_input();
     test_burst_detector();
