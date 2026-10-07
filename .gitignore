@@ -35,7 +35,10 @@ selftest-report-*.txt
 dumps/
 cdb-crash.log
 selfclick.log
-dumps/
 .zcode/
 *.lnk
 hover-*.png
+
+# Python 缓存
+__pycache__/
+*.pyc
