@@ -1,6 +1,8 @@
 #include "dsp/ble.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <map>
 
 namespace hackrftool::dsp {
 
@@ -267,6 +269,45 @@ std::vector<BleAdvFrame> ble_scan(const std::vector<std::uint8_t>& bits,
         i = end_bit;   // 跳过整帧
     }
     return out;
+}
+
+std::vector<BleDevice> ble_aggregate_devices(
+    const std::vector<BleRecView>& records) {
+    std::map<std::vector<std::uint8_t>, BleDevice> by_addr;
+    for (const auto& v : records) {
+        if (v.adv_a == nullptr || v.adv_a->size() != 6) continue;
+        auto& d = by_addr[*v.adv_a];
+        d.adv_a = *v.adv_a;
+        if (v.name != nullptr && !v.name->empty()) d.name = *v.name;
+        if (v.tick >= d.last_tick) {
+            d.last_tick = v.tick;
+            d.last_peak_db = v.peak_db;
+            d.last_ch = v.ch;
+        }
+        ++d.count;
+    }
+    std::vector<BleDevice> out;
+    out.reserve(by_addr.size());
+    for (auto& [_, d] : by_addr) out.push_back(std::move(d));
+    std::sort(out.begin(), out.end(),
+              [](const BleDevice& a, const BleDevice& b) {
+                  return a.last_tick > b.last_tick;
+              });
+    return out;
+}
+
+std::string ble_device_row(const BleDevice& d) {
+    std::string mac;
+    for (const std::uint8_t a : d.adv_a) {
+        char ab[4];
+        std::snprintf(ab, sizeof ab, "%02X", a);
+        mac += ab;
+    }
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "%-24s %s  %+.1f dB  ch%u  x%u",
+                  d.name.empty() ? "(未广播名称)" : d.name.c_str(), mac.c_str(),
+                  double(d.last_peak_db), d.last_ch, d.count);
+    return buf;
 }
 
 } // namespace hackrftool::dsp

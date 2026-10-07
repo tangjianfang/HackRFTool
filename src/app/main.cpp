@@ -1755,6 +1755,38 @@ flux::ElementPtr capture_display(App& app, const flux::Palette& pal) {
     page_el->children.push_back(
         flux::scroll_view(std::move(esb_list), std::move(esb_scroll_p)));
     page_el->children.push_back(std::move(detail_el));
+    // BLE 设备表（#112 终层）：AdvA 去重——设备名/MAC/RSSI/信道/帧数，
+    // 最近出现优先（层 4：实时突发→ESB 有效帧→BLE 帧→设备表）
+    {
+        std::vector<hackrftool::dsp::BleRecView> views;
+        views.reserve(app.ble_records.size());
+        for (const auto& r : app.ble_records)
+            views.push_back({&r.pdu.adv_a, &r.pdu.name, r.peak_db, r.ch,
+                             r.tick});
+        const auto devs = hackrftool::dsp::ble_aggregate_devices(views);
+        flux::Props h_p;
+        h_p.text_align = flux::Align::start;
+        h_p.bold = true;
+        page_el->children.push_back(flux::ui::caption(
+            pal, devs.empty()
+                     ? L"BLE 设备：暂无——勾选「BLE 扫描」后，附近蓝牙设备"
+                       L"的广播名称/信号强度将出现在这里（手机开蓝牙屏幕亮起"
+                       L"即广播）"
+                     : L"BLE 设备 " + std::to_wstring(devs.size()) +
+                           L" 台（名称 | MAC | RSSI | 信道 | 帧数，最近优先）",
+            std::move(h_p)));
+        const std::size_t n_dev = std::min<std::size_t>(devs.size(), 20);
+        for (std::size_t k = 0; k < n_dev; ++k) {
+            flux::Props row_p;
+            row_p.text_align = flux::Align::start;
+            row_p.font_size_pt = 13.0f;
+            row_p.text_color = pal.text;
+            page_el->children.push_back(flux::label(
+                widen(hackrftool::dsp::ble_device_row(devs[k])),
+                std::move(row_p)));
+        }
+    }
+
     // 突发预览降为固定高度辅助区（能量突发含未解出 ESB 的，仍可观察增益状态）
     flux::Props burst_scroll_p;
     burst_scroll_p.height = 120.0f;

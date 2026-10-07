@@ -723,6 +723,38 @@ static void test_ble_multi_channel_and_crc() {
     }
 }
 
+// 设备表聚合与显示（#112）：去重/名称择优/最近优先/行文本可读
+static void test_ble_device_table() {
+    using namespace hackrftool::dsp;
+    const std::vector<std::uint8_t> mac1 = {1, 2, 3, 4, 5, 6};
+    const std::vector<std::uint8_t> mac2 = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+    const std::string n1 = "My-Phone";
+    const std::string n1b = "My-Phone-2";   // SCAN_RSP 更新名
+    const std::string empty;
+    std::vector<BleRecView> recs = {
+        {&mac1, &empty, -60.5f, 37, 100},   // 首帧无名
+        {&mac1, &n1, -55.0f, 38, 200},      // 带名
+        {&mac1, &n1b, -58.2f, 39, 300},     // 更新名+最新时刻
+        {&mac2, &empty, -71.0f, 39, 150},   // 未广播名称设备
+    };
+    const auto devs = ble_aggregate_devices(recs);
+    check(devs.size() == 2, "按 AdvA 去重为 2 台设备");
+    if (!devs.empty()) {
+        // 最近出现优先：mac1(300) 在前
+        check(devs[0].adv_a == mac1, "最近出现设备排前");
+        check(devs[0].name == "My-Phone-2", "名称取最新非空值");
+        check(std::abs(devs[0].last_peak_db - (-58.2f)) < 0.01f,
+              "RSSI 取最近帧峰值");
+        check(devs[0].count == 3, "帧数累计（去重后 3）");
+        const std::string row = ble_device_row(devs[0]);
+        check(row.find("My-Phone-2") != std::string::npos, "行含设备名");
+        check(row.find("-58.2 dB") != std::string::npos, "行含 RSSI");
+        check(row.find("010203040506") != std::string::npos, "行含 MAC");
+        const std::string row2 = ble_device_row(devs[1]);
+        check(row2.find("未广播名称") != std::string::npos, "无名设备占位文案");
+    }
+}
+
 static void test_ble_noise_and_scan_rsp() {
     using namespace hackrftool::dsp;
     // 随机比特无帧
@@ -1932,6 +1964,7 @@ int main() {
     test_ble_roundtrip();
     test_ble_multi_channel_and_crc();
     test_ble_noise_and_scan_rsp();
+    test_ble_device_table();
     test_end_to_end_pipeline();
     test_iq_recorder_contract_edges();
     test_burst_detector_edges();
